@@ -3,7 +3,7 @@ import { createLimitedAnalysis, normalizeWebsiteUrl } from './analyzer'
 
 describe('normalizeWebsiteUrl', () => {
   it('adds HTTPS when a protocol is omitted', () => {
-    expect(normalizeWebsiteUrl('example.com')).toBe('https://example.com/')
+    expect(normalizeWebsiteUrl('webmcp.dev')).toBe('https://webmcp.dev/')
   })
 
   it('rejects embedded credentials', () => {
@@ -40,6 +40,10 @@ describe('normalizeWebsiteUrl', () => {
     'https://[2002::1]',
     'https://[3fff::1]',
     'https://[ff02::1]',
+    'https://router.home.arpa',
+    'https://site.test',
+    'https://example.invalid',
+    'https://example.com',
     'https://router.local',
   ])('rejects the non-public address %s', (value) => {
     expect(() => normalizeWebsiteUrl(value)).toThrow(
@@ -56,15 +60,15 @@ describe('normalizeWebsiteUrl', () => {
   })
 
   it('preserves an explicit port on a public hostname', () => {
-    expect(normalizeWebsiteUrl('example.com:8443/path')).toBe(
-      'https://example.com:8443/path',
+    expect(normalizeWebsiteUrl('webmcp.dev:8443/path')).toBe(
+      'https://webmcp.dev:8443/path',
     )
   })
 })
 
 describe('createLimitedAnalysis', () => {
   it('never fabricates capabilities for an uninspected URL', () => {
-    const result = createLimitedAnalysis('https://example.com/products')
+    const result = createLimitedAnalysis('https://webmcp.dev/products')
     expect(result.limited).toBe(true)
     expect(result.analysis.capabilities).toEqual([])
     expect(result.analysis.forms).toEqual([])

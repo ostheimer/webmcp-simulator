@@ -81,6 +81,31 @@ const nonPublicGlobalUnicastRanges = [
   ['3fff::', 20],
 ] as const
 
+// Source: IANA Special-Use Domain Names registry. The designation applies to
+// each listed name and all of its subdomains. Reverse-DNS zones are grouped by
+// their common suffix because none is a public website destination.
+const specialUseDomainSuffixes = [
+  'alt',
+  '6tisch.arpa',
+  'eap.arpa',
+  'eap-noob.arpa',
+  'home.arpa',
+  'in-addr.arpa',
+  'ip6.arpa',
+  'ipv4only.arpa',
+  'resolver.arpa',
+  'service.arpa',
+  'example',
+  'example.com',
+  'example.net',
+  'example.org',
+  'invalid',
+  'local',
+  'localhost',
+  'onion',
+  'test',
+] as const
+
 function isNonPublicIpv6(value: string): boolean {
   const address = parseIpv6(value)
   if (address === null) return true
@@ -100,9 +125,9 @@ function isNonPublicIpv6(value: string): boolean {
 function isNonPublicHostname(value: string): boolean {
   const hostname = value.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
   if (
-    hostname === 'localhost'
-    || hostname.endsWith('.localhost')
-    || hostname.endsWith('.local')
+    specialUseDomainSuffixes.some(
+      (suffix) => hostname === suffix || hostname.endsWith(`.${suffix}`),
+    )
     || hostname.endsWith('.internal')
     || hostname.endsWith('.lan')
   ) return true

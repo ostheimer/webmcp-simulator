@@ -77,7 +77,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
       reset: async () => {
         setTab('simulation')
         dispatch({ type: 'RESET', activity: createActivity('reset_simulation', 'Reset the simulation to its initial state') })
-        await waitForVisibleUpdate()
+        await revealVisibleSection('agent-activity')
       },
     })
 
@@ -216,7 +216,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
             </section>
           </section>
 
-        <aside className="agent-panel" tabIndex={0} aria-label="WebMCP agent activity">
+        <aside className="agent-panel" id="agent-activity" tabIndex={0} aria-label="WebMCP agent activity">
             <div className="agent-panel-header"><div><span className="agent-orb">✦</span><span><strong>Agent activity</strong><small>Real WebMCP tool calls appear here</small></span></div><span className={`webmcp-state state-${webMcpStatus}`}>{webMcpStatus === 'connected' ? 'Connected' : webMcpStatus === 'checking' ? 'Checking' : webMcpStatus === 'unavailable' ? 'Browser unsupported' : 'Registration error'}</span></div>
             {webMcpStatus === 'unavailable' && <div className="support-message"><strong>WebMCP is not exposed in this browser.</strong><p>Open the deployed app in ChatGPT's in-app browser or enable WebMCP testing in compatible Chrome.</p></div>}
             {webMcpStatus === 'error' && <div className="support-message error"><strong>Tools could not be registered.</strong><p>{registrationError}</p></div>}
