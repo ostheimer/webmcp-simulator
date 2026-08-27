@@ -32,13 +32,27 @@ describe('normalizeWebsiteUrl', () => {
     'https://198.51.100.1',
     'https://203.0.113.1',
     'https://[::1]',
+    'https://[64:ff9b:1::1]',
+    'https://[100:0:0:1::1]',
+    'https://[2001:11::1]',
+    'https://[2001:21::1]',
     'https://[2001:db8::1]',
+    'https://[2002::1]',
+    'https://[3fff::1]',
     'https://[ff02::1]',
     'https://router.local',
   ])('rejects the non-public address %s', (value) => {
     expect(() => normalizeWebsiteUrl(value)).toThrow(
       'not a local, private, or reserved address',
     )
+  })
+
+  it.each([
+    'https://[2606:4700:4700::1111]',
+    'https://[2001:4860:4860::8888]',
+    'https://[64:ff9b::0808:0808]',
+  ])('accepts the globally reachable IPv6 address %s', (value) => {
+    expect(normalizeWebsiteUrl(value)).toBe(new URL(value).toString())
   })
 
   it('preserves an explicit port on a public hostname', () => {

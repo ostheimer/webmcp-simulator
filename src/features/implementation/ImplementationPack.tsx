@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { memo, useMemo, useState } from 'react'
 import { heatFlowCapabilities, heatFlowAnalysis } from '../../demo/heatflow/data'
 import {
   accessPathLabels,
@@ -14,7 +14,7 @@ const accessOptions: Array<{ id: AccessPath; icon: string; description: string }
   { id: 'repository', icon: '⌘', description: 'Ask Codex to inspect and update the actual codebase.' },
 ]
 
-export function ImplementationPack() {
+export const ImplementationPack = memo(function ImplementationPack() {
   const [accessPath, setAccessPath] = useState<AccessPath>('no-access')
   const [platform, setPlatform] = useState('I do not know yet')
   const [selectedIds, setSelectedIds] = useState(() => defaultImplementationCapabilityIds(heatFlowCapabilities))
@@ -131,4 +131,4 @@ export function ImplementationPack() {
       </div>
     </section>
   )
-}
+})

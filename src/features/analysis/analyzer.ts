@@ -6,6 +6,97 @@ export interface AnalysisAttempt {
   limitation?: string
 }
 
+function parseIpv4(value: string): number[] | null {
+  const parts = value.split('.').map(Number)
+  return parts.length === 4
+    && parts.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+    ? parts
+    : null
+}
+
+function parseIpv6(value: string): bigint | null {
+  const doubleColonIndex = value.indexOf('::')
+  if (doubleColonIndex !== value.lastIndexOf('::')) return null
+
+  const hasCompression = doubleColonIndex >= 0
+  const [head = '', tail = ''] = hasCompression
+    ? [value.slice(0, doubleColonIndex), value.slice(doubleColonIndex + 2)]
+    : [value, '']
+
+  function parseHextets(part: string): number[] | null {
+    if (!part) return []
+    const segments = part.split(':')
+    const last = segments.at(-1)
+    if (last?.includes('.')) {
+      const ipv4 = parseIpv4(last)
+      if (!ipv4) return null
+      segments.splice(-1, 1,
+        ((ipv4[0] << 8) | ipv4[1]).toString(16),
+        ((ipv4[2] << 8) | ipv4[3]).toString(16),
+      )
+    }
+    if (!segments.every((segment) => /^[\da-f]{1,4}$/i.test(segment))) return null
+    return segments.map((segment) => Number.parseInt(segment, 16))
+  }
+
+  const headHextets = parseHextets(head)
+  const tailHextets = parseHextets(tail)
+  if (!headHextets || !tailHextets) return null
+
+  const explicitCount = headHextets.length + tailHextets.length
+  if ((!hasCompression && explicitCount !== 8) || (hasCompression && explicitCount >= 8)) {
+    return null
+  }
+
+  const hextets = hasCompression
+    ? [...headHextets, ...Array<number>(8 - explicitCount).fill(0), ...tailHextets]
+    : headHextets
+  return hextets.reduce((address, hextet) => (address << 16n) | BigInt(hextet), 0n)
+}
+
+function isInIpv6Cidr(address: bigint, block: string, prefixLength: number): boolean {
+  const base = parseIpv6(block)
+  if (base === null) throw new Error(`Invalid internal IPv6 CIDR block: ${block}`)
+  const shift = BigInt(128 - prefixLength)
+  return (address >> shift) === (base >> shift)
+}
+
+// Source: IANA IPv6 Special-Purpose Address Space registry.
+// The broad 2001::/23 allocation is not globally reachable except for these
+// more-specific assignments. ORCHID ranges intentionally remain excluded
+// because they are identifiers, not public website endpoints.
+const globallyReachableIetfExceptions = [
+  ['2001:1::1', 128],
+  ['2001:1::2', 128],
+  ['2001:1::3', 128],
+  ['2001:3::', 32],
+  ['2001:4:112::', 48],
+  ['2001:30::', 28],
+] as const
+
+const nonPublicGlobalUnicastRanges = [
+  ['2001::', 23],
+  ['2001:db8::', 32],
+  ['2002::', 16],
+  ['3fff::', 20],
+] as const
+
+function isNonPublicIpv6(value: string): boolean {
+  const address = parseIpv6(value)
+  if (address === null) return true
+
+  if (globallyReachableIetfExceptions.some(
+    ([block, prefix]) => isInIpv6Cidr(address, block, prefix),
+  )) return false
+
+  const isGlobalUnicast = isInIpv6Cidr(address, '2000::', 3)
+    // IANA marks the well-known NAT64 translation prefix globally reachable.
+    || isInIpv6Cidr(address, '64:ff9b::', 96)
+  return !isGlobalUnicast || nonPublicGlobalUnicastRanges.some(
+    ([block, prefix]) => isInIpv6Cidr(address, block, prefix),
+  )
+}
+
 function isNonPublicHostname(value: string): boolean {
   const hostname = value.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
   if (
@@ -16,11 +107,8 @@ function isNonPublicHostname(value: string): boolean {
     || hostname.endsWith('.lan')
   ) return true
 
-  const ipv4 = hostname.split('.').map(Number)
-  if (
-    ipv4.length === 4
-    && ipv4.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
-  ) {
+  const ipv4 = parseIpv4(hostname)
+  if (ipv4) {
     const [first, second, third] = ipv4
     return first === 0
       || first === 10
@@ -39,18 +127,7 @@ function isNonPublicHostname(value: string): boolean {
   }
 
   if (hostname.includes(':')) {
-    return hostname === '::'
-      || hostname === '::1'
-      || hostname.startsWith('100:')
-      || hostname.startsWith('2001:2:')
-      || hostname.startsWith('2001:10:')
-      || hostname.startsWith('2001:20:')
-      || hostname.startsWith('2001:db8:')
-      || hostname.startsWith('fc')
-      || hostname.startsWith('fd')
-      || /^fe[89ab]/.test(hostname)
-      || hostname.startsWith('ff')
-      || hostname.startsWith('::ffff:')
+    return isNonPublicIpv6(hostname)
   }
 
   return !hostname.includes('.')

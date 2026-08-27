@@ -53,7 +53,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
           result,
           activity: createActivity('check_service_area', `Checked ${result.serviceLabel.toLowerCase()} availability for ${result.postcode}`),
         })
-        await waitForVisibleUpdate()
+        await revealVisibleSection('service-area')
       },
       compare: async (serviceIds) => {
         setTab('simulation')
@@ -62,7 +62,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
           serviceIds,
           activity: createActivity('compare_services', `Compared ${serviceIds.length} heating solutions`),
         })
-        await waitForVisibleUpdate()
+        await revealVisibleSection('service-comparison')
       },
       prepareQuote: async (quote) => {
         setTab('simulation')
@@ -148,7 +148,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
       </div>
 
       {tab === 'readiness' && <ReadinessReport onOpenImplementation={() => setTab('implementation')} />}
-      {tab === 'implementation' && <ImplementationPack />}
+      <div hidden={tab !== 'implementation'}><ImplementationPack /></div>
       {tab === 'simulation' && (
         <main className="simulation-layout">
           <section className="heatflow-simulator">
@@ -183,7 +183,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
             </section>
 
             {comparedServices.length >= 2 && (
-              <section className="comparison-panel" aria-live="polite">
+              <section className="comparison-panel" id="service-comparison" tabIndex={-1} aria-live="polite">
                 <div className="comparison-heading"><div><span>DIRECT COMPARISON</span><h2>{comparedServices.length} solutions side by side</h2></div><button type="button" onClick={() => dispatch({ type: 'SET_COMPARISON', serviceIds: [] })}>Close ×</button></div>
                 <div className="comparison-table">
                   <div className="comparison-labels"><span>Solution</span><span>Investment</span><span>Efficiency</span><span>Ideal for</span></div>
@@ -192,10 +192,10 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
               </section>
             )}
 
-            <section className="area-section" id="service-area">
+            <section className="area-section" id="service-area" tabIndex={-1}>
               <div><span className="heatflow-kicker">SERVICE AREA</span><h2>Is HeatFlow available near you?</h2><p>Coverage uses deterministic demo rules. The agent cannot invent availability.</p></div>
               <form onSubmit={handleAreaSubmit}>
-                <label>Postcode<input value={state.areaPostcode} onChange={(event) => dispatch({ type: 'SET_AREA_POSTCODE', postcode: event.target.value.replace(/\D/g, '').slice(0, 4) })} inputMode="numeric" /></label>
+                <label>Postcode<input required inputMode="numeric" minLength={4} maxLength={4} pattern="[0-9]{4}" value={state.areaPostcode} onChange={(event) => dispatch({ type: 'SET_AREA_POSTCODE', postcode: event.target.value.replace(/\D/g, '').slice(0, 4) })} /></label>
                 <label>Service<select value={state.areaService} onChange={(event) => dispatch({ type: 'SET_AREA_SERVICE', service: event.target.value })}>{heatFlowServices.map((service) => <option value={service.toolValue} key={service.id}>{service.name}</option>)}</select></label>
                 <button type="submit">Check area</button>
               </form>

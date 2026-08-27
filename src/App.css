@@ -278,7 +278,7 @@
 .hf-preview-nav strong { font-family: Georgia, serif; font-size: 0.85rem; }
 .hf-preview-nav strong span { color: #e38c4a; }
 .hf-preview-nav > div { display: flex; gap: 25px; color: #69746f; font-size: 0.51rem; }
-.hf-preview-nav button { padding: 7px 11px; border: 0; border-radius: 4px; color: #fff; background: #285d50; font-size: 0.49rem; }
+.hf-preview-button { padding: 7px 11px; border-radius: 4px; color: #fff; background: #285d50; font-size: 0.49rem; }
 .hf-preview-hero { height: 255px; padding: 55px 44px; background: radial-gradient(circle at 80% 40%, rgb(216 157 100 / 35%), transparent 26%), linear-gradient(110deg, #dae5dd, #efe1d2); }
 .hf-preview-hero > span { color: #b26936; font-size: 0.46rem; font-weight: 800; letter-spacing: 0.15em; }
 .hf-preview-hero h3 { max-width: 390px; margin: 13px 0 10px; font-family: Georgia, serif; font-size: 2.1rem; font-weight: 500; line-height: 1.03; }

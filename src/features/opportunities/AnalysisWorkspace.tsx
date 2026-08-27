@@ -99,7 +99,7 @@ export function AnalysisWorkspace({
                 <span className="browser-menu">•••</span>
               </div>
               <div className="heatflow-page-preview">
-                <div className="hf-preview-nav"><strong><span>◒</span> HeatFlow</strong><div><span>Services</span><span>Service area</span><span>Pricing</span><span>Contact</span></div><button type="button">Get a quote</button></div>
+                <div className="hf-preview-nav"><strong><span>◒</span> HeatFlow</strong><div><span>Services</span><span>Service area</span><span>Pricing</span><span>Contact</span></div><span className="hf-preview-button" aria-hidden="true">Get a quote</span></div>
                 <div className="hf-preview-hero"><span>COMFORT, MADE EFFICIENT</span><h3>Smart heating for every home.</h3><p>Expert installation and care for modern heating systems.</p></div>
                 <div className="hf-preview-grid"><article><i className="service-visual mint" /><b>Air-source heat pump</b><small>Efficient modernization</small></article><article><i className="service-visual blue" /><b>Ground-source heat pump</b><small>Maximum efficiency</small></article><article><i className="service-visual amber" /><b>Hybrid heating</b><small>Flexible upgrade</small></article></div>
                 <div className="analysis-marker marker-services"><span>✦</span><div><strong>search_services</strong><small>Catalog search opportunity</small></div></div>
