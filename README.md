@@ -4,7 +4,7 @@
 
 WebMCP Simulator helps website owners, agencies, product managers, and other decision-makers understand what a website could become with WebMCP before changing the original site.
 
-The product analyzes visible website functionality, proposes potential WebMCP capabilities, and launches a safe simulation in which a compatible agent can invoke real WebMCP tools. Every invocation produces a visible state change on the simulation page.
+The current vertical slice uses a deterministic fictional HeatFlow website to propose potential WebMCP capabilities and launch a safe simulation in which a compatible agent can invoke real WebMCP tools. Every invocation produces a visible state change on the simulation page. For arbitrary URLs, the browser-only MVP records only the normalized URL and deliberately makes no unsupported capability claims.
 
 ## Product boundaries
 
@@ -21,7 +21,7 @@ Developer tooling such as WebMCP Studio helps teams implement and inspect WebMCP
 
 The simulator focuses on visual discovery, a before-and-after explanation, a decision-oriented readiness report, and an interactive WebMCP-enabled experience.
 
-## Planned MVP flow
+## Implemented vertical slice
 
 ```text
 Landing page
@@ -30,9 +30,10 @@ Landing page
   -> WebMCP simulation
   -> visible agent activity
   -> readiness report
+  -> access-aware implementation pack for Codex
 ```
 
-The deterministic HeatFlow demo will expose these imperative WebMCP tools:
+The deterministic HeatFlow demo registers these imperative WebMCP tools:
 
 - `search_services`
 - `check_service_area`
@@ -40,7 +41,20 @@ The deterministic HeatFlow demo will expose these imperative WebMCP tools:
 - `prepare_quote_request`
 - `reset_simulation`
 
-The WebMCP entry point is intentionally easy to find at [`src/webmcp/registerTools.ts`](src/webmcp/registerTools.ts).
+The WebMCP entry points are intentionally easy to find:
+
+- [`src/webmcp/registerTools.ts`](src/webmcp/registerTools.ts) owns feature detection, registration, and cleanup.
+- [`src/webmcp/createHeatFlowTools.ts`](src/webmcp/createHeatFlowTools.ts) defines the five HeatFlow tools, validates inputs, and connects calls to visible simulator state.
+
+`prepare_quote_request` only fills an editable local draft. It never sends a request.
+
+## From simulation to implementation
+
+The Implementation Pack turns selected opportunities into a Markdown brief and a ready-to-copy Codex prompt. It does not assume that the user has a repository. The default path is **No repository or technical access** and instructs Codex to identify the platform, hosting, responsible maintainer, available exports, and required authorization before proposing any production change.
+
+Alternative paths cover a CMS or website builder, an external agency, and an existing repository. The pack can be copied or downloaded as `WEBMCP_IMPLEMENTATION.md`.
+
+`reset_simulation` remains available for repeatable demo and evaluation runs, but it is marked test-only and excluded from production-oriented Implementation Packs by default.
 
 ## Technology
 
@@ -64,6 +78,7 @@ Quality checks:
 
 ```bash
 npm run lint
+npm test
 npm run build
 ```
 
@@ -71,7 +86,7 @@ npm run build
 
 ### ChatGPT desktop app
 
-Open the deployed application in ChatGPT's in-app browser with site tools enabled. Compatible ChatGPT agents can discover the tools registered by the active simulation page.
+Open the deployed application in ChatGPT's in-app browser with site tools enabled. Launch the HeatFlow simulation, then ask the agent to search for a heat pump, check postcode `2230`, compare air- and ground-source heat pumps, or prepare a quote request. Compatible ChatGPT agents can discover the tools registered by the active simulation page.
 
 ### Google Chrome
 
@@ -82,6 +97,8 @@ For local testing in a compatible Chrome build:
 3. Relaunch Chrome.
 4. Open the simulator and launch the HeatFlow simulation.
 5. Inspect and invoke the registered tools with a compatible agent or the Model Context Tool Inspector extension.
+
+The page feature-detects `document.modelContext`. Unsupported browsers keep the complete human interface available and show an accurate compatibility message instead of reporting a false connection.
 
 WebMCP is an evolving draft. Before submission, the implementation must be verified against the current [WebMCP specification](https://webmachinelearning.github.io/webmcp/) and [Chrome documentation](https://developer.chrome.com/docs/ai/webmcp).
 
@@ -94,13 +111,17 @@ src/
   features/
     analysis/            Website analysis boundary
     opportunities/       Proposed capabilities
+    implementation/      Access-aware Markdown and Codex prompt generation
+    landing/             Landing page and URL intake
     readiness/           Inspectable heuristic scoring
     simulation/          Simulator state and UI
   types/                 Normalized domain models
   webmcp/                Browser API registration and schemas
 ```
 
-Analysis, simulation state, and WebMCP registration remain separate so that a future browser-based analyzer can replace the deterministic MVP analyzer without rewriting the simulation.
+Analysis, simulation state, implementation guidance, and WebMCP registration remain separate so that a future authorized browser-based analyzer can replace the deterministic MVP analyzer without rewriting the simulation.
+
+The readiness score is illustrative rather than scientific. Fixed factors and weights live in [`src/demo/heatflow/data.ts`](src/demo/heatflow/data.ts), while the inspectable calculation lives in [`src/features/readiness/scoring.ts`](src/features/readiness/scoring.ts).
 
 ## Submission status
 
