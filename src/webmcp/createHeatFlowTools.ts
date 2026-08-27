@@ -76,7 +76,7 @@ export function createHeatFlowTools(
         required: ['query'],
         additionalProperties: false,
       },
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: false },
       execute: async (input, options) => {
         const query = readString(input, 'query', { required: true, maxLength: 80 })
         const signal = executionSignal(options)
@@ -104,7 +104,7 @@ export function createHeatFlowTools(
         required: ['postcode', 'service'],
         additionalProperties: false,
       },
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: false },
       execute: async (input, options) => {
         const postcode = readPostcode(input)
         const service = readService(input)
@@ -134,7 +134,7 @@ export function createHeatFlowTools(
         required: ['serviceIds'],
         additionalProperties: false,
       },
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: false },
       execute: async (input, options) => {
         const values = input.serviceIds
         if (!Array.isArray(values) || values.length < 2 || values.length > 3) {

@@ -22,6 +22,21 @@ describe('createHeatFlowTools', () => {
     ])
   })
 
+  it('marks every visible-state-changing tool as non-read-only', () => {
+    const annotations = createHeatFlowTools(handlers()).map((tool) => ({
+      name: tool.name,
+      readOnlyHint: tool.annotations?.readOnlyHint,
+    }))
+
+    expect(annotations).toEqual([
+      { name: 'search_services', readOnlyHint: false },
+      { name: 'check_service_area', readOnlyHint: false },
+      { name: 'compare_services', readOnlyHint: false },
+      { name: 'prepare_quote_request', readOnlyHint: false },
+      { name: 'reset_simulation', readOnlyHint: false },
+    ])
+  })
+
   it('prepares but never submits a quote', async () => {
     const callbacks = handlers()
     const tool = createHeatFlowTools(callbacks).find(
