@@ -9,7 +9,7 @@ export interface WebMcpTool {
   }
   execute: (
     input: Record<string, unknown>,
-    options: { signal: AbortSignal },
+    options?: { signal: AbortSignal },
   ) => Promise<unknown>
 }
 
@@ -17,6 +17,10 @@ export interface ToolRegistrationResult {
   supported: boolean
   registeredToolNames: string[]
   dispose: () => void
+}
+
+export interface ToolRegistrationOptions {
+  controller?: AbortController
 }
 
 /**
@@ -28,6 +32,7 @@ export interface ToolRegistrationResult {
  */
 export async function registerTools(
   tools: WebMcpTool[],
+  options: ToolRegistrationOptions = {},
 ): Promise<ToolRegistrationResult> {
   const modelContext = document.modelContext
 
@@ -39,7 +44,7 @@ export async function registerTools(
     }
   }
 
-  const registrationController = new AbortController()
+  const registrationController = options.controller ?? new AbortController()
 
   try {
     for (const tool of tools) {

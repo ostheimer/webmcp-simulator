@@ -5,20 +5,21 @@ The repository can remain private during development. Do not submit it until eve
 ## Product
 
 - [ ] The deployed application is reachable without payment or special access.
-- [ ] The complete HeatFlow flow works from landing page to readiness report.
-- [ ] At least four non-trivial tools are registered with the current WebMCP API.
+- [x] The complete HeatFlow flow works from landing page to readiness report.
+- [x] At least four non-trivial tools are registered with the current WebMCP API.
 - [ ] A real compatible agent can discover and invoke the tools.
-- [ ] Every tool call produces an immediate, visible, verifiable UI change.
-- [ ] `prepare_quote_request` only prepares editable data and never submits it.
-- [ ] The original website and simulated environment are unmistakably labeled.
-- [ ] Unsupported browsers receive accurate setup instructions, not a fake success state.
+- [x] Every tool call produces an immediate, visible, verifiable UI change.
+- [x] `prepare_quote_request` only prepares editable data and never submits it.
+- [x] The original website and simulated environment are unmistakably labeled.
+- [x] Unsupported browsers receive accurate setup instructions, not a fake success state.
 
 ## Verification
 
-- [ ] `npm run lint` passes.
-- [ ] `npm run build` passes.
-- [ ] Tool schemas and invalid-input behavior are tested.
-- [ ] Registration and cleanup work without duplicate tools after navigation.
+- [x] `npm run lint` passes.
+- [x] `npm test` passes.
+- [x] `npm run build` passes.
+- [x] Tool schemas and invalid-input behavior are tested.
+- [x] Registration and cleanup work without duplicate tools after navigation.
 - [ ] The deployed app is tested in ChatGPT's in-app browser.
 - [ ] The deployed app is tested in Chrome with WebMCP enabled.
 - [ ] The current WebMCP specification is rechecked immediately before submission.
