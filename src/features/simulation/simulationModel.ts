@@ -105,9 +105,9 @@ export function simulationReducer(
         areaResult: action.result,
       }
     case 'SET_AREA_POSTCODE':
-      return { ...state, areaPostcode: action.postcode }
+      return { ...state, areaPostcode: action.postcode, areaResult: null }
     case 'SET_AREA_SERVICE':
-      return { ...state, areaService: action.service }
+      return { ...state, areaService: action.service, areaResult: null }
     case 'COMPARE':
       return {
         ...state,
@@ -148,15 +148,15 @@ export function searchServices(query: string): string[] {
   if (!normalized) return heatFlowServices.map((service) => service.id)
 
   const ignoredWords = new Set([
-    'a', 'an', 'for', 'i', 'me', 'need', 'please', 'service', 'services',
-    'show', 'some', 'the', 'to', 'want', 'with',
+    'a', 'an', 'find', 'for', 'i', 'me', 'need', 'option', 'please', 'search',
+    'service', 'show', 'some', 'the', 'to', 'want', 'with',
   ])
   const normalizeTerm = (term: string) => term.length > 3 && term.endsWith('s')
     ? term.slice(0, -1)
     : term
   const queryTerms = (normalized.match(/[\p{L}\p{N}]+/gu) ?? [])
-    .filter((term) => !ignoredWords.has(term))
     .map(normalizeTerm)
+    .filter((term) => !ignoredWords.has(term))
 
   if (queryTerms.length === 0) return heatFlowServices.map((service) => service.id)
 
@@ -172,6 +172,16 @@ export function searchServices(query: string): string[] {
       return queryTerms.every((term) => serviceTerms.has(term))
     })
     .map((service) => service.id)
+}
+
+export function isValidQuoteDraft(quote: QuoteDraft): boolean {
+  const propertySize = Number(quote.propertySize)
+  return heatFlowServices.some((service) => service.toolValue === quote.service)
+    && /^\d{4}$/.test(quote.postcode)
+    && Number.isInteger(propertySize)
+    && propertySize >= 30
+    && propertySize <= 1000
+    && Array.from(quote.message).length <= 500
 }
 
 export type WebMcpStatus = 'checking' | 'connected' | 'unavailable' | 'error'

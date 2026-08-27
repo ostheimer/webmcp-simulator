@@ -117,6 +117,28 @@ describe('createHeatFlowTools', () => {
     )).rejects.toThrow('query must be at most 80 characters')
   })
 
+  it('advertises and enforces a non-empty search query', async () => {
+    const callbacks = handlers()
+    const searchTool = createHeatFlowTools(callbacks).find(
+      (candidate) => candidate.name === 'search_services',
+    )!
+    const proposed = heatFlowCapabilities.find(
+      (capability) => capability.name === 'search_services',
+    )!
+
+    expect(searchTool.inputSchema).toMatchObject({
+      properties: { query: { minLength: 1 } },
+    })
+    expect(proposed.inputSchema).toMatchObject({
+      properties: { query: { minLength: 1 } },
+    })
+    await expect(searchTool.execute(
+      { query: '' },
+      { signal: new AbortController().signal },
+    )).rejects.toThrow('query must be a non-empty string')
+    expect(callbacks.search).not.toHaveBeenCalled()
+  })
+
   it('rejects invalid quote inputs before changing state', async () => {
     const callbacks = handlers()
     const tool = createHeatFlowTools(callbacks).find(

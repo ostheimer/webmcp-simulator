@@ -8,6 +8,16 @@ interface VisibleUpdateOptions {
   timeoutMs?: number
 }
 
+interface VisibleSection {
+  focus: (options?: FocusOptions) => void
+  scrollIntoView: (options?: ScrollIntoViewOptions) => void
+}
+
+interface RevealSectionOptions {
+  resolveElement?: (id: string) => VisibleSection | null
+  waitForUpdate?: () => Promise<void>
+}
+
 /**
  * Gives React a chance to paint a tool result without letting background-tab
  * animation-frame throttling hold the WebMCP call open indefinitely.
@@ -38,4 +48,26 @@ export function waitForVisibleUpdate(options: VisibleUpdateOptions = {}): Promis
     timeoutHandle = scheduleTimeout(finish, timeoutMs)
     requestFrame(() => requestFrame(finish))
   })
+}
+
+/**
+ * Waits for a tab change to render, then brings the changed section into the
+ * viewport and waits once more so tool completion stays tied to visible UI.
+ */
+export async function revealVisibleSection(
+  sectionId: string,
+  options: RevealSectionOptions = {},
+): Promise<boolean> {
+  const waitForUpdate = options.waitForUpdate ?? waitForVisibleUpdate
+  const resolveElement = options.resolveElement
+    ?? ((id: string) => document.getElementById(id))
+
+  await waitForUpdate()
+  const section = resolveElement(sectionId)
+  if (!section) return false
+
+  section.focus({ preventScroll: true })
+  section.scrollIntoView({ block: 'start' })
+  await waitForUpdate()
+  return true
 }

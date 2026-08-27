@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { waitForVisibleUpdate } from './visibleUpdate'
+import { revealVisibleSection, waitForVisibleUpdate } from './visibleUpdate'
 
 afterEach(() => {
   vi.useRealTimers()
@@ -28,5 +28,24 @@ describe('waitForVisibleUpdate', () => {
     await vi.advanceTimersByTimeAsync(150)
     await expect(waiting).resolves.toBeUndefined()
     expect(requestFrame).toHaveBeenCalledOnce()
+  })
+})
+
+describe('revealVisibleSection', () => {
+  it('waits for rendering, focuses and scrolls the section, then waits for paint', async () => {
+    const waitForUpdate = vi.fn(async () => undefined)
+    const section = {
+      focus: vi.fn(),
+      scrollIntoView: vi.fn(),
+    }
+
+    await expect(revealVisibleSection('services', {
+      resolveElement: () => section,
+      waitForUpdate,
+    })).resolves.toBe(true)
+
+    expect(waitForUpdate).toHaveBeenCalledTimes(2)
+    expect(section.focus).toHaveBeenCalledWith({ preventScroll: true })
+    expect(section.scrollIntoView).toHaveBeenCalledWith({ block: 'start' })
   })
 })

@@ -9,12 +9,13 @@ import {
   checkServiceArea,
   createActivity,
   initialSimulationState,
+  isValidQuoteDraft,
   searchServices,
   simulationReducer,
   toolCatalogLabel,
 } from './simulationModel'
 import type { WebMcpStatus } from './simulationModel'
-import { waitForVisibleUpdate } from './visibleUpdate'
+import { revealVisibleSection, waitForVisibleUpdate } from './visibleUpdate'
 
 type SimulationTab = 'simulation' | 'readiness' | 'implementation'
 
@@ -43,7 +44,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
             `Searched services for “${query}” — ${serviceIds.length} match${serviceIds.length === 1 ? '' : 'es'}`,
           ),
         })
-        await waitForVisibleUpdate()
+        await revealVisibleSection('services')
       },
       checkArea: async (result) => {
         setTab('simulation')
@@ -119,6 +120,10 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
 
   function handleQuoteReview(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
+    if (!isValidQuoteDraft(state.quote)) {
+      event.currentTarget.reportValidity()
+      return
+    }
     dispatch({ type: 'MARK_QUOTE_REVIEWED' })
   }
 
@@ -158,7 +163,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
               <div className="heat-graphic" aria-hidden="true"><i /><i /><i /><span>21°</span></div>
             </section>
 
-            <section className="service-catalog" id="services">
+            <section className="service-catalog" id="services" tabIndex={-1}>
               <div className="heatflow-section-title"><div><span>OUR SERVICES</span><h2>Find the right heating solution</h2></div><label><span>⌕</span><input type="search" value={state.query} onChange={(event) => handleHumanSearch(event.target.value)} placeholder="Search services" /></label></div>
               {state.query && <div className="filter-result"><span>✦</span> Showing {visibleServices.length} result{visibleServices.length === 1 ? '' : 's'} for “{state.query}” <button type="button" onClick={() => handleHumanSearch('')}>Clear</button></div>}
               <div className="service-grid">
@@ -201,8 +206,8 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
               <div className="quote-copy"><span className="heatflow-kicker">PERSONAL CONSULTATION</span><h2>Prepare your quote request</h2><p>Tell us about the property. Nothing is sent from this simulation.</p><ul><li>✓ Editable before review</li><li>✓ No automatic submission</li><li>✓ Original website untouched</li></ul></div>
               <form className={state.agentPreparedQuote ? 'agent-prepared' : ''} onSubmit={handleQuoteReview}>
                 {state.agentPreparedQuote && <div className="prepared-banner"><span>✦</span><div><strong>Prepared by agent</strong><small>Review and edit every field before continuing.</small></div></div>}
-                <label>Service<select value={state.quote.service} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'service', value: event.target.value })}><option value="">Choose a service</option>{heatFlowServices.map((service) => <option value={service.toolValue} key={service.id}>{service.name}</option>)}</select></label>
-                <div className="form-row"><label>Postcode<input value={state.quote.postcode} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'postcode', value: event.target.value })} placeholder="2230" /></label><label>Property size (m²)<input type="number" min="30" max="1000" step="1" value={state.quote.propertySize} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'propertySize', value: event.target.value })} placeholder="150" /></label></div>
+                <label>Service<select required value={state.quote.service} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'service', value: event.target.value })}><option value="">Choose a service</option>{heatFlowServices.map((service) => <option value={service.toolValue} key={service.id}>{service.name}</option>)}</select></label>
+                <div className="form-row"><label>Postcode<input required inputMode="numeric" minLength={4} maxLength={4} pattern="[0-9]{4}" value={state.quote.postcode} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'postcode', value: event.target.value.replace(/\D/g, '').slice(0, 4) })} placeholder="2230" /></label><label>Property size (m²)<input required type="number" min="30" max="1000" step="1" value={state.quote.propertySize} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'propertySize', value: event.target.value })} placeholder="150" /></label></div>
                 <label>Message<textarea value={state.quote.message} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'message', value: event.target.value })} placeholder="What should the advisor know?" maxLength={500} /></label>
                 <button type="submit">Review request <span>→</span></button>
                 <small className="simulation-submit-note">Simulation only — this button never sends data.</small>

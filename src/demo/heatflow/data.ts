@@ -96,6 +96,7 @@ export const heatFlowCapabilities: ProposedCapability[] = [
         properties: {
           query: {
             type: 'string',
+            minLength: 1,
             maxLength: 80,
             description: 'Service need or heating technology to look for.',
           },

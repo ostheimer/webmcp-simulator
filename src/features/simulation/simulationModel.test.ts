@@ -3,6 +3,7 @@ import {
   checkServiceArea,
   createActivity,
   initialSimulationState,
+  isValidQuoteDraft,
   searchServices,
   simulationReducer,
   toolCatalogLabel,
@@ -18,6 +19,8 @@ describe('HeatFlow simulation rules', () => {
 
   it.each([
     ['show me heat pumps', ['heat-pump-air', 'heat-pump-ground']],
+    ['search heat pumps', ['heat-pump-air', 'heat-pump-ground']],
+    ['find me heat pump options', ['heat-pump-air', 'heat-pump-ground']],
     ['I need maintenance', ['maintenance-care']],
     ['please show ground heat pumps', ['heat-pump-ground']],
   ])('matches the natural-language query %s', (query, expected) => {
@@ -33,6 +36,21 @@ describe('HeatFlow simulation rules', () => {
 
   it('uses manual confirmation outside deterministic coverage', () => {
     expect(checkServiceArea('9020', 'ground_heat_pump').status).toBe('manual')
+  })
+
+  it('validates human quote drafts against the tool contract', () => {
+    const validDraft = {
+      service: 'heat_pump',
+      postcode: '2230',
+      propertySize: '150',
+      message: 'Please review this home.',
+    }
+
+    expect(isValidQuoteDraft(validDraft)).toBe(true)
+    expect(isValidQuoteDraft({ ...validDraft, service: '' })).toBe(false)
+    expect(isValidQuoteDraft({ ...validDraft, postcode: '223' })).toBe(false)
+    expect(isValidQuoteDraft({ ...validDraft, propertySize: '150.5' })).toBe(false)
+    expect(isValidQuoteDraft({ ...validDraft, propertySize: '29' })).toBe(false)
   })
 })
 
@@ -80,6 +98,25 @@ describe('simulationReducer', () => {
     expect(state.areaPostcode).toBe('1010')
     expect(state.areaService).toBe('ground_heat_pump')
     expect(state.areaResult).toBe(result)
+  })
+
+  it('clears stale area results when either controlled input changes', () => {
+    const checkedState = {
+      ...initialSimulationState,
+      areaResult: checkServiceArea('2230', 'heat_pump'),
+    }
+
+    const postcodeEdited = simulationReducer(checkedState, {
+      type: 'SET_AREA_POSTCODE',
+      postcode: '1010',
+    })
+    const serviceEdited = simulationReducer(checkedState, {
+      type: 'SET_AREA_SERVICE',
+      service: 'maintenance',
+    })
+
+    expect(postcodeEdited.areaResult).toBeNull()
+    expect(serviceEdited.areaResult).toBeNull()
   })
 
   it('requires a fresh human review after an agent prepares a new quote', () => {

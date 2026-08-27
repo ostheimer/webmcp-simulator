@@ -69,6 +69,7 @@ export function createHeatFlowTools(
         properties: {
           query: {
             type: 'string',
+            minLength: 1,
             maxLength: 80,
             description: 'Heating service or technology to search for.',
           },
