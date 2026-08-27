@@ -28,11 +28,16 @@ describe('normalizeWebsiteUrl', () => {
     'https://10.0.0.8',
     'https://172.20.0.1',
     'https://192.168.1.20',
+    'https://192.0.2.1',
+    'https://198.51.100.1',
+    'https://203.0.113.1',
     'https://[::1]',
+    'https://[2001:db8::1]',
+    'https://[ff02::1]',
     'https://router.local',
-  ])('rejects the local or private address %s', (value) => {
+  ])('rejects the non-public address %s', (value) => {
     expect(() => normalizeWebsiteUrl(value)).toThrow(
-      'not a local or private-network address',
+      'not a local, private, or reserved address',
     )
   })
 
