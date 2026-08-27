@@ -1,8 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import { heatFlowCapabilities } from '../../demo/heatflow/data'
-import { generateImplementationPack } from './generateImplementationPack'
+import {
+  defaultImplementationCapabilityIds,
+  generateImplementationPack,
+} from './generateImplementationPack'
 
 describe('generateImplementationPack', () => {
+  it('excludes the simulator reset from production-oriented defaults', () => {
+    const defaultIds = defaultImplementationCapabilityIds(heatFlowCapabilities)
+    expect(defaultIds).toHaveLength(4)
+    expect(defaultIds).not.toContain('reset-simulation')
+  })
+
   it('defaults safely when no repository or access exists', () => {
     const pack = generateImplementationPack({
       websiteUrl: 'https://heatflow.example',
@@ -25,5 +34,19 @@ describe('generateImplementationPack', () => {
     })
     expect(pack).toContain('Inspect its framework')
     expect(pack).toContain('Reuse existing application logic')
+  })
+
+  it('marks reset as test-only when it is explicitly selected', () => {
+    const reset = heatFlowCapabilities.find(
+      (capability) => capability.name === 'reset_simulation',
+    )!
+    const pack = generateImplementationPack({
+      websiteUrl: 'https://heatflow.example',
+      accessPath: 'repository',
+      platform: '',
+      capabilities: [reset],
+    })
+    expect(pack).toContain('Simulator test-only')
+    expect(pack).toContain('Do not expose this as a production website capability')
   })
 })

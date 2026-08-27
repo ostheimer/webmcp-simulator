@@ -11,23 +11,15 @@ import {
   initialSimulationState,
   searchServices,
   simulationReducer,
+  toolCatalogLabel,
 } from './simulationModel'
+import type { WebMcpStatus } from './simulationModel'
+import { waitForVisibleUpdate } from './visibleUpdate'
 
 type SimulationTab = 'simulation' | 'readiness' | 'implementation'
-type WebMcpStatus = 'checking' | 'connected' | 'unavailable' | 'error'
 
 interface SimulationWorkspaceProps {
   onBack: () => void
-}
-
-function waitForVisibleUpdate(): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof requestAnimationFrame !== 'function') {
-      window.setTimeout(resolve, 0)
-      return
-    }
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-  })
 }
 
 export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
@@ -35,9 +27,6 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
   const [tab, setTab] = useState<SimulationTab>('simulation')
   const [webMcpStatus, setWebMcpStatus] = useState<WebMcpStatus>('checking')
   const [registrationError, setRegistrationError] = useState('')
-  const [areaPostcode, setAreaPostcode] = useState('2230')
-  const [areaService, setAreaService] = useState('heat_pump')
-  const [sendNotice, setSendNotice] = useState(false)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -117,8 +106,8 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
 
   function handleAreaSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (!/^\d{4}$/.test(areaPostcode)) return
-    dispatch({ type: 'SET_AREA', result: checkServiceArea(areaPostcode, areaService) })
+    if (!/^\d{4}$/.test(state.areaPostcode)) return
+    dispatch({ type: 'SET_AREA', result: checkServiceArea(state.areaPostcode, state.areaService) })
   }
 
   function toggleComparison(serviceId: string) {
@@ -130,7 +119,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
 
   function handleQuoteReview(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    setSendNotice(true)
+    dispatch({ type: 'MARK_QUOTE_REVIEWED' })
   }
 
   return (
@@ -201,8 +190,8 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
             <section className="area-section" id="service-area">
               <div><span className="heatflow-kicker">SERVICE AREA</span><h2>Is HeatFlow available near you?</h2><p>Coverage uses deterministic demo rules. The agent cannot invent availability.</p></div>
               <form onSubmit={handleAreaSubmit}>
-                <label>Postcode<input value={areaPostcode} onChange={(event) => setAreaPostcode(event.target.value.replace(/\D/g, '').slice(0, 4))} inputMode="numeric" /></label>
-                <label>Service<select value={areaService} onChange={(event) => setAreaService(event.target.value)}>{heatFlowServices.map((service) => <option value={service.toolValue} key={service.id}>{service.name}</option>)}</select></label>
+                <label>Postcode<input value={state.areaPostcode} onChange={(event) => dispatch({ type: 'SET_AREA_POSTCODE', postcode: event.target.value.replace(/\D/g, '').slice(0, 4) })} inputMode="numeric" /></label>
+                <label>Service<select value={state.areaService} onChange={(event) => dispatch({ type: 'SET_AREA_SERVICE', service: event.target.value })}>{heatFlowServices.map((service) => <option value={service.toolValue} key={service.id}>{service.name}</option>)}</select></label>
                 <button type="submit">Check area</button>
               </form>
               {state.areaResult && <div className={`area-result result-${state.areaResult.status}`} aria-live="polite"><span>{state.areaResult.status === 'available' ? '✓' : '?'}</span><div><strong>{state.areaResult.status === 'available' ? 'Service available' : 'Manual confirmation needed'}</strong><p>{state.areaResult.message}</p></div></div>}
@@ -213,11 +202,11 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
               <form className={state.agentPreparedQuote ? 'agent-prepared' : ''} onSubmit={handleQuoteReview}>
                 {state.agentPreparedQuote && <div className="prepared-banner"><span>✦</span><div><strong>Prepared by agent</strong><small>Review and edit every field before continuing.</small></div></div>}
                 <label>Service<select value={state.quote.service} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'service', value: event.target.value })}><option value="">Choose a service</option>{heatFlowServices.map((service) => <option value={service.toolValue} key={service.id}>{service.name}</option>)}</select></label>
-                <div className="form-row"><label>Postcode<input value={state.quote.postcode} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'postcode', value: event.target.value })} placeholder="2230" /></label><label>Property size (m²)<input type="number" min="30" max="1000" value={state.quote.propertySize} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'propertySize', value: event.target.value })} placeholder="150" /></label></div>
+                <div className="form-row"><label>Postcode<input value={state.quote.postcode} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'postcode', value: event.target.value })} placeholder="2230" /></label><label>Property size (m²)<input type="number" min="30" max="1000" step="1" value={state.quote.propertySize} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'propertySize', value: event.target.value })} placeholder="150" /></label></div>
                 <label>Message<textarea value={state.quote.message} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'message', value: event.target.value })} placeholder="What should the advisor know?" maxLength={500} /></label>
                 <button type="submit">Review request <span>→</span></button>
                 <small className="simulation-submit-note">Simulation only — this button never sends data.</small>
-                {sendNotice && <div className="not-sent-notice" role="status">✓ Review complete. No request was sent.</div>}
+                {state.sendNotice && <div className="not-sent-notice" role="status">✓ Review complete. No request was sent.</div>}
               </form>
             </section>
           </section>
@@ -228,7 +217,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
             {webMcpStatus === 'error' && <div className="support-message error"><strong>Tools could not be registered.</strong><p>{registrationError}</p></div>}
 
             <div className="registered-tools">
-              <div className="agent-section-label"><span>AVAILABLE SITE TOOLS</span><em>{heatFlowCapabilities.length}</em></div>
+              <div className="agent-section-label"><span>{toolCatalogLabel(webMcpStatus)}</span><em>{heatFlowCapabilities.length}</em></div>
               {heatFlowCapabilities.map((capability) => <div className="registered-tool" key={capability.id}><span className="tool-mini-icon">⌘</span><span><code>{capability.name}</code><small>{capability.title}</small></span><i className={`impact-dot dot-${capability.impact}`} /></div>)}
             </div>
 

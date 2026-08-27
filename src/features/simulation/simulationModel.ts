@@ -27,10 +27,13 @@ export interface AgentActivity {
 export interface SimulationState {
   query: string
   visibleServiceIds: string[]
+  areaPostcode: string
+  areaService: string
   areaResult: ServiceAreaResult | null
   comparisonIds: string[]
   quote: QuoteDraft
   agentPreparedQuote: boolean
+  sendNotice: boolean
   activities: AgentActivity[]
 }
 
@@ -39,10 +42,13 @@ export type SimulationAction =
   | { type: 'SET_SEARCH'; query: string; serviceIds: string[] }
   | { type: 'CHECK_AREA'; result: ServiceAreaResult; activity: AgentActivity }
   | { type: 'SET_AREA'; result: ServiceAreaResult }
+  | { type: 'SET_AREA_POSTCODE'; postcode: string }
+  | { type: 'SET_AREA_SERVICE'; service: string }
   | { type: 'COMPARE'; serviceIds: string[]; activity: AgentActivity }
   | { type: 'SET_COMPARISON'; serviceIds: string[] }
   | { type: 'PREPARE_QUOTE'; quote: QuoteDraft; activity: AgentActivity }
   | { type: 'EDIT_QUOTE'; field: keyof QuoteDraft; value: string }
+  | { type: 'MARK_QUOTE_REVIEWED' }
   | { type: 'RESET'; activity?: AgentActivity }
 
 export const initialQuote: QuoteDraft = {
@@ -55,10 +61,13 @@ export const initialQuote: QuoteDraft = {
 export const initialSimulationState: SimulationState = {
   query: '',
   visibleServiceIds: heatFlowServices.map((service) => service.id),
+  areaPostcode: '2230',
+  areaService: 'heat_pump',
   areaResult: null,
   comparisonIds: [],
   quote: initialQuote,
   agentPreparedQuote: false,
+  sendNotice: false,
   activities: [],
 }
 
@@ -83,14 +92,22 @@ export function simulationReducer(
     case 'CHECK_AREA':
       return {
         ...state,
+        areaPostcode: action.result.postcode,
+        areaService: action.result.service,
         areaResult: action.result,
         activities: [action.activity, ...state.activities],
       }
     case 'SET_AREA':
       return {
         ...state,
+        areaPostcode: action.result.postcode,
+        areaService: action.result.service,
         areaResult: action.result,
       }
+    case 'SET_AREA_POSTCODE':
+      return { ...state, areaPostcode: action.postcode }
+    case 'SET_AREA_SERVICE':
+      return { ...state, areaService: action.service }
     case 'COMPARE':
       return {
         ...state,
@@ -107,13 +124,17 @@ export function simulationReducer(
         ...state,
         quote: action.quote,
         agentPreparedQuote: true,
+        sendNotice: false,
         activities: [action.activity, ...state.activities],
       }
     case 'EDIT_QUOTE':
       return {
         ...state,
         quote: { ...state.quote, [action.field]: action.value },
+        sendNotice: false,
       }
+    case 'MARK_QUOTE_REVIEWED':
+      return { ...state, sendNotice: true }
     case 'RESET':
       return {
         ...initialSimulationState,
@@ -126,14 +147,37 @@ export function searchServices(query: string): string[] {
   const normalized = query.trim().toLowerCase()
   if (!normalized) return heatFlowServices.map((service) => service.id)
 
+  const ignoredWords = new Set([
+    'a', 'an', 'for', 'i', 'me', 'need', 'please', 'service', 'services',
+    'show', 'some', 'the', 'to', 'want', 'with',
+  ])
+  const normalizeTerm = (term: string) => term.length > 3 && term.endsWith('s')
+    ? term.slice(0, -1)
+    : term
+  const queryTerms = (normalized.match(/[\p{L}\p{N}]+/gu) ?? [])
+    .filter((term) => !ignoredWords.has(term))
+    .map(normalizeTerm)
+
+  if (queryTerms.length === 0) return heatFlowServices.map((service) => service.id)
+
   return heatFlowServices
-    .filter((service) =>
-      [service.name, service.description, service.eyebrow, ...service.tags]
-        .join(' ')
-        .toLowerCase()
-        .includes(normalized),
-    )
+    .filter((service) => {
+      const serviceTerms = new Set(
+        [service.name, service.eyebrow, service.idealFor, ...service.tags]
+          .join(' ')
+          .toLowerCase()
+          .match(/[\p{L}\p{N}]+/gu)
+          ?.map(normalizeTerm) ?? [],
+      )
+      return queryTerms.every((term) => serviceTerms.has(term))
+    })
     .map((service) => service.id)
+}
+
+export type WebMcpStatus = 'checking' | 'connected' | 'unavailable' | 'error'
+
+export function toolCatalogLabel(status: WebMcpStatus): string {
+  return status === 'connected' ? 'AVAILABLE SITE TOOLS' : 'PROPOSED SITE TOOLS'
 }
 
 export function checkServiceArea(

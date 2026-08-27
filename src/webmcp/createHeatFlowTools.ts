@@ -29,7 +29,7 @@ function readString(
   if (typeof value !== 'string' || (options.required && !value.trim())) {
     throw new Error(`${key} must be a non-empty string.`)
   }
-  if (options.maxLength && value.length > options.maxLength) {
+  if (options.maxLength && Array.from(value).length > options.maxLength) {
     throw new Error(`${key} must be at most ${options.maxLength} characters.`)
   }
   return value.trim()
@@ -162,7 +162,7 @@ export function createHeatFlowTools(
         properties: {
           service: { type: 'string', enum: serviceValues },
           postcode: { type: 'string', pattern: '^\\d{4}$' },
-          propertySize: { type: 'number', minimum: 30, maximum: 1000 },
+          propertySize: { type: 'integer', minimum: 30, maximum: 1000 },
           message: { type: 'string', maxLength: 500 },
         },
         required: ['service', 'postcode', 'propertySize'],
@@ -175,11 +175,11 @@ export function createHeatFlowTools(
         const propertySize = input.propertySize
         if (
           typeof propertySize !== 'number' ||
-          !Number.isFinite(propertySize) ||
+          !Number.isInteger(propertySize) ||
           propertySize < 30 ||
           propertySize > 1000
         ) {
-          throw new Error('propertySize must be a number between 30 and 1000.')
+          throw new Error('propertySize must be a whole number between 30 and 1000.')
         }
         const message = readString(input, 'message', { maxLength: 500 })
         throwIfAborted(executionSignal(options))

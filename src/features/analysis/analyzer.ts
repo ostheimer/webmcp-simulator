@@ -6,8 +6,55 @@ export interface AnalysisAttempt {
   limitation?: string
 }
 
+function isNonPublicHostname(value: string): boolean {
+  const hostname = value.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
+  if (
+    hostname === 'localhost'
+    || hostname.endsWith('.localhost')
+    || hostname.endsWith('.local')
+    || hostname.endsWith('.internal')
+    || hostname.endsWith('.lan')
+  ) return true
+
+  const ipv4 = hostname.split('.').map(Number)
+  if (
+    ipv4.length === 4
+    && ipv4.every((part) => Number.isInteger(part) && part >= 0 && part <= 255)
+  ) {
+    const [first, second] = ipv4
+    return first === 0
+      || first === 10
+      || first === 127
+      || (first === 100 && second >= 64 && second <= 127)
+      || (first === 169 && second === 254)
+      || (first === 172 && second >= 16 && second <= 31)
+      || (first === 192 && second === 168)
+      || (first === 198 && (second === 18 || second === 19))
+      || first >= 224
+  }
+
+  if (hostname.includes(':')) {
+    return hostname === '::'
+      || hostname === '::1'
+      || hostname.startsWith('fc')
+      || hostname.startsWith('fd')
+      || /^fe[89ab]/.test(hostname)
+      || hostname.startsWith('::ffff:')
+  }
+
+  return !hostname.includes('.')
+}
+
 export function normalizeWebsiteUrl(value: string): string {
   const candidate = value.trim()
+  const looksLikeHostPort = /^[^/?#]+:\d+(?:[/?#]|$)/.test(candidate)
+  const explicitScheme = candidate.match(/^([a-z][a-z\d+.-]*):/i)
+  if (explicitScheme && !looksLikeHostPort) {
+    const scheme = explicitScheme[1].toLowerCase()
+    if (!['http', 'https'].includes(scheme) || !/^https?:\/\//i.test(candidate)) {
+      throw new Error('Enter a public HTTP or HTTPS website URL.')
+    }
+  }
   const withProtocol = /^https?:\/\//i.test(candidate)
     ? candidate
     : `https://${candidate}`
@@ -19,6 +66,10 @@ export function normalizeWebsiteUrl(value: string): string {
 
   if (url.username || url.password) {
     throw new Error('URLs containing credentials are not supported.')
+  }
+
+  if (isNonPublicHostname(url.hostname)) {
+    throw new Error('Enter a public website URL, not a local or private-network address.')
   }
 
   return url.toString()

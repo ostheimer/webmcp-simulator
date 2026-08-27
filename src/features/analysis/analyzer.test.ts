@@ -11,6 +11,36 @@ describe('normalizeWebsiteUrl', () => {
       'URLs containing credentials',
     )
   })
+
+  it.each([
+    'ftp://example.com',
+    'file:///tmp/site.html',
+    'mailto:owner@example.com',
+  ])('rejects the explicit non-HTTP scheme in %s', (value) => {
+    expect(() => normalizeWebsiteUrl(value)).toThrow(
+      'Enter a public HTTP or HTTPS website URL',
+    )
+  })
+
+  it.each([
+    'localhost:5173',
+    'http://127.0.0.1',
+    'https://10.0.0.8',
+    'https://172.20.0.1',
+    'https://192.168.1.20',
+    'https://[::1]',
+    'https://router.local',
+  ])('rejects the local or private address %s', (value) => {
+    expect(() => normalizeWebsiteUrl(value)).toThrow(
+      'not a local or private-network address',
+    )
+  })
+
+  it('preserves an explicit port on a public hostname', () => {
+    expect(normalizeWebsiteUrl('example.com:8443/path')).toBe(
+      'https://example.com:8443/path',
+    )
+  })
 })
 
 describe('createLimitedAnalysis', () => {

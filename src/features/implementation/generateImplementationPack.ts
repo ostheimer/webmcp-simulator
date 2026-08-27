@@ -16,6 +16,14 @@ export const accessPathLabels: Record<AccessPath, string> = {
   repository: 'Existing code repository',
 }
 
+export function defaultImplementationCapabilityIds(
+  capabilities: ProposedCapability[],
+): string[] {
+  return capabilities
+    .filter((capability) => capability.name !== 'reset_simulation')
+    .map((capability) => capability.id)
+}
+
 function accessInstructions(accessPath: AccessPath, platform: string): string {
   switch (accessPath) {
     case 'no-access':
@@ -42,11 +50,15 @@ Reuse existing application logic and implement the capabilities in the smallest 
 }
 
 function capabilitySection(capability: ProposedCapability): string {
+  const scope = capability.name === 'reset_simulation'
+    ? '\n\nScope: Simulator test-only. Do not expose this as a production website capability.'
+    : ''
+
   return `### ${capability.name}
 
 Purpose: ${capability.description}
 
-Why it helps: ${capability.reason}
+Why it helps: ${capability.reason}${scope}
 
 Input schema:
 

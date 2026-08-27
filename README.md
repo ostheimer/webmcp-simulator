@@ -54,6 +54,8 @@ The Implementation Pack turns selected opportunities into a Markdown brief and a
 
 Alternative paths cover a CMS or website builder, an external agency, and an existing repository. The pack can be copied or downloaded as `WEBMCP_IMPLEMENTATION.md`.
 
+`reset_simulation` remains available for repeatable demo and evaluation runs, but it is marked test-only and excluded from production-oriented Implementation Packs by default.
+
 ## Technology
 
 - Vite

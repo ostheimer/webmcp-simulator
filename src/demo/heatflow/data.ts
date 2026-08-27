@@ -96,6 +96,7 @@ export const heatFlowCapabilities: ProposedCapability[] = [
         properties: {
           query: {
             type: 'string',
+            maxLength: 80,
             description: 'Service need or heating technology to look for.',
           },
         },
@@ -206,7 +207,7 @@ export const heatFlowCapabilities: ProposedCapability[] = [
             enum: ['heat_pump', 'ground_heat_pump', 'hybrid_heating', 'maintenance'],
           },
           postcode: { type: 'string', pattern: '^\\d{4}$' },
-          propertySize: { type: 'number', minimum: 30, maximum: 1000 },
+          propertySize: { type: 'integer', minimum: 30, maximum: 1000 },
           message: { type: 'string', maxLength: 500 },
         },
         required: ['service', 'postcode', 'propertySize'],

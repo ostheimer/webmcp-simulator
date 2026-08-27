@@ -23,6 +23,11 @@ function App() {
     window.scrollTo({ top: 0 })
   }
 
+  function openLanding() {
+    setView('landing')
+    window.scrollTo({ top: 0 })
+  }
+
   function analyzeUrl(url: string): string | null {
     try {
       setAttempt(createLimitedAnalysis(url))
@@ -40,7 +45,7 @@ function App() {
     return (
       <AnalysisWorkspace
         attempt={attempt}
-        onBack={() => setView('landing')}
+        onBack={openLanding}
         onDemo={openDemoAnalysis}
         onLaunch={() => {
           setView('simulation')

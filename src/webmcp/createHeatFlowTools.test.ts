@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { heatFlowCapabilities } from '../demo/heatflow/data'
 import { createHeatFlowTools } from './createHeatFlowTools'
 
 function handlers() {
@@ -53,6 +54,67 @@ describe('createHeatFlowTools', () => {
     )
     expect(callbacks.prepareQuote).toHaveBeenCalledOnce()
     expect(result).toMatchObject({ prepared: true, submitted: false })
+  })
+
+  it('uses the same whole-number property-size contract everywhere', async () => {
+    const callbacks = handlers()
+    const tool = createHeatFlowTools(callbacks).find(
+      (candidate) => candidate.name === 'prepare_quote_request',
+    )!
+    const proposed = heatFlowCapabilities.find(
+      (capability) => capability.name === 'prepare_quote_request',
+    )!
+
+    expect(tool.inputSchema).toMatchObject({
+      properties: { propertySize: { type: 'integer' } },
+    })
+    expect(proposed.inputSchema).toMatchObject({
+      properties: { propertySize: { type: 'integer' } },
+    })
+    await expect(tool.execute(
+      { service: 'heat_pump', postcode: '2230', propertySize: 150.5 },
+      { signal: new AbortController().signal },
+    )).rejects.toThrow('propertySize must be a whole number')
+    expect(callbacks.prepareQuote).not.toHaveBeenCalled()
+  })
+
+  it('counts schema maxLength limits in Unicode code points', async () => {
+    const callbacks = handlers()
+    const tools = createHeatFlowTools(callbacks)
+    const quoteTool = tools.find(
+      (candidate) => candidate.name === 'prepare_quote_request',
+    )!
+    const searchTool = tools.find(
+      (candidate) => candidate.name === 'search_services',
+    )!
+
+    await expect(quoteTool.execute(
+      {
+        service: 'heat_pump',
+        postcode: '2230',
+        propertySize: 150,
+        message: '😀'.repeat(500),
+      },
+      { signal: new AbortController().signal },
+    )).resolves.toMatchObject({ prepared: true })
+    await expect(quoteTool.execute(
+      {
+        service: 'heat_pump',
+        postcode: '2230',
+        propertySize: 150,
+        message: '😀'.repeat(501),
+      },
+      { signal: new AbortController().signal },
+    )).rejects.toThrow('message must be at most 500 characters')
+
+    await expect(searchTool.execute(
+      { query: '😀'.repeat(80) },
+      { signal: new AbortController().signal },
+    )).resolves.toMatchObject({ query: '😀'.repeat(80) })
+    await expect(searchTool.execute(
+      { query: '😀'.repeat(81) },
+      { signal: new AbortController().signal },
+    )).rejects.toThrow('query must be at most 80 characters')
   })
 
   it('rejects invalid quote inputs before changing state', async () => {

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { heatFlowCapabilities, heatFlowAnalysis } from '../../demo/heatflow/data'
 import {
   accessPathLabels,
+  defaultImplementationCapabilityIds,
   generateImplementationPack,
   type AccessPath,
 } from './generateImplementationPack'
@@ -16,7 +17,7 @@ const accessOptions: Array<{ id: AccessPath; icon: string; description: string }
 export function ImplementationPack() {
   const [accessPath, setAccessPath] = useState<AccessPath>('no-access')
   const [platform, setPlatform] = useState('I do not know yet')
-  const [selectedIds, setSelectedIds] = useState(() => heatFlowCapabilities.map((capability) => capability.id))
+  const [selectedIds, setSelectedIds] = useState(() => defaultImplementationCapabilityIds(heatFlowCapabilities))
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
 
   const selectedCapabilities = useMemo(
@@ -105,8 +106,8 @@ export function ImplementationPack() {
                 <label key={capability.id}>
                   <input type="checkbox" checked={selectedIds.includes(capability.id)} onChange={() => toggleCapability(capability.id)} />
                   <span className="custom-check" aria-hidden="true">✓</span>
-                  <span><code>{capability.name}</code><small>{capability.description}</small></span>
-                  <em className={`impact-label impact-${capability.impact}`}>{capability.impact}</em>
+                  <span><code>{capability.name}</code><small>{capability.description}{capability.name === 'reset_simulation' ? ' Test-only simulator control; excluded by default.' : ''}</small></span>
+                  <em className={`impact-label impact-${capability.impact}`}>{capability.name === 'reset_simulation' ? 'test only' : capability.impact}</em>
                 </label>
               ))}
             </div>
