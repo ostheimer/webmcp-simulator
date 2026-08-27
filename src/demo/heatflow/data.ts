@@ -98,6 +98,7 @@ export const heatFlowCapabilities: ProposedCapability[] = [
             type: 'string',
             minLength: 1,
             maxLength: 80,
+            pattern: '\\S',
             description: 'Service need or heating technology to look for.',
           },
         },

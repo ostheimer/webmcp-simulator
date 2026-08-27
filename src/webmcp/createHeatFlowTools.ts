@@ -58,6 +58,22 @@ function throwIfAborted(signal: AbortSignal): void {
 export function createHeatFlowTools(
   handlers: HeatFlowToolHandlers,
 ): WebMcpTool[] {
+  let pendingVisibleMutation: Promise<void> = Promise.resolve()
+  function enqueueVisibleMutation<T>(
+    signal: AbortSignal,
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    const result = pendingVisibleMutation.then(() => {
+      throwIfAborted(signal)
+      return mutation()
+    })
+    pendingVisibleMutation = result.then(
+      () => undefined,
+      () => undefined,
+    )
+    return result
+  }
+
   return [
     {
       name: 'search_services',
@@ -71,6 +87,7 @@ export function createHeatFlowTools(
             type: 'string',
             minLength: 1,
             maxLength: 80,
+            pattern: '\\S',
             description: 'Heating service or technology to search for.',
           },
         },
@@ -83,8 +100,10 @@ export function createHeatFlowTools(
         const signal = executionSignal(options)
         throwIfAborted(signal)
         const matches = searchServices(query)
-        await handlers.search(query, matches)
-        return { query, visibleServiceIds: matches, count: matches.length }
+        return enqueueVisibleMutation(signal, async () => {
+          await handlers.search(query, matches)
+          return { query, visibleServiceIds: matches, count: matches.length }
+        })
       },
     },
     {
@@ -112,8 +131,10 @@ export function createHeatFlowTools(
         const signal = executionSignal(options)
         throwIfAborted(signal)
         const result = checkServiceArea(postcode, service)
-        await handlers.checkArea(result)
-        return result
+        return enqueueVisibleMutation(signal, async () => {
+          await handlers.checkArea(result)
+          return result
+        })
       },
     },
     {
@@ -148,9 +169,12 @@ export function createHeatFlowTools(
         if (unique.length !== values.length || unique.some((value) => !serviceIds.includes(value))) {
           throw new Error('Use unique service IDs from the HeatFlow catalog.')
         }
-        throwIfAborted(executionSignal(options))
-        await handlers.compare(unique)
-        return { comparedServiceIds: unique, count: unique.length }
+        const signal = executionSignal(options)
+        throwIfAborted(signal)
+        return enqueueVisibleMutation(signal, async () => {
+          await handlers.compare(unique)
+          return { comparedServiceIds: unique, count: unique.length }
+        })
       },
     },
     {
@@ -183,20 +207,23 @@ export function createHeatFlowTools(
           throw new Error('propertySize must be a whole number between 30 and 1000.')
         }
         const message = readString(input, 'message', { maxLength: 500 })
-        throwIfAborted(executionSignal(options))
+        const signal = executionSignal(options)
+        throwIfAborted(signal)
         const quote = {
           service,
           postcode,
           propertySize: String(propertySize),
           message,
         }
-        await handlers.prepareQuote(quote)
-        return {
-          prepared: true,
-          submitted: false,
-          draft: quote,
-          instruction: 'Review the visible form before taking any further action.',
-        }
+        return enqueueVisibleMutation(signal, async () => {
+          await handlers.prepareQuote(quote)
+          return {
+            prepared: true,
+            submitted: false,
+            draft: quote,
+            instruction: 'Review the visible form before taking any further action.',
+          }
+        })
       },
     },
     {
@@ -206,9 +233,12 @@ export function createHeatFlowTools(
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       annotations: { readOnlyHint: false },
       execute: async (_input, options) => {
-        throwIfAborted(executionSignal(options))
-        await handlers.reset()
-        return { reset: true }
+        const signal = executionSignal(options)
+        throwIfAborted(signal)
+        return enqueueVisibleMutation(signal, async () => {
+          await handlers.reset()
+          return { reset: true }
+        })
       },
     },
   ]

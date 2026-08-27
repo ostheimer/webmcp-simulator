@@ -4,6 +4,7 @@ import {
   accessPathLabels,
   defaultImplementationCapabilityIds,
   generateImplementationPack,
+  isImplementationPackReady,
   type AccessPath,
 } from './generateImplementationPack'
 
@@ -24,6 +25,7 @@ export const ImplementationPack = memo(function ImplementationPack() {
     () => heatFlowCapabilities.filter((capability) => selectedIds.includes(capability.id)),
     [selectedIds],
   )
+  const packReady = isImplementationPackReady(selectedCapabilities)
   const pack = useMemo(
     () => generateImplementationPack({
       websiteUrl: heatFlowAnalysis.url,
@@ -39,6 +41,7 @@ export const ImplementationPack = memo(function ImplementationPack() {
   }
 
   async function copyPack() {
+    if (!packReady) return
     try {
       if (!navigator.clipboard?.writeText) throw new Error('Clipboard API unavailable')
       await navigator.clipboard.writeText(pack)
@@ -60,6 +63,7 @@ export const ImplementationPack = memo(function ImplementationPack() {
   }
 
   function downloadPack() {
+    if (!packReady) return
     const url = URL.createObjectURL(new Blob([pack], { type: 'text/markdown;charset=utf-8' }))
     const anchor = document.createElement('a')
     anchor.href = url
@@ -119,12 +123,12 @@ export const ImplementationPack = memo(function ImplementationPack() {
         <aside className="pack-preview">
           <div className="pack-preview-header">
             <div><span className="document-icon" aria-hidden="true">≡</span><span><strong>WEBMCP_IMPLEMENTATION.md</strong><small>{selectedCapabilities.length} selected tools · {accessPathLabels[accessPath]}</small></span></div>
-            <span className="ready-badge">READY</span>
+            <span className={`ready-badge ${packReady ? '' : 'is-incomplete'}`}>{packReady ? 'READY' : 'SELECT A TOOL'}</span>
           </div>
           <pre role="region" tabIndex={0} aria-label="Generated WebMCP implementation brief">{pack}</pre>
           <div className="pack-actions">
-            <button className="primary-button" type="button" onClick={copyPack}>{copyState === 'copied' ? 'Copied for Codex ✓' : copyState === 'failed' ? 'Copy failed' : 'Copy for Codex'} <span>⌘</span></button>
-            <button className="secondary-button" type="button" onClick={downloadPack}>Download Markdown <span>↓</span></button>
+            <button className="primary-button" type="button" disabled={!packReady} onClick={copyPack}>{copyState === 'copied' ? 'Copied for Codex ✓' : copyState === 'failed' ? 'Copy failed' : 'Copy for Codex'} <span>⌘</span></button>
+            <button className="secondary-button" type="button" disabled={!packReady} onClick={downloadPack}>Download Markdown <span>↓</span></button>
           </div>
           <p className="pack-disclaimer">Implementation brief only. The original website remains unchanged.</p>
         </aside>

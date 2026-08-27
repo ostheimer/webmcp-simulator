@@ -45,10 +45,22 @@ describe('normalizeWebsiteUrl', () => {
     'https://example.invalid',
     'https://example.com',
     'https://router.local',
+    'https://foo..com',
+    'https://-foo.com',
+    'https://foo-.com',
+    'https://foo_com',
   ])('rejects the non-public address %s', (value) => {
     expect(() => normalizeWebsiteUrl(value)).toThrow(
       'not a local, private, or reserved address',
     )
+  })
+
+  it.each([
+    'https://valid-domain.com',
+    'https://subdomain.webmcp.dev',
+    'https://xn--mnich-kva.example.de',
+  ])('accepts the valid public DNS hostname %s', (value) => {
+    expect(normalizeWebsiteUrl(value)).toBe(new URL(value).toString())
   })
 
   it.each([

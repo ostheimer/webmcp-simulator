@@ -127,16 +127,96 @@ describe('createHeatFlowTools', () => {
     )!
 
     expect(searchTool.inputSchema).toMatchObject({
-      properties: { query: { minLength: 1 } },
+      properties: { query: { minLength: 1, pattern: '\\S' } },
     })
     expect(proposed.inputSchema).toMatchObject({
-      properties: { query: { minLength: 1 } },
+      properties: { query: { minLength: 1, pattern: '\\S' } },
     })
     await expect(searchTool.execute(
       { query: '' },
       { signal: new AbortController().signal },
     )).rejects.toThrow('query must be a non-empty string')
+    await expect(searchTool.execute(
+      { query: '   ' },
+      { signal: new AbortController().signal },
+    )).rejects.toThrow('query must be a non-empty string')
     expect(callbacks.search).not.toHaveBeenCalled()
+  })
+
+  it('serializes concurrent visible search mutations', async () => {
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const order: string[] = []
+    const callbacks = {
+      ...handlers(),
+      search: vi.fn(async (query: string) => {
+        order.push(`start:${query}`)
+        if (query === 'heat pump') await firstGate
+        order.push(`end:${query}`)
+      }),
+    }
+    const searchTool = createHeatFlowTools(callbacks).find(
+      (candidate) => candidate.name === 'search_services',
+    )!
+
+    const first = searchTool.execute(
+      { query: 'heat pump' },
+      { signal: new AbortController().signal },
+    )
+    await vi.waitFor(() => expect(callbacks.search).toHaveBeenCalledOnce())
+    const second = searchTool.execute(
+      { query: 'maintenance' },
+      { signal: new AbortController().signal },
+    )
+    await Promise.resolve()
+    expect(callbacks.search).toHaveBeenCalledOnce()
+
+    releaseFirst()
+    await expect(Promise.all([first, second])).resolves.toMatchObject([
+      { query: 'heat pump' },
+      { query: 'maintenance' },
+    ])
+    expect(order).toEqual([
+      'start:heat pump',
+      'end:heat pump',
+      'start:maintenance',
+      'end:maintenance',
+    ])
+  })
+
+  it('does not run a queued visible mutation after it is aborted', async () => {
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const callbacks = {
+      ...handlers(),
+      search: vi.fn(async (query: string) => {
+        if (query === 'heat pump') await firstGate
+      }),
+    }
+    const searchTool = createHeatFlowTools(callbacks).find(
+      (candidate) => candidate.name === 'search_services',
+    )!
+    const first = searchTool.execute(
+      { query: 'heat pump' },
+      { signal: new AbortController().signal },
+    )
+    await vi.waitFor(() => expect(callbacks.search).toHaveBeenCalledOnce())
+
+    const queuedController = new AbortController()
+    const queued = searchTool.execute(
+      { query: 'maintenance' },
+      { signal: queuedController.signal },
+    )
+    queuedController.abort()
+    releaseFirst()
+
+    await expect(first).resolves.toMatchObject({ query: 'heat pump' })
+    await expect(queued).rejects.toMatchObject({ name: 'AbortError' })
+    expect(callbacks.search).toHaveBeenCalledOnce()
   })
 
   it('rejects invalid quote inputs before changing state', async () => {

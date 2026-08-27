@@ -184,6 +184,10 @@ export function isValidQuoteDraft(quote: QuoteDraft): boolean {
     && Array.from(quote.message).length <= 500
 }
 
+export function limitCodePoints(value: string, maximum: number): string {
+  return Array.from(value).slice(0, maximum).join('')
+}
+
 export type WebMcpStatus = 'checking' | 'connected' | 'unavailable' | 'error'
 
 export function toolCatalogLabel(status: WebMcpStatus): string {

@@ -10,6 +10,7 @@ import {
   createActivity,
   initialSimulationState,
   isValidQuoteDraft,
+  limitCodePoints,
   searchServices,
   simulationReducer,
   toolCatalogLabel,
@@ -208,7 +209,7 @@ export function SimulationWorkspace({ onBack }: SimulationWorkspaceProps) {
                 {state.agentPreparedQuote && <div className="prepared-banner"><span>✦</span><div><strong>Prepared by agent</strong><small>Review and edit every field before continuing.</small></div></div>}
                 <label>Service<select required value={state.quote.service} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'service', value: event.target.value })}><option value="">Choose a service</option>{heatFlowServices.map((service) => <option value={service.toolValue} key={service.id}>{service.name}</option>)}</select></label>
                 <div className="form-row"><label>Postcode<input required inputMode="numeric" minLength={4} maxLength={4} pattern="[0-9]{4}" value={state.quote.postcode} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'postcode', value: event.target.value.replace(/\D/g, '').slice(0, 4) })} placeholder="2230" /></label><label>Property size (m²)<input required type="number" min="30" max="1000" step="1" value={state.quote.propertySize} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'propertySize', value: event.target.value })} placeholder="150" /></label></div>
-                <label>Message<textarea value={state.quote.message} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'message', value: event.target.value })} placeholder="What should the advisor know?" maxLength={500} /></label>
+                <label>Message<textarea aria-describedby="quote-message-limit" value={state.quote.message} onChange={(event) => dispatch({ type: 'EDIT_QUOTE', field: 'message', value: limitCodePoints(event.target.value, 500) })} placeholder="What should the advisor know?" /><small className="field-limit" id="quote-message-limit">{Array.from(state.quote.message).length}/500 characters</small></label>
                 <button type="submit">Review request <span>→</span></button>
                 <small className="simulation-submit-note">Simulation only — this button never sends data.</small>
                 {state.sendNotice && <div className="not-sent-notice" role="status">✓ Review complete. No request was sent.</div>}

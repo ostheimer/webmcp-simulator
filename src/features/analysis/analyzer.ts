@@ -122,6 +122,15 @@ function isNonPublicIpv6(value: string): boolean {
   )
 }
 
+function isValidDnsHostname(hostname: string): boolean {
+  if (hostname.length > 253 || !hostname.includes('.')) return false
+  return hostname.split('.').every(
+    (label) => label.length >= 1
+      && label.length <= 63
+      && /^[a-z\d](?:[a-z\d-]{0,61}[a-z\d])?$/i.test(label),
+  )
+}
+
 function isNonPublicHostname(value: string): boolean {
   const hostname = value.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '')
   if (
@@ -155,7 +164,7 @@ function isNonPublicHostname(value: string): boolean {
     return isNonPublicIpv6(hostname)
   }
 
-  return !hostname.includes('.')
+  return !isValidDnsHostname(hostname)
 }
 
 export function normalizeWebsiteUrl(value: string): string {

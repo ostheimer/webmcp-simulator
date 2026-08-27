@@ -3,6 +3,7 @@ import { heatFlowCapabilities } from '../../demo/heatflow/data'
 import {
   defaultImplementationCapabilityIds,
   generateImplementationPack,
+  isImplementationPackReady,
 } from './generateImplementationPack'
 
 describe('generateImplementationPack', () => {
@@ -48,5 +49,18 @@ describe('generateImplementationPack', () => {
     })
     expect(pack).toContain('Simulator test-only')
     expect(pack).toContain('Do not expose this as a production website capability')
+  })
+
+  it('marks an empty capability selection as incomplete and non-exportable', () => {
+    expect(isImplementationPackReady([])).toBe(false)
+    const pack = generateImplementationPack({
+      websiteUrl: 'https://heatflow.example',
+      accessPath: 'no-access',
+      platform: '',
+      capabilities: [],
+    })
+    expect(pack).toContain('Status: Incomplete')
+    expect(pack).toContain('Select at least one proposed WebMCP capability')
+    expect(pack).not.toContain('Implement WebMCP support')
   })
 })

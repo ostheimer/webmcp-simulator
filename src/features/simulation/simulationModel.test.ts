@@ -4,6 +4,7 @@ import {
   createActivity,
   initialSimulationState,
   isValidQuoteDraft,
+  limitCodePoints,
   searchServices,
   simulationReducer,
   toolCatalogLabel,
@@ -51,6 +52,11 @@ describe('HeatFlow simulation rules', () => {
     expect(isValidQuoteDraft({ ...validDraft, postcode: '223' })).toBe(false)
     expect(isValidQuoteDraft({ ...validDraft, propertySize: '150.5' })).toBe(false)
     expect(isValidQuoteDraft({ ...validDraft, propertySize: '29' })).toBe(false)
+  })
+
+  it('limits human quote messages using Unicode code points', () => {
+    expect(Array.from(limitCodePoints('😀'.repeat(501), 500))).toHaveLength(500)
+    expect(limitCodePoints('abc', 500)).toBe('abc')
   })
 })
 
