@@ -1,4 +1,4 @@
-import type { WebsiteAnalysis } from '../../types/analysis'
+import type { WebsiteAnalysis } from '../../types/analysis.ts'
 
 export interface AnalysisAttempt {
   analysis: WebsiteAnalysis
@@ -120,6 +120,14 @@ function isNonPublicIpv6(value: string): boolean {
   return !isGlobalUnicast || nonPublicGlobalUnicastRanges.some(
     ([block, prefix]) => isInIpv6Cidr(address, block, prefix),
   )
+}
+
+export function isPublicNetworkAddress(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/^\[|\]$/g, '')
+  const ipv4 = parseIpv4(normalized)
+  if (ipv4) return !isNonPublicHostname(normalized)
+  if (normalized.includes(':')) return !isNonPublicIpv6(normalized)
+  return false
 }
 
 function isValidDnsHostname(hostname: string): boolean {

@@ -1,0 +1,61 @@
+export type WrapperInteractionKind = 'search' | 'filter' | 'prepare_form' | 'navigation'
+
+export interface WrapperDomEvidence {
+  id: string
+  tag: 'a' | 'input' | 'select' | 'textarea'
+  type: string
+  role: string
+  label: string
+  selector: string
+  fieldKey?: string
+  formId?: string
+  optionCount?: number
+  sensitive: boolean
+}
+
+export interface WrapperAxEvidence {
+  role: string
+  name: string
+}
+
+export interface WrapperCapability {
+  id: string
+  name: string
+  title: string
+  description: string
+  kind: WrapperInteractionKind
+  inputSchema: Record<string, unknown>
+  evidenceIds: string[]
+  sampleInput: Record<string, unknown>
+}
+
+export interface WrapperAnalysis {
+  sessionId: string
+  requestedUrl: string
+  finalUrl: string
+  title: string
+  screenshotDataUrl: string
+  domEvidence: WrapperDomEvidence[]
+  axEvidence: WrapperAxEvidence[]
+  capabilities: WrapperCapability[]
+  warnings: string[]
+  blockedRequests: number
+  createdAt: string
+}
+
+export interface WrapperActivity {
+  id: string
+  toolName: string
+  summary: string
+  createdAt: string
+}
+
+export interface WrapperActionResult {
+  screenshotDataUrl: string
+  activity: WrapperActivity
+  structuredContent: {
+    toolName: string
+    isolatedStateChanged: true
+    externalSubmission: false
+  }
+}

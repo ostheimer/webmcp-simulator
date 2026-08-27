@@ -4,6 +4,14 @@
 
 WebMCP Simulator helps website owners, agencies, product managers, and other decision-makers understand what a website could become with WebMCP before changing the original site.
 
+The current research branch also contains a local-only isolated wrapper proof:
+it opens a real public site in ephemeral Playwright Chromium, records real DOM,
+accessibility, and screenshot evidence, and registers wrapper-owned WebMCP tools
+for a strict allowlist of safe interactions. See
+[`docs/wrapper-proof.md`](docs/wrapper-proof.md) for architecture, stash reuse,
+security boundaries, verification, and hosting options. The proof is not
+deployed and does not change the production site.
+
 The current vertical slice uses a deterministic fictional HeatFlow website to propose potential WebMCP capabilities and launch a safe simulation in which a compatible agent can invoke real WebMCP tools. Every invocation produces a visible state change on the simulation page. For arbitrary URLs, the browser-only MVP records only the normalized URL and deliberately makes no unsupported capability claims.
 
 ## Product boundaries

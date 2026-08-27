@@ -2,21 +2,28 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 
 interface LandingScreenProps {
-  onAnalyze: (url: string) => string | null
+  onAnalyze: (url: string) => Promise<string | null>
   onDemo: () => void
 }
 
 export function LandingScreen({ onAnalyze, onDemo }: LandingScreenProps) {
   const [url, setUrl] = useState('')
   const [error, setError] = useState('')
+  const [analyzing, setAnalyzing] = useState(false)
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!url.trim()) {
       setError('Enter a public website URL or try the HeatFlow demo.')
       return
     }
-    setError(onAnalyze(url) ?? '')
+    setAnalyzing(true)
+    setError('')
+    try {
+      setError(await onAnalyze(url) ?? '')
+    } finally {
+      setAnalyzing(false)
+    }
   }
 
   return (
@@ -39,7 +46,7 @@ export function LandingScreen({ onAnalyze, onDemo }: LandingScreenProps) {
               website through structured tools — before implementing anything.
             </p>
 
-            <form className="url-composer" onSubmit={handleSubmit}>
+            <form className="url-composer" onSubmit={(event) => void handleSubmit(event)} aria-busy={analyzing}>
               <label className="sr-only" htmlFor="website-url">Public website URL</label>
               <span className="url-icon" aria-hidden="true">⌁</span>
               <input
@@ -51,8 +58,9 @@ export function LandingScreen({ onAnalyze, onDemo }: LandingScreenProps) {
                 placeholder="https://yourwebsite.com"
                 autoComplete="url"
                 aria-describedby={error ? 'url-error' : undefined}
+                disabled={analyzing}
               />
-              <button type="submit">Analyze website <span aria-hidden="true">→</span></button>
+              <button type="submit" disabled={analyzing}>{analyzing ? 'Opening isolated browser…' : 'Analyze website'} <span aria-hidden="true">→</span></button>
             </form>
             {error && <p className="form-error" id="url-error">{error}</p>}
 
