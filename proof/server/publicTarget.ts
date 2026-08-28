@@ -8,6 +8,7 @@ export interface ResolvedAddress {
 }
 export interface PublicTarget {
   url: string
+  origin: string
   hostname: string
   pinnedAddress: string
   addresses: ResolvedAddress[]
@@ -24,7 +25,8 @@ export async function resolvePublicTarget(
   resolver: TargetResolver = defaultResolver,
 ): Promise<PublicTarget> {
   const url = normalizeWebsiteUrl(value)
-  const hostname = new URL(url).hostname.replace(/^\[|\]$/g, '')
+  const parsedUrl = new URL(url)
+  const hostname = parsedUrl.hostname.replace(/^\[|\]$/g, '')
   const addresses = isIP(hostname)
     ? [{ address: hostname, family: isIP(hostname) }]
     : await resolver(hostname)
@@ -40,5 +42,5 @@ export async function resolvePublicTarget(
   const pinnedAddress = addresses.find(({ family }) => family === 4)?.address
     ?? addresses[0].address
 
-  return { url, hostname, pinnedAddress, addresses }
+  return { url, origin: parsedUrl.origin, hostname, pinnedAddress, addresses }
 }

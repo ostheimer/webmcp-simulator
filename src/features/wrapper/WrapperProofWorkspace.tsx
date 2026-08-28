@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
 import { createWrapperTools } from '../../webmcp/createWrapperTools'
 import { registerTools } from '../../webmcp/registerTools'
 import {
@@ -27,7 +27,7 @@ function registrationLabel(state: RegistrationState): string {
 }
 
 export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspaceProps) {
-  const [screenshot, setScreenshot] = useState(analysis.screenshotDataUrl)
+  const [currentAnalysis, setCurrentAnalysis] = useState(analysis)
   const [activities, setActivities] = useState<WrapperActivity[]>([])
   const [registration, setRegistration] = useState<RegistrationState>('checking')
   const [registrationError, setRegistrationError] = useState('')
@@ -43,13 +43,14 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
     setActionError('')
     try {
       const result = await executeWrapperAction(
-        analysis.sessionId,
+        currentAnalysis.sessionId,
         capability.name,
         input,
         signal,
       )
       if (signal.aborted) throw new DOMException('The tool call was cancelled.', 'AbortError')
-      setScreenshot(result.screenshotDataUrl)
+      setRegistration('checking')
+      setCurrentAnalysis(result.analysis)
       setActivities((current) => [result.activity, ...current])
       return result
     } catch (error) {
@@ -60,12 +61,12 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
     } finally {
       setBusyTool('')
     }
-  }, [analysis.sessionId])
+  }, [currentAnalysis.sessionId])
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const controller = new AbortController()
     let active = true
-    const tools = createWrapperTools(analysis, { execute: runCapability })
+    const tools = createWrapperTools(currentAnalysis, { execute: runCapability })
     registerTools(tools, { controller })
       .then((result) => {
         if (active) setRegistration(result.supported ? 'connected' : 'unavailable')
@@ -79,7 +80,7 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
       active = false
       controller.abort()
     }
-  }, [analysis, runCapability])
+  }, [currentAnalysis, runCapability])
 
   useEffect(() => () => closeWrapperSession(analysis.sessionId), [analysis.sessionId])
 
@@ -101,31 +102,31 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
 
       <div className="wrapper-safety-banner">
         <div><span className="simulation-pulse" /><strong>Live wrapper proof</strong><span>Original website unchanged</span></div>
-        <p>Fresh Chromium session · no profile cookies · no login · no submit · no external writes</p>
+        <p>Fresh Chromium session · no profile cookies · preparation blocks network · navigation is explicit</p>
       </div>
 
       <main className="wrapper-proof-layout">
         <section className="wrapper-browser-panel">
           <div className="panel-heading-row">
-            <div><span className="workspace-kicker">ISOLATED TARGET</span><h1>{analysis.title}</h1></div>
+            <div><span className="workspace-kicker">ISOLATED TARGET</span><h1>{currentAnalysis.title}</h1></div>
             <span className="simulation-chip">Real screenshot</span>
           </div>
-          <p className="wrapper-target-url">{analysis.finalUrl}</p>
+          <p className="wrapper-target-url" data-testid="current-wrapper-url">{currentAnalysis.finalUrl}</p>
           <div className="wrapper-screenshot-frame">
             <div className="browser-bar">
               <div className="browser-dots" aria-hidden="true"><span /><span /><span /></div>
-              <div className="browser-url">◇ {analysis.finalUrl}</div>
+              <div className="browser-url">◇ {currentAnalysis.finalUrl}</div>
               <span className="browser-menu" aria-hidden="true">ISOLATED</span>
             </div>
-            <img src={screenshot} alt={`Current isolated browser view of ${analysis.title}`} />
+            <img src={currentAnalysis.screenshotDataUrl} alt={`Current isolated browser view of ${currentAnalysis.title}`} />
           </div>
 
           <div className="wrapper-evidence-grid">
             <section>
               <span className="workspace-kicker">DOM EVIDENCE</span>
-              <h2>{analysis.domEvidence.length} visible interactions observed</h2>
+              <h2>{currentAnalysis.domEvidence.length} visible interactions observed</h2>
               <div className="wrapper-evidence-list">
-                {analysis.domEvidence.slice(0, 8).map((item) => (
+                {currentAnalysis.domEvidence.slice(0, 8).map((item) => (
                   <div key={item.id}>
                     <span className={item.sensitive ? 'evidence-blocked' : 'evidence-check'}>{item.sensitive ? '×' : '✓'}</span>
                     <span><strong>{item.role} · {item.type}</strong><small>Untrusted label: “{item.label}”</small></span>
@@ -135,9 +136,9 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
             </section>
             <section>
               <span className="workspace-kicker">ACCESSIBILITY EVIDENCE</span>
-              <h2>{analysis.axEvidence.length} named AX nodes retained</h2>
+              <h2>{currentAnalysis.axEvidence.length} named AX nodes retained</h2>
               <div className="wrapper-ax-list">
-                {analysis.axEvidence.slice(0, 8).map((item, index) => (
+                {currentAnalysis.axEvidence.slice(0, 8).map((item, index) => (
                   <div key={`${item.role}-${item.name}-${index}`}><code>{item.role}</code><span>{item.name}</span></div>
                 ))}
               </div>
@@ -147,24 +148,24 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
 
         <aside className="wrapper-agent-panel" aria-label="Wrapper WebMCP tools and agent activity">
           <div className="wrapper-agent-heading">
-            <div><span className="agent-orb">⌘</span><span><strong>Wrapper agent</strong><small>{analysis.capabilities.length} safe tools inferred</small></span></div>
+            <div><span className="agent-orb">⌘</span><span><strong>Wrapper agent</strong><small>{currentAnalysis.capabilities.length} safe tools inferred</small></span></div>
             <span className={`webmcp-state state-${registration}`}>{registrationLabel(registration)}</span>
           </div>
           {registration === 'unavailable' && <div className="support-message"><strong>Browser WebMCP unavailable</strong><p>The tools remain testable through the same local handlers. A compatible browser can discover them through document.modelContext.</p></div>}
           {registrationError && <div className="support-message error"><strong>Registration failed</strong><p>{registrationError}</p></div>}
 
           <section className="wrapper-tools">
-            <div className="agent-section-label"><span>DYNAMIC TOOLS</span><em>{analysis.capabilities.length}</em></div>
-            {analysis.capabilities.length === 0 ? (
+            <div className="agent-section-label"><span>DYNAMIC TOOLS</span><em>{currentAnalysis.capabilities.length}</em></div>
+            {currentAnalysis.capabilities.length === 0 ? (
               <div className="empty-activity"><span>◇</span><strong>No safe tool detected</strong><p>This page is visible, but the proof will not invent an interaction.</p></div>
-            ) : analysis.capabilities.map((capability) => (
+            ) : currentAnalysis.capabilities.map((capability) => (
               <article className="wrapper-tool-card" key={capability.id}>
                 <div><span className="tool-mini-icon">✦</span><span><code>{capability.name}</code><small>{capability.description}</small></span></div>
                 <pre tabIndex={0}>{JSON.stringify(capability.inputSchema, null, 2)}</pre>
                 {capability.kind === 'navigation' && (
                   <div className="wrapper-option-map">
                     {capability.evidenceIds.map((evidenceId, index) => {
-                      const evidence = analysis.domEvidence.find(({ id }) => id === evidenceId)
+                      const evidence = currentAnalysis.domEvidence.find(({ id }) => id === evidenceId)
                       return <small key={evidenceId}><b>{index}</b> Untrusted page label: “{evidence?.label || 'Unnamed link'}”</small>
                     })}
                   </div>
@@ -194,7 +195,7 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
           {actionError && <div className="support-message error" role="alert"><strong>Tool call failed</strong><p>{actionError}</p></div>}
           <div className="wrapper-proof-boundary">
             <strong>Proof boundary</strong>
-            <p>{analysis.blockedRequests} requests blocked. Page text is untrusted. Cross-origin frames, non-GET requests, downloads, popups, uploads, and submission are not supported.</p>
+            <p>{currentAnalysis.blockedRequests} requests blocked. Page text is untrusted. Preparation disables all later page network requests; explicit navigation permits only same-origin document and static-resource GET/HEAD reads.</p>
           </div>
         </aside>
       </main>

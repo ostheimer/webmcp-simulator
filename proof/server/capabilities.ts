@@ -6,39 +6,31 @@ import type {
 
 const SEARCH_HINT = /\b(search|find|query|suche|suchen)\b/i
 const FILTER_HINT = /\b(filter|category|sort|type|status|kategorie|filtern|sortieren)\b/i
-const UNSAFE_HINT = /\b(account|address|book|buy|card|checkout|comment|contact|delete|email|login|message|order|password|pay|phone|publish|register|remove|send|signin|signup|subscribe|upload|username|konto|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
+const UNSAFE_HINT = /\b(account|address|book|buy|card|checkout|comment|contact|delete|email|login|message|order|password|pay|phone|publish|register|remove|secrets?|security|send|signin|signup|ssn|subscribe|tokens?|upload|username|konto|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 
 export interface DetectedControl extends WrapperDomEvidence {
   optionValues?: string[]
+  optionIndices?: number[]
 }
 
 export interface ActionField {
   key: string
   selector: string
   type: string
+  optionIndices?: number[]
 }
 
 export interface CapabilityAction {
   kind: WrapperInteractionKind
   selector?: string
-  selectors?: string[]
+  urls?: string[]
   optionValues?: string[]
+  optionIndices?: number[]
   fields?: ActionField[]
 }
 
 export interface InferredCapability extends WrapperCapability {
   action: CapabilityAction
-}
-
-function boundedIdentifier(value: string, fallback: string): string {
-  const identifier = value
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '')
-    .slice(0, 40)
-  return identifier || fallback
 }
 
 function isSearch(control: DetectedControl): boolean {
@@ -85,10 +77,10 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
     claimed.add(search.id)
     capabilities.push({
       id: 'detected-search',
-      name: 'search_page',
-      title: 'Search this page',
-      description: 'Populate the detected search control without submitting a form.',
-      kind: 'search',
+      name: 'prepare_page_search',
+      title: 'Prepare a page search',
+      description: 'Populate the detected search control for review without claiming that results were loaded.',
+      kind: 'prepare_search',
       inputSchema: {
         type: 'object',
         properties: {
@@ -99,7 +91,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       },
       evidenceIds: [search.id],
       sampleInput: { query: 'New York' },
-      action: { kind: 'search', selector: search.selector },
+      action: { kind: 'prepare_search', selector: search.selector },
     })
   }
 
@@ -131,6 +123,8 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         kind: 'filter',
         selector: control.selector,
         optionValues: control.optionValues,
+        optionIndices: control.optionIndices
+          ?? control.optionValues?.map((_value, optionIndex) => optionIndex),
       },
     })
   })
@@ -161,7 +155,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       sampleInput: { linkIndex: 0 },
       action: {
         kind: 'navigation',
-        selectors: links.map(({ selector }) => selector),
+        urls: links.map(({ optionValues }) => optionValues?.[0] as string),
       },
     })
   }
@@ -178,7 +172,6 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
     const safeFields = group.filter((control) =>
       !control.sensitive
       && !UNSAFE_HINT.test(control.label)
-      && Boolean(control.fieldKey)
       && ['checkbox', 'date', 'month', 'number', 'radio', 'range', 'select-one', 'text', 'time', 'week'].includes(control.type),
     ).slice(0, 6)
     if (safeFields.length < 2) continue
@@ -186,14 +179,18 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
     formIndex += 1
     const properties: Record<string, Record<string, unknown>> = Object.create(null)
     const fields: ActionField[] = []
-    const usedKeys = new Set<string>()
     safeFields.forEach((control, index) => {
-      const base = boundedIdentifier(control.fieldKey ?? '', `field_${index + 1}`)
-      let key = base
-      for (let suffix = 2; usedKeys.has(key); suffix += 1) key = `${base}_${suffix}`
-      usedKeys.add(key)
+      // Remote names and ids are server-only selector evidence. Agent-facing
+      // schemas use wrapper-owned neutral keys exclusively.
+      const key = `field_${index + 1}`
       properties[key] = schemaForField(control)
-      fields.push({ key, selector: control.selector, type: control.type })
+      fields.push({
+        key,
+        selector: control.selector,
+        type: control.type,
+        optionIndices: control.optionIndices
+          ?? control.optionValues?.map((_value, optionIndex) => optionIndex),
+      })
     })
 
     capabilities.push({

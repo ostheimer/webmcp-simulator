@@ -1,4 +1,4 @@
-export type WrapperInteractionKind = 'search' | 'filter' | 'prepare_form' | 'navigation'
+export type WrapperInteractionKind = 'prepare_search' | 'filter' | 'prepare_form' | 'navigation'
 
 export interface WrapperDomEvidence {
   id: string
@@ -51,11 +51,20 @@ export interface WrapperActivity {
 }
 
 export interface WrapperActionResult {
+  finalUrl: string
   screenshotDataUrl: string
+  analysis: WrapperAnalysis
   activity: WrapperActivity
   structuredContent: {
     toolName: string
+    actionKind: WrapperInteractionKind
+    finalUrl: string
     isolatedStateChanged: true
-    externalSubmission: false
+    targetStateVerified: true
+    networkPolicy: 'blocked-after-preparation' | 'same-origin-navigation'
+    blockedNetworkRequests: number
+    allowedNetworkRequests: number
+    formSubmissionPrevented: true
+    navigationOccurred: boolean
   }
 }

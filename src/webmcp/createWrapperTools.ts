@@ -23,16 +23,19 @@ export function createWrapperTools(
     inputSchema: capability.inputSchema,
     annotations: {
       readOnlyHint: false,
-      untrustedContentHint: false,
+      untrustedContentHint: true,
     },
     execute: async (input, options) => {
       const signal = options?.signal ?? new AbortController().signal
       if (signal.aborted) throw new DOMException('The tool call was cancelled.', 'AbortError')
       const result = await handlers.execute(capability, input, signal)
+      const text = result.structuredContent.networkPolicy === 'blocked-after-preparation'
+        ? 'Prepared visible state in the isolated page. All action-time and later page network requests remain blocked for this session.'
+        : 'Opened a same-origin page in the isolated browser. Only document and static-resource GET/HEAD reads were allowed for this explicit navigation.'
       return {
         content: [{
           type: 'text',
-          text: 'Updated the isolated website session. No form was submitted and no external write action was allowed.',
+          text,
         }],
         structuredContent: result.structuredContent,
       }

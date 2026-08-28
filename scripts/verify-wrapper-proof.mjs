@@ -29,8 +29,21 @@ try {
   })
   const after = digest(action.screenshotDataUrl)
   if (before === after) throw new Error('The isolated screenshot did not change.')
-  if (action.structuredContent.externalSubmission !== false) {
-    throw new Error('The action did not prove the no-submission boundary.')
+  if (action.finalUrl !== action.analysis.finalUrl || !action.structuredContent.targetStateVerified) {
+    throw new Error('The action did not return verified current-page state.')
+  }
+  if (capability.name === 'prepare_page_search') {
+    if (action.structuredContent.networkPolicy !== 'blocked-after-preparation'
+      || action.structuredContent.allowedNetworkRequests !== 0
+      || action.structuredContent.navigationOccurred) {
+      throw new Error('Search preparation did not prove the network-blocked field-state contract.')
+    }
+  } else if (capability.name === 'open_page_link') {
+    if (action.structuredContent.networkPolicy !== 'same-origin-navigation'
+      || !action.structuredContent.navigationOccurred
+      || action.finalUrl === analysis.finalUrl) {
+      throw new Error('Navigation did not prove a current same-origin destination.')
+    }
   }
   process.stdout.write(`${JSON.stringify({
     targetUrl,
@@ -40,7 +53,9 @@ try {
     blockedRequests: analysis.blockedRequests,
     toolName: capability.name,
     screenshotChanged: true,
-    externalSubmission: false,
+    finalUrl: action.finalUrl,
+    targetStateVerified: true,
+    networkPolicy: action.structuredContent.networkPolicy,
   }, null, 2)}\n`)
 } finally {
   await fetch(`${baseUrl}/api/wrapper/session/${encodeURIComponent(analysis.sessionId)}`, {

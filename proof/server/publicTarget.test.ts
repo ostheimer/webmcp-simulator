@@ -9,6 +9,7 @@ describe('resolvePublicTarget', () => {
     ])
 
     expect(target).toMatchObject({
+      origin: 'https://public.example.at',
       hostname: 'public.example.at',
       pinnedAddress: '93.184.216.34',
     })
@@ -22,6 +23,9 @@ describe('resolvePublicTarget', () => {
     '::1',
     'fc00::1',
     '2001:db8::1',
+    '64:ff9b::7f00:1',
+    '64:ff9b::a00:1',
+    '64:ff9b::a9fe:a9fe',
   ])('rejects a hostname that resolves to %s', async (address) => {
     await expect(resolvePublicTarget('https://public.example.at', async () => [
       { address, family: address.includes(':') ? 6 : 4 },

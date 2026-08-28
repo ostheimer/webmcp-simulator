@@ -33,6 +33,9 @@ describe('normalizeWebsiteUrl', () => {
     'https://203.0.113.1',
     'https://[::1]',
     'https://[64:ff9b:1::1]',
+    'https://[64:ff9b::7f00:1]',
+    'https://[64:ff9b::a00:1]',
+    'https://[64:ff9b::a9fe:a9fe]',
     'https://[100:0:0:1::1]',
     'https://[2001:11::1]',
     'https://[2001:21::1]',
@@ -67,6 +70,7 @@ describe('normalizeWebsiteUrl', () => {
     'https://[2606:4700:4700::1111]',
     'https://[2001:4860:4860::8888]',
     'https://[64:ff9b::0808:0808]',
+    'https://[64:ff9b::5db8:d822]',
   ])('accepts the globally reachable IPv6 address %s', (value) => {
     expect(normalizeWebsiteUrl(value)).toBe(new URL(value).toString())
   })

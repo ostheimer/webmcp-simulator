@@ -21,6 +21,7 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
 }
 
 function sendJson(response: ServerResponse, status: number, body: unknown): void {
+  if (response.destroyed || response.writableEnded) return
   response.statusCode = status
   response.setHeader('Content-Type', 'application/json; charset=utf-8')
   response.setHeader('Cache-Control', 'no-store')
@@ -80,11 +81,29 @@ export function wrapperProofPlugin(): Plugin {
             ) {
               throw new Error('sessionId, toolName, and input are required.')
             }
-            sendJson(response, 200, await service.execute(
-              body.sessionId,
-              body.toolName,
-              body.input as Record<string, unknown>,
-            ))
+            const controller = new AbortController()
+            const abort = () => controller.abort()
+            const abortOnClosedResponse = () => {
+              if (!response.writableEnded) controller.abort()
+            }
+            request.once('aborted', abort)
+            response.once('close', abortOnClosedResponse)
+            try {
+              const result = await service.execute(
+                body.sessionId,
+                body.toolName,
+                body.input as Record<string, unknown>,
+                controller.signal,
+              )
+              if (controller.signal.aborted) {
+                await service.closeSession(body.sessionId)
+                return
+              }
+              sendJson(response, 200, result)
+            } finally {
+              request.off('aborted', abort)
+              response.off('close', abortOnClosedResponse)
+            }
             return
           }
           if (request.method === 'DELETE' && request.url.startsWith('/session/')) {

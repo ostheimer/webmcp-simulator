@@ -61,6 +61,24 @@ function isInIpv6Cidr(address: bigint, block: string, prefixLength: number): boo
   return (address >> shift) === (base >> shift)
 }
 
+function isNonPublicIpv4(parts: number[]): boolean {
+  const [first, second, third] = parts
+  return first === 0
+    || first === 10
+    || first === 127
+    || (first === 100 && second >= 64 && second <= 127)
+    || (first === 169 && second === 254)
+    || (first === 172 && second >= 16 && second <= 31)
+    || (first === 192 && second === 0 && third === 0)
+    || (first === 192 && second === 0 && third === 2)
+    || (first === 192 && second === 168)
+    || (first === 192 && second === 88 && third === 99)
+    || (first === 198 && (second === 18 || second === 19))
+    || (first === 198 && second === 51 && third === 100)
+    || (first === 203 && second === 0 && third === 113)
+    || first >= 224
+}
+
 // Source: IANA IPv6 Special-Purpose Address Space registry.
 // The broad 2001::/23 allocation is not globally reachable except for these
 // more-specific assignments. ORCHID ranges intentionally remain excluded
@@ -110,13 +128,25 @@ function isNonPublicIpv6(value: string): boolean {
   const address = parseIpv6(value)
   if (address === null) return true
 
+  // RFC 6052 well-known NAT64 addresses carry an IPv4 destination in their
+  // final 32 bits. Reject every non-public embedded destination before the
+  // prefix is considered globally reachable, independent of translator policy.
+  if (isInIpv6Cidr(address, '64:ff9b::', 96)) {
+    const embedded = Number(address & 0xffff_ffffn)
+    const ipv4 = [
+      (embedded >>> 24) & 0xff,
+      (embedded >>> 16) & 0xff,
+      (embedded >>> 8) & 0xff,
+      embedded & 0xff,
+    ]
+    return isNonPublicIpv4(ipv4)
+  }
+
   if (globallyReachableIetfExceptions.some(
     ([block, prefix]) => isInIpv6Cidr(address, block, prefix),
   )) return false
 
   const isGlobalUnicast = isInIpv6Cidr(address, '2000::', 3)
-    // IANA marks the well-known NAT64 translation prefix globally reachable.
-    || isInIpv6Cidr(address, '64:ff9b::', 96)
   return !isGlobalUnicast || nonPublicGlobalUnicastRanges.some(
     ([block, prefix]) => isInIpv6Cidr(address, block, prefix),
   )
@@ -151,21 +181,7 @@ function isNonPublicHostname(value: string): boolean {
 
   const ipv4 = parseIpv4(hostname)
   if (ipv4) {
-    const [first, second, third] = ipv4
-    return first === 0
-      || first === 10
-      || first === 127
-      || (first === 100 && second >= 64 && second <= 127)
-      || (first === 169 && second === 254)
-      || (first === 172 && second >= 16 && second <= 31)
-      || (first === 192 && second === 0 && third === 0)
-      || (first === 192 && second === 0 && third === 2)
-      || (first === 192 && second === 168)
-      || (first === 192 && second === 88 && third === 99)
-      || (first === 198 && (second === 18 || second === 19))
-      || (first === 198 && second === 51 && third === 100)
-      || (first === 203 && second === 0 && third === 113)
-      || first >= 224
+    return isNonPublicIpv4(ipv4)
   }
 
   if (hostname.includes(':')) {

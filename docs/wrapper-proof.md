@@ -20,18 +20,23 @@ React wrapper page
      -> existing public URL syntax and special-address checks
      -> resolve every DNS answer; fail if any answer is non-public
      -> launch one ephemeral Chromium process with the hostname pinned
-     -> allow only GET/HEAD to that exact hostname
+     -> allow only document/static-resource GET/HEAD to the exact validated
+        origin (scheme, host, port); block XHR/fetch even during observation
      -> block frames, popups, downloads, WebSocket, EventSource, WebRTC,
         sendBeacon, service workers, uploads, and non-read HTTP methods
      -> collect visible DOM controls/links, CDP accessibility nodes, screenshot
-     -> infer fixed-metadata search, filter, safe preparation, or navigation tools
+     -> put Chromium offline at the capture boundary, then require all
+        already-started requests to terminate before exposing any tool
+     -> infer fixed-metadata search preparation, filter, safe form preparation,
+        or navigation tools with neutral wrapper-owned parameter keys
   <- evidence + proposed tools + screenshot + ephemeral session ID
   -> register wrapper-owned tools through document.modelContext
   -> POST /api/wrapper/action
      -> validate the inferred tool input
-     -> serialize mutations in the isolated page
-     -> fill/select/navigate without form submission
-  <- refreshed screenshot + fixed activity result (`externalSubmission: false`)
+     -> serialize mutations and propagate cancellation into the browser queue
+     -> block every network request during and after preparation
+     -> treat explicit same-origin navigation as a separate read-network policy
+  <- post-settle verified semantic state + current URL/evidence/tools + measured network result
 ```
 
 The server plugin is `apply: "serve"`; it is absent from the production Vite
@@ -42,17 +47,19 @@ site.
 
 The proof recognizes only:
 
-- a visible search input with native or bounded search evidence;
+- a visible search input that can be prepared without claiming search results;
 - a visible select with bounded filter evidence;
 - at least two visible, non-sensitive fields in the same form;
-- visible, same-host HTTP(S) links that are not downloads, popups, or paths with
+- visible, same-origin HTTP(S) links that are not downloads, popups, or paths with
   consequential keywords.
 
 Page labels are displayed as explicitly untrusted evidence. They are never
-copied into tool titles, descriptions, or parameter instructions. Filter and
-navigation choices use numeric indices, keeping page-authored strings out of
-the WebMCP schema. Password, email, phone, message, payment, account, upload,
-purchase, booking, publishing, deletion, and similar controls are excluded.
+copied into tool titles, descriptions, parameter names, or parameter
+instructions. Form parameters use neutral `field_1`, `field_2`, and similar
+wrapper-owned keys; selectors and remote identifiers remain server-only.
+Filter and navigation choices use numeric indices. Password, secret, token,
+email, phone, message, payment, account, upload, purchase, booking, publishing,
+deletion, and similar controls are excluded.
 
 ## Reuse assessment
 
@@ -80,20 +87,27 @@ metadata.
 
 ## Known proof limits
 
-- Only one validated hostname is allowed. Cross-host redirects and CDN assets
+- Only one validated origin is allowed. Cross-origin redirects and CDN assets
   are blocked, so some sites render partially or are rejected.
 - Tool inference covers native controls and links, not canvas controls, shadow
   DOM, cross-origin frames, or interactions that require authentication.
-- Navigation changes the target page but does not yet re-infer and re-register a
-  fresh tool catalog for the destination document.
+- Each successful navigation returns the current final URL, re-collects DOM and
+  accessibility evidence, replaces the server capability map, and re-registers
+  the destination tool catalog before the updated page is shown.
 - Ephemeral sessions live in memory for five minutes, are capped at three local
   sessions, and disappear when the dev server stops. There is no durable queue,
   persistence, account, or multi-tenant layer.
 - Browser automation detection, CSP, consent walls, or rendering failures are
   reported as unsupported. The wrapper does not bypass them.
-- GET is treated as the read-only transport boundary for this proof. A
-  production service also needs network-level egress controls and site-specific
-  abuse review because HTTP semantics alone cannot prove business safety.
+- Preparation is a network-silent boundary: all HTTP requests are blocked from
+  before the first DOM mutation until the session closes. Explicit navigation
+  separately permits same-origin document/static-resource GET/HEAD reads and
+  reports that policy instead
+  of claiming that no external effect occurred. A production service still
+  needs a network-level egress firewall and site-specific abuse review because
+  HTTP method semantics cannot prove business safety.
+- Cancellation closes any session whose browser mutation has begun; callers
+  must analyze again instead of continuing from a partially mutated page.
 
 ## Hosting options and operational boundaries
 
