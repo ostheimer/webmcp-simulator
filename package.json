@@ -10,13 +10,17 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build:sandbox-worker": "esbuild proof/sandbox/workerEntry.ts --bundle --platform=node --format=esm --target=node24 --external:playwright --outfile=proof/sandbox/dist/worker.mjs",
+    "sandbox:snapshot": "npm run build:sandbox-worker && node scripts/create-wrapper-sandbox-snapshot.mjs",
+    "build": "npm run build:sandbox-worker && tsc -b && vite build",
     "lint": "oxlint",
+    "pretest": "npm run build:sandbox-worker",
     "test": "vitest run",
     "verify:wrapper": "node scripts/verify-wrapper-proof.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@vercel/sandbox": "^3.2.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
@@ -25,6 +29,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^6.1.0",
+    "esbuild": "^0.28.2",
     "oxlint": "^1.79.0",
     "playwright": "^1.62.1",
     "typescript": "~6.0.2",

@@ -31,6 +31,7 @@ export interface WrapperCapability {
 
 export interface WrapperAnalysis {
   sessionId: string
+  sessionToken: string
   requestedUrl: string
   finalUrl: string
   title: string
@@ -40,6 +41,25 @@ export interface WrapperAnalysis {
   capabilities: WrapperCapability[]
   warnings: string[]
   blockedRequests: number
+  analyzedPages: number
+  maxPages: number
+  expiresAt: string
+  runtime: {
+    provider: 'local-playwright' | 'vercel-sandbox'
+    runtimeMs: number
+    vcpus: number
+    memoryMb: number
+    allowedNetworkRequests: number
+    blockedNetworkRequests: number
+    ingressBytes?: number
+    egressBytes?: number
+    estimatedCost: {
+      currency: 'USD'
+      lowerBound: number
+      upperBound: number
+      basis: 'illustrative-list-price'
+    }
+  }
   createdAt: string
 }
 

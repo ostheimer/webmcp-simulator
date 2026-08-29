@@ -1,4 +1,14 @@
 {
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "types": ["node"],
+    "noEmit": true,
+    "skipLibCheck": true
+  },
   "files": [],
   "references": [
     { "path": "./tsconfig.app.json" },

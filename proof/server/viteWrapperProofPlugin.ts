@@ -1,8 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Plugin } from 'vite'
 import { WrapperProofService } from './wrapperService.ts'
-
-const MAX_BODY_BYTES = 32 * 1024
+import { WRAPPER_MAX_REQUEST_BODY_BYTES } from './wrapperLimits.ts'
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []
@@ -10,7 +9,7 @@ async function readJson(request: IncomingMessage): Promise<Record<string, unknow
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += buffer.length
-    if (size > MAX_BODY_BYTES) throw new Error('Request body is too large.')
+    if (size > WRAPPER_MAX_REQUEST_BODY_BYTES) throw new Error('Request body is too large.')
     chunks.push(buffer)
   }
   const parsed = JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
@@ -40,10 +39,15 @@ function assertLocalApiRequest(request: IncomingMessage): void {
   if (origin && host && new URL(origin).host !== host) {
     throw new Error('Wrapper API origin does not match the local application.')
   }
+  const clientId = request.headers['x-webmcp-client']
+  if (request.method !== 'GET' && (typeof clientId !== 'string' || !/^[A-Za-z0-9_-]{16,80}$/.test(clientId))) {
+    throw new Error('A valid per-tab wrapper client identifier is required.')
+  }
 }
 
 export function wrapperProofPlugin(): Plugin {
   const service = new WrapperProofService()
+  const activeAnalyses = new Set<string>()
   return {
     name: 'webmcp-wrapper-proof',
     apply: 'serve',
@@ -67,13 +71,21 @@ export function wrapperProofPlugin(): Plugin {
           if (request.method === 'POST' && request.url === '/analyze') {
             const body = await readJson(request)
             if (typeof body.url !== 'string') throw new Error('url must be a string.')
-            sendJson(response, 200, await service.analyze(body.url))
+            const clientId = request.headers['x-webmcp-client'] as string
+            if (activeAnalyses.has(clientId)) throw new Error('Only one website analysis may run per browser tab.')
+            activeAnalyses.add(clientId)
+            try {
+              sendJson(response, 200, await service.analyze(body.url))
+            } finally {
+              activeAnalyses.delete(clientId)
+            }
             return
           }
           if (request.method === 'POST' && request.url === '/action') {
             const body = await readJson(request)
             if (
               typeof body.sessionId !== 'string'
+              || typeof body.sessionToken !== 'string'
               || typeof body.toolName !== 'string'
               || !body.input
               || typeof body.input !== 'object'
@@ -91,12 +103,13 @@ export function wrapperProofPlugin(): Plugin {
             try {
               const result = await service.execute(
                 body.sessionId,
+                body.sessionToken,
                 body.toolName,
                 body.input as Record<string, unknown>,
                 controller.signal,
               )
               if (controller.signal.aborted) {
-                await service.closeSession(body.sessionId)
+                await service.closeSession(body.sessionId, body.sessionToken)
                 return
               }
               sendJson(response, 200, result)
@@ -106,10 +119,15 @@ export function wrapperProofPlugin(): Plugin {
             }
             return
           }
-          if (request.method === 'DELETE' && request.url.startsWith('/session/')) {
-            const sessionId = decodeURIComponent(request.url.slice('/session/'.length))
-            await service.closeSession(sessionId)
-            sendJson(response, 200, { closed: true })
+          if (request.method === 'DELETE' && request.url === '/session') {
+            const body = await readJson(request)
+            if (typeof body.sessionId !== 'string' || typeof body.sessionToken !== 'string') {
+              throw new Error('sessionId and sessionToken are required.')
+            }
+            const closed = await service.closeSession(body.sessionId, body.sessionToken)
+            sendJson(response, closed ? 200 : 401, closed
+              ? { closed: true }
+              : { error: 'The isolated browser session capability is invalid.' })
             return
           }
           next()

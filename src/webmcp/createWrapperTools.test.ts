@@ -5,6 +5,7 @@ import { createWrapperTools } from './createWrapperTools'
 
 const analysis: WrapperAnalysis = {
   sessionId: 'session-1',
+  sessionToken: 'test-capability-token',
   requestedUrl: 'https://public.example.at/',
   finalUrl: 'https://public.example.at/',
   title: 'Untrusted page title',
@@ -13,6 +14,23 @@ const analysis: WrapperAnalysis = {
   axEvidence: [],
   warnings: [],
   blockedRequests: 0,
+  analyzedPages: 1,
+  maxPages: 10,
+  expiresAt: '2026-08-27T12:05:00.000Z',
+  runtime: {
+    provider: 'local-playwright',
+    runtimeMs: 100,
+    vcpus: 2,
+    memoryMb: 4096,
+    allowedNetworkRequests: 1,
+    blockedNetworkRequests: 0,
+    estimatedCost: {
+      currency: 'USD',
+      lowerBound: 0,
+      upperBound: 0.0001,
+      basis: 'illustrative-list-price',
+    },
+  },
   createdAt: '2026-08-28T00:00:00.000Z',
   capabilities: [{
     id: 'search',

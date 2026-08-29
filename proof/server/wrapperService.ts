@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { chromium, type Browser, type BrowserContext, type Page, type Request } from 'playwright'
 import type {
   WrapperActionResult,
@@ -13,8 +13,19 @@ import {
   type InferredCapability,
 } from './capabilities.ts'
 import { resolvePublicTarget, type PublicTarget } from './publicTarget.ts'
+import { createSessionCapability } from './sessionCapability.ts'
+import { WrapperServiceError } from './wrapperErrors.ts'
+import {
+  estimateWrapperCost,
+  WRAPPER_MAX_AX_EVIDENCE,
+  WRAPPER_MAX_DOM_EVIDENCE,
+  WRAPPER_MAX_PAGES,
+  WRAPPER_MAX_SCREENSHOT_BYTES,
+  WRAPPER_MEMORY_MB,
+  WRAPPER_SESSION_TTL_MS,
+  WRAPPER_VCPUS,
+} from './wrapperLimits.ts'
 
-const SESSION_TTL_MS = 5 * 60 * 1000
 const NAVIGATION_TIMEOUT_MS = 18_000
 const MAX_CONCURRENT_SESSIONS = 3
 const ACTION_SETTLE_MS = 300
@@ -29,6 +40,7 @@ interface ActionNetworkMetrics {
 
 interface ProofSession {
   id: string
+  token: string
   browser: Browser
   context: BrowserContext
   page: Page
@@ -38,6 +50,9 @@ interface ProofSession {
   queue: Promise<void>
   expiresAt: number
   blockedRequests: number
+  allowedRequests: number
+  analyzedPages: number
+  createdAtMs: number
   networkLocked: boolean
   networkMode: SessionNetworkMode
   activeNetworkMetrics: ActionNetworkMetrics | null
@@ -66,7 +81,17 @@ function cleanPageText(value: unknown, limit = 140): string {
 }
 
 function screenshotDataUrl(buffer: Buffer): string {
+  if (buffer.byteLength > WRAPPER_MAX_SCREENSHOT_BYTES) {
+    throw new WrapperServiceError('response_limit', 'The isolated screenshot exceeded the response safety limit.', 507)
+  }
   return `data:image/jpeg;base64,${buffer.toString('base64')}`
+}
+
+function tokenMatches(expected: string, provided: string): boolean {
+  const expectedBuffer = Buffer.from(expected)
+  const providedBuffer = Buffer.from(provided)
+  return expectedBuffer.length === providedBuffer.length
+    && timingSafeEqual(expectedBuffer, providedBuffer)
 }
 
 function abortError(): DOMException {
@@ -121,7 +146,7 @@ export function isSameOriginHttpUrl(value: string, expectedOrigin: string): bool
 }
 
 async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
-  return page.evaluate((unsafePatternSource) => {
+  return page.evaluate(({ unsafePatternSource, maxControls }) => {
     const unsafePattern = new RegExp(unsafePatternSource, 'i')
     const normalize = (value: unknown, limit = 140) => String(value ?? '')
       .replace(/\s+/g, ' ')
@@ -141,7 +166,7 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
       && !('readOnly' in element && element.readOnly))
 
     const forms = new Map<HTMLFormElement, string>()
-    return controls.slice(0, 80).map((element, index) => {
+    return controls.slice(0, maxControls).map((element, index) => {
       const id = `proof-control-${index + 1}`
       element.setAttribute('data-webmcp-proof-id', id)
       const form = 'form' in element ? element.form : null
@@ -214,7 +239,10 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
         sensitive,
       }
     })
-  }, UNSAFE_FIELD_HINT.source)
+  }, {
+    unsafePatternSource: UNSAFE_FIELD_HINT.source,
+    maxControls: WRAPPER_MAX_DOM_EVIDENCE,
+  })
 }
 
 async function collectAxEvidence(context: BrowserContext, page: Page): Promise<WrapperAxEvidence[]> {
@@ -239,7 +267,7 @@ async function collectAxEvidence(context: BrowserContext, page: Page): Promise<W
         name: cleanPageText(node.name?.value),
       }))
       .filter(({ name }) => Boolean(name))
-      .slice(0, 40)
+      .slice(0, WRAPPER_MAX_AX_EVIDENCE)
   } finally {
     await cdp.detach()
   }
@@ -252,7 +280,7 @@ function validateActionInput(
   if (capability.kind === 'prepare_search') {
     const query = input.query
     if (typeof query !== 'string' || !query.trim() || Array.from(query).length > 80) {
-      throw new Error('query must be a non-empty string of at most 80 characters.')
+      throw new WrapperServiceError('invalid_action', 'query must be a non-empty string of at most 80 characters.', 400)
     }
     return
   }
@@ -260,7 +288,7 @@ function validateActionInput(
     const optionIndex = input.optionIndex
     const optionCount = capability.action.optionIndices?.length ?? 0
     if (!Number.isInteger(optionIndex) || Number(optionIndex) < 0 || Number(optionIndex) >= optionCount) {
-      throw new Error('optionIndex must reference a visible option.')
+      throw new WrapperServiceError('invalid_action', 'optionIndex must reference a visible option.', 400)
     }
     return
   }
@@ -268,14 +296,14 @@ function validateActionInput(
     const linkIndex = input.linkIndex
     const linkCount = capability.action.urls?.length ?? 0
     if (!Number.isInteger(linkIndex) || Number(linkIndex) < 0 || Number(linkIndex) >= linkCount) {
-      throw new Error('linkIndex must reference a visible same-origin link.')
+      throw new WrapperServiceError('invalid_action', 'linkIndex must reference a visible same-origin link.', 400)
     }
     return
   }
 
   const fields = new Map(capability.action.fields?.map((field) => [field.key, field]))
   if (Object.keys(input).length === 0 || Object.keys(input).some((key) => !fields.has(key))) {
-    throw new Error('Provide at least one detected safe field and no unknown fields.')
+    throw new WrapperServiceError('invalid_action', 'Provide at least one detected safe field and no unknown fields.', 400)
   }
   for (const [key, value] of Object.entries(input)) {
     const field = fields.get(key)
@@ -283,14 +311,16 @@ function validateActionInput(
     if (field.type === 'select-one') {
       const optionCount = field.optionIndices?.length ?? 0
       if (!Number.isInteger(value) || Number(value) < 0 || Number(value) >= optionCount) {
-        throw new Error(`${key} must reference a visible option.`)
+        throw new WrapperServiceError('invalid_action', `${key} must reference a visible option.`, 400)
       }
     } else if (field.type === 'checkbox' || field.type === 'radio') {
-      if (typeof value !== 'boolean') throw new Error(`${key} must be a boolean.`)
+      if (typeof value !== 'boolean') throw new WrapperServiceError('invalid_action', `${key} must be a boolean.`, 400)
     } else if (field.type === 'number' || field.type === 'range') {
-      if (typeof value !== 'number' || !Number.isFinite(value)) throw new Error(`${key} must be a finite number.`)
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        throw new WrapperServiceError('invalid_action', `${key} must be a finite number.`, 400)
+      }
     } else if (typeof value !== 'string' || Array.from(value).length > 200) {
-      throw new Error(`${key} must be a string of at most 200 characters.`)
+      throw new WrapperServiceError('invalid_action', `${key} must be a string of at most 200 characters.`, 400)
     }
   }
 }
@@ -390,7 +420,7 @@ export class WrapperProofService {
     const now = Date.now()
     await Promise.all([...this.sessions.values()]
       .filter(({ expiresAt }) => expiresAt <= now)
-      .map(({ id }) => this.closeSession(id)))
+      .map(({ id }) => this.destroySession(id)))
   }
 
   private async collectAnalysis(session: ProofSession): Promise<WrapperAnalysis> {
@@ -419,6 +449,7 @@ export class WrapperProofService {
 
     return {
       sessionId: session.id,
+      sessionToken: session.token,
       requestedUrl: session.requestedUrl,
       finalUrl: session.page.url(),
       title: cleanPageText(title, 180) || new URL(session.page.url()).hostname,
@@ -432,6 +463,18 @@ export class WrapperProofService {
       capabilities: inferred.map(publicCapability),
       warnings,
       blockedRequests: session.blockedRequests,
+      analyzedPages: session.analyzedPages,
+      maxPages: WRAPPER_MAX_PAGES,
+      expiresAt: new Date(session.expiresAt).toISOString(),
+      runtime: {
+        provider: 'local-playwright',
+        runtimeMs: Date.now() - session.createdAtMs,
+        vcpus: WRAPPER_VCPUS,
+        memoryMb: WRAPPER_MEMORY_MB,
+        allowedNetworkRequests: session.allowedRequests,
+        blockedNetworkRequests: session.blockedRequests,
+        estimatedCost: estimateWrapperCost({ runtimeMs: Date.now() - session.createdAtMs }),
+      },
       createdAt: new Date().toISOString(),
     }
   }
@@ -440,7 +483,7 @@ export class WrapperProofService {
     await this.closeExpiredSessions()
     if (this.sessions.size >= MAX_CONCURRENT_SESSIONS) {
       const oldestSessionId = this.sessions.keys().next().value as string | undefined
-      if (oldestSessionId) await this.closeSession(oldestSessionId)
+      if (oldestSessionId) await this.destroySession(oldestSessionId)
     }
     const target = await this.resolveTarget(value)
     const pinnedAddress = target.pinnedAddress.includes(':') ? `[${target.pinnedAddress}]` : target.pinnedAddress
@@ -501,8 +544,11 @@ export class WrapperProofService {
     await context.routeWebSocket(/.*/, (webSocket) => webSocket.close())
     const page = await context.newPage()
     const id = randomUUID()
+    const token = createSessionCapability()
+    const createdAtMs = Date.now()
     const session: ProofSession = {
       id,
+      token,
       browser,
       context,
       page,
@@ -510,8 +556,11 @@ export class WrapperProofService {
       targetOrigin: target.origin,
       capabilities: new Map(),
       queue: Promise.resolve(),
-      expiresAt: Date.now() + SESSION_TTL_MS,
+      expiresAt: createdAtMs + WRAPPER_SESSION_TTL_MS,
       blockedRequests: 0,
+      allowedRequests: 0,
+      analyzedPages: 1,
+      createdAtMs,
       networkLocked: false,
       networkMode: 'observing',
       activeNetworkMetrics: null,
@@ -541,6 +590,7 @@ export class WrapperProofService {
         return
       }
       if (session.activeNetworkMetrics) session.activeNetworkMetrics.allowed += 1
+      session.allowedRequests += 1
       session.inFlightRequests.add(request)
       try {
         await route.continue()
@@ -569,14 +619,19 @@ export class WrapperProofService {
       const analysis = await this.collectAnalysis(session)
       return analysis
     } catch (error) {
-      await this.closeSession(id)
-      const message = error instanceof Error ? error.message : 'Unknown browser failure'
-      throw new Error(`This page is not supported by the isolated proof: ${message}`)
+      await this.destroySession(id)
+      if (error instanceof WrapperServiceError) throw error
+      throw new WrapperServiceError(
+        'unsupported_page',
+        'This page could not be loaded safely in the isolated browser.',
+        422,
+      )
     }
   }
 
   async execute(
     sessionId: string,
+    sessionToken: string,
     toolName: string,
     input: Record<string, unknown>,
     signal?: AbortSignal,
@@ -584,7 +639,12 @@ export class WrapperProofService {
     await this.closeExpiredSessions()
     throwIfAborted(signal)
     const session = this.sessions.get(sessionId)
-    if (!session) throw new Error('The isolated browser session expired. Analyze the site again.')
+    if (!session) {
+      throw new WrapperServiceError('session_expired', 'The isolated browser session expired. Analyze the site again.', 410)
+    }
+    if (!tokenMatches(session.token, sessionToken)) {
+      throw new WrapperServiceError('invalid_capability', 'The isolated browser session capability is invalid.', 401)
+    }
 
     let resolveQueue!: () => void
     const turn = new Promise<void>((resolve) => {
@@ -599,10 +659,19 @@ export class WrapperProofService {
       await raceWithSignal(previous, signal)
       throwIfAborted(signal)
       if (this.sessions.get(sessionId) !== session) {
-        throw new Error('The isolated browser session expired. Analyze the site again.')
+        throw new WrapperServiceError('session_expired', 'The isolated browser session expired. Analyze the site again.', 410)
       }
       const capability = session.capabilities.get(toolName)
-      if (!capability) throw new Error('The requested tool is not available in this session.')
+      if (!capability) {
+        throw new WrapperServiceError('invalid_action', 'The requested tool is not available in this session.', 409)
+      }
+      if (capability.kind === 'navigation' && session.analyzedPages >= WRAPPER_MAX_PAGES) {
+        throw new WrapperServiceError(
+          'page_limit',
+          `This session reached its ${WRAPPER_MAX_PAGES}-page analysis limit.`,
+          422,
+        )
+      }
       validateActionInput(capability, input)
 
       const metrics: ActionNetworkMetrics = { allowed: 0, blocked: 0 }
@@ -632,11 +701,15 @@ export class WrapperProofService {
       if (!isSameOriginHttpUrl(session.page.url(), session.targetOrigin)) {
         throw new Error('The action attempted to leave the validated origin.')
       }
+      if (evidence.navigationOccurred) session.analyzedPages += 1
       const analysis = await raceWithSignal(this.collectAnalysis(session), signal)
       throwIfAborted(signal)
       await raceWithSignal(evidence.verify(), signal)
       throwIfAborted(signal)
-      session.expiresAt = Date.now() + SESSION_TTL_MS
+      session.expiresAt = Math.min(
+        session.createdAtMs + WRAPPER_SESSION_TTL_MS,
+        Date.now() + WRAPPER_SESSION_TTL_MS,
+      )
       session.networkMode = 'blocked'
       session.activeNetworkMetrics = null
 
@@ -670,7 +743,7 @@ export class WrapperProofService {
       }
     } catch (error) {
       if (actionStarted) {
-        await this.closeSession(sessionId)
+        await this.destroySession(sessionId)
         await actionPromise?.catch(() => undefined)
       }
       if (signal?.aborted) throw abortError()
@@ -680,7 +753,7 @@ export class WrapperProofService {
     }
   }
 
-  async closeSession(id: string): Promise<void> {
+  private async destroySession(id: string): Promise<void> {
     const session = this.sessions.get(id)
     if (!session) return
     this.sessions.delete(id)
@@ -688,7 +761,14 @@ export class WrapperProofService {
     await session.browser.close().catch(() => undefined)
   }
 
+  async closeSession(id: string, sessionToken: string): Promise<boolean> {
+    const session = this.sessions.get(id)
+    if (!session || !tokenMatches(session.token, sessionToken)) return false
+    await this.destroySession(id)
+    return true
+  }
+
   async close(): Promise<void> {
-    await Promise.all([...this.sessions.keys()].map((id) => this.closeSession(id)))
+    await Promise.all([...this.sessions.keys()].map((id) => this.destroySession(id)))
   }
 }

@@ -40,6 +40,12 @@ async function startFixture(): Promise<Fixture> {
         <main><h1>Second page</h1><input type="search" aria-label="Search destination"></main>`)
       return
     }
+    if (requestUrl.startsWith('/chain/')) {
+      const pageNumber = Number(requestUrl.slice('/chain/'.length))
+      response.end(`<!doctype html><title>Chain ${pageNumber}</title>
+        <main><h1>Chain ${pageNumber}</h1><a href="/chain/${pageNumber + 1}">Next chain page</a></main>`)
+      return
+    }
     const address = server.address()
     const port = typeof address === 'object' && address ? address.port : 0
     const slowScript = requestUrl === '/slow-page'
@@ -119,6 +125,31 @@ describe('isSameOriginHttpUrl', () => {
 })
 
 describe('WrapperProofService security boundaries', () => {
+  it('requires the separate capability for action and close without affecting the session', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')
+
+    await expect(service.execute(
+      analysis.sessionId,
+      'A'.repeat(43),
+      search!.name,
+      { query: 'blocked' },
+    )).rejects.toThrow('capability is invalid')
+    expect(await service.closeSession(analysis.sessionId, 'A'.repeat(43))).toBe(false)
+
+    const result = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search!.name,
+      { query: 'allowed' },
+    )
+    expect(result.structuredContent.targetStateVerified).toBe(true)
+  })
+
   it('publishes neutral field keys and blocks hostile preparation-time GET side effects', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -137,12 +168,14 @@ describe('WrapperProofService security boundaries', () => {
     expect(search).toBeDefined()
     const result = await service.execute(
       analysis.sessionId,
+      analysis.sessionToken,
       search!.name,
       { query: 'agent-secret' },
     )
     const filter = result.analysis.capabilities.find(({ name }) => name === 'set_page_filter')
     const filterResult = await service.execute(
       analysis.sessionId,
+      analysis.sessionToken,
       filter!.name,
       { optionIndex: 1 },
     )
@@ -181,11 +214,13 @@ describe('WrapperProofService security boundaries', () => {
 
     await expect(service.execute(
       analysis.sessionId,
+      analysis.sessionToken,
       search!.name,
       { query: 'agent-value' },
     )).rejects.toThrow('did not retain the prepared search value')
     await expect(service.execute(
       analysis.sessionId,
+      analysis.sessionToken,
       search!.name,
       { query: 'second-value' },
     )).rejects.toThrow('session expired')
@@ -201,6 +236,7 @@ describe('WrapperProofService security boundaries', () => {
 
     const result = await service.execute(
       analysis.sessionId,
+      analysis.sessionToken,
       navigation!.name,
       { linkIndex: 0 },
     )
@@ -232,6 +268,7 @@ describe('WrapperProofService security boundaries', () => {
 
     const pending = service.execute(
       analysis.sessionId,
+      analysis.sessionToken,
       navigation!.name,
       { linkIndex: 0 },
       controller.signal,
@@ -247,8 +284,41 @@ describe('WrapperProofService security boundaries', () => {
     expect(fixture.requests).not.toContain('/next')
     await expect(service.execute(
       analysis.sessionId,
+      analysis.sessionToken,
       navigation!.name,
       { linkIndex: 0 },
     )).rejects.toThrow('session expired')
+  })
+
+  it('caps a session at ten analyzed pages', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/chain/0`)
+
+    for (let page = 1; page < 10; page += 1) {
+      const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')
+      const result = await service.execute(
+        analysis.sessionId,
+        analysis.sessionToken,
+        navigation!.name,
+        { linkIndex: 0 },
+      )
+      analysis = result.analysis
+    }
+    expect(analysis.analyzedPages).toBe(10)
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation!.name,
+      { linkIndex: 0 },
+    )).rejects.toMatchObject({
+      code: 'page_limit',
+      status: 422,
+      message: 'This session reached its 10-page analysis limit.',
+    })
+    expect(fixture.requests).not.toContain('/chain/10')
   })
 })

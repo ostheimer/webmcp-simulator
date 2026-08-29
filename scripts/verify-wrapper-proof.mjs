@@ -2,11 +2,12 @@ import { createHash } from 'node:crypto'
 
 const baseUrl = process.env.WRAPPER_PROOF_BASE_URL || 'http://127.0.0.1:5173'
 const targetUrl = process.env.WRAPPER_PROOF_URL || 'https://www.scrapethissite.com/pages/forms/'
+const clientId = crypto.randomUUID()
 
 async function post(path, body) {
   const response = await fetch(`${baseUrl}${path}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-WebMCP-Client': clientId },
     body: JSON.stringify(body),
   })
   const result = await response.json()
@@ -24,6 +25,7 @@ try {
   const before = digest(analysis.screenshotDataUrl)
   const action = await post('/api/wrapper/action', {
     sessionId: analysis.sessionId,
+    sessionToken: analysis.sessionToken,
     toolName: capability.name,
     input: capability.sampleInput,
   })
@@ -58,7 +60,12 @@ try {
     networkPolicy: action.structuredContent.networkPolicy,
   }, null, 2)}\n`)
 } finally {
-  await fetch(`${baseUrl}/api/wrapper/session/${encodeURIComponent(analysis.sessionId)}`, {
+  await fetch(`${baseUrl}/api/wrapper/session`, {
     method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-WebMCP-Client': clientId },
+    body: JSON.stringify({
+      sessionId: analysis.sessionId,
+      sessionToken: analysis.sessionToken,
+    }),
   }).catch(() => undefined)
 }

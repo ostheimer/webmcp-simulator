@@ -19,5 +19,5 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts", "proof/server/**/*.ts"]
+  "include": ["vite.config.ts", "proof/server/**/*.ts", "proof/sandbox/**/*.ts", "api/**/*.ts"]
 }

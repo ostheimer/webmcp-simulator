@@ -26,6 +26,14 @@ function registrationLabel(state: RegistrationState): string {
   return 'REGISTERING TOOLS'
 }
 
+function formatDuration(runtimeMs: number): string {
+  return `${Math.max(0, runtimeMs / 1_000).toFixed(1)} s`
+}
+
+function formatCost(lowerBound: number, upperBound: number): string {
+  return `$${lowerBound.toFixed(4)}–$${upperBound.toFixed(4)}`
+}
+
 export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspaceProps) {
   const [currentAnalysis, setCurrentAnalysis] = useState(analysis)
   const [activities, setActivities] = useState<WrapperActivity[]>([])
@@ -44,6 +52,7 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
     try {
       const result = await executeWrapperAction(
         currentAnalysis.sessionId,
+        currentAnalysis.sessionToken,
         capability.name,
         input,
         signal,
@@ -61,7 +70,7 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
     } finally {
       setBusyTool('')
     }
-  }, [currentAnalysis.sessionId])
+  }, [currentAnalysis.sessionId, currentAnalysis.sessionToken])
 
   useLayoutEffect(() => {
     const controller = new AbortController()
@@ -82,7 +91,10 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
     }
   }, [currentAnalysis, runCapability])
 
-  useEffect(() => () => closeWrapperSession(analysis.sessionId), [analysis.sessionId])
+  useEffect(() => () => closeWrapperSession(
+    analysis.sessionId,
+    analysis.sessionToken,
+  ), [analysis.sessionId, analysis.sessionToken])
 
   function invokeSample(capability: WrapperCapability) {
     const controller = new AbortController()
@@ -112,6 +124,16 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
             <span className="simulation-chip">Real screenshot</span>
           </div>
           <p className="wrapper-target-url" data-testid="current-wrapper-url">{currentAnalysis.finalUrl}</p>
+          <div className="wrapper-runtime-strip" role="group" aria-label="Sitzungs- und Kostengrenzen">
+            <span><small>UMGEBUNG</small><strong>{currentAnalysis.runtime.provider === 'vercel-sandbox' ? 'Vercel Sandbox' : 'Lokales Chromium'}</strong></span>
+            <span><small>ANALYSIERTE SEITEN</small><strong>{currentAnalysis.analyzedPages} / {currentAnalysis.maxPages}</strong></span>
+            <span><small>LAUFZEIT</small><strong>{formatDuration(currentAnalysis.runtime.runtimeMs)}</strong></span>
+            <span><small>NETZWERK</small><strong>{currentAnalysis.runtime.allowedNetworkRequests} erlaubt · {currentAnalysis.runtime.blockedNetworkRequests} blockiert</strong></span>
+            <span><small>NÄHERUNGSWERT</small><strong>{formatCost(
+              currentAnalysis.runtime.estimatedCost.lowerBound,
+              currentAnalysis.runtime.estimatedCost.upperBound,
+            )}</strong></span>
+          </div>
           <div className="wrapper-screenshot-frame">
             <div className="browser-bar">
               <div className="browser-dots" aria-hidden="true"><span /><span /><span /></div>
@@ -194,8 +216,8 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
 
           {actionError && <div className="support-message error" role="alert"><strong>Tool call failed</strong><p>{actionError}</p></div>}
           <div className="wrapper-proof-boundary">
-            <strong>Proof boundary</strong>
-            <p>{currentAnalysis.blockedRequests} requests blocked. Page text is untrusted. Preparation disables all later page network requests; explicit navigation permits only same-origin document and static-resource GET/HEAD reads.</p>
+            <strong>Sicherheits- und Kostengrenze</strong>
+            <p>{currentAnalysis.blockedRequests} Requests blockiert. Seiteninhalt bleibt nicht vertrauenswürdig. Vorbereitung ist netzwerkstill; Navigation erlaubt nur explizite Same-Origin-GET/HEAD-Zugriffe. Die Kostenspanne ist ein grober Listenpreis-Näherungswert, keine Abrechnungsgarantie.</p>
           </div>
         </aside>
       </main>

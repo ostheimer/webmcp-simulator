@@ -1,6 +1,7 @@
 import { lookup } from 'node:dns/promises'
 import { isIP } from 'node:net'
 import { normalizeWebsiteUrl, isPublicNetworkAddress } from '../../src/features/analysis/analyzer.ts'
+import { WrapperServiceError } from './wrapperErrors.ts'
 
 export interface ResolvedAddress {
   address: string
@@ -24,7 +25,20 @@ export async function resolvePublicTarget(
   value: string,
   resolver: TargetResolver = defaultResolver,
 ): Promise<PublicTarget> {
-  const url = normalizeWebsiteUrl(value)
+  let url: string
+  try {
+    url = normalizeWebsiteUrl(value)
+  } catch (error) {
+    const safeMessages = new Set([
+      'Enter a public HTTP or HTTPS website URL.',
+      'URLs containing credentials are not supported.',
+      'Enter a public website URL, not a local, private, or reserved address.',
+    ])
+    const message = error instanceof Error && safeMessages.has(error.message)
+      ? error.message
+      : 'Enter a valid public HTTP or HTTPS website URL.'
+    throw new WrapperServiceError('invalid_target', message, 400)
+  }
   const parsedUrl = new URL(url)
   const hostname = parsedUrl.hostname.replace(/^\[|\]$/g, '')
   const addresses = isIP(hostname)
@@ -32,11 +46,11 @@ export async function resolvePublicTarget(
     : await resolver(hostname)
 
   if (addresses.length === 0) {
-    throw new Error('The public hostname did not resolve to an address.')
+    throw new WrapperServiceError('invalid_target', 'The public hostname did not resolve to an address.', 400)
   }
 
   if (addresses.some(({ address }) => !isPublicNetworkAddress(address))) {
-    throw new Error('The hostname resolves to a private, local, or reserved address.')
+    throw new WrapperServiceError('invalid_target', 'The hostname resolves to a private, local, or reserved address.', 400)
   }
 
   const pinnedAddress = addresses.find(({ family }) => family === 4)?.address

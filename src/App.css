@@ -364,6 +364,12 @@
 .wrapper-browser-panel .panel-heading-row { align-items: end; }
 .wrapper-browser-panel h1 { max-width: 760px; margin: 5px 0 0; overflow: hidden; font-size: clamp(1.3rem, 2.5vw, 2rem); text-overflow: ellipsis; white-space: nowrap; }
 .wrapper-target-url { max-width: 100%; margin: 10px 0 18px; overflow: hidden; color: #9299a7; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.58rem; text-overflow: ellipsis; white-space: nowrap; }
+.wrapper-runtime-strip { margin: 0 0 14px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); overflow: hidden; border: 1px solid #292d37; border-radius: 9px; background: #101217; }
+.wrapper-runtime-strip > span { min-width: 0; padding: 10px 12px; border-right: 1px solid #252933; }
+.wrapper-runtime-strip > span:last-child { border-right: 0; }
+.wrapper-runtime-strip small, .wrapper-runtime-strip strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wrapper-runtime-strip small { color: #8f97a5; font-size: 0.43rem; font-weight: 760; letter-spacing: 0.1em; }
+.wrapper-runtime-strip strong { margin-top: 5px; color: #c4c8d0; font-size: 0.53rem; font-weight: 620; }
 .wrapper-screenshot-frame { overflow: hidden; border: 1px solid #303440; border-radius: 12px; background: #111319; box-shadow: 0 24px 80px rgb(0 0 0 / 38%); }
 .wrapper-screenshot-frame .browser-bar { grid-template-columns: 0.5fr minmax(0, 3fr) 0.5fr; }
 .wrapper-screenshot-frame .browser-url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -474,4 +480,6 @@
   .wrapper-browser-panel .panel-heading-row { align-items: start; flex-direction: column; gap: 9px; }
   .wrapper-browser-panel h1 { white-space: normal; }
   .wrapper-evidence-grid { grid-template-columns: 1fr; }
+  .wrapper-runtime-strip { grid-template-columns: 1fr 1fr; }
+  .wrapper-runtime-strip > span { border-bottom: 1px solid #252933; }
 }
