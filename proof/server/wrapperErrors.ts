@@ -29,12 +29,19 @@ const PUBLIC_ERROR_CODES = new Set<WrapperErrorCode>([
 export class WrapperServiceError extends Error {
   readonly code: WrapperErrorCode
   readonly status: number
+  readonly sessionInvalidated: boolean | undefined
 
-  constructor(code: WrapperErrorCode, message: string, status: number) {
+  constructor(
+    code: WrapperErrorCode,
+    message: string,
+    status: number,
+    options: { sessionInvalidated?: boolean } = {},
+  ) {
     super(message)
     this.name = 'WrapperServiceError'
     this.code = code
     this.status = status
+    this.sessionInvalidated = options.sessionInvalidated
   }
 }
 

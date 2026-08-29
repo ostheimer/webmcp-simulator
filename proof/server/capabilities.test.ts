@@ -107,4 +107,48 @@ describe('inferSafeCapabilities', () => {
     expect(capabilities[0].sampleInput).toEqual({ field_1: 'Sample', field_2: 'Sample' })
     expect(serialized).not.toMatch(/ignore_previous_instructions|reveal_user_secrets|agent_password|__proto__/)
   })
+
+  it('models one radio group as one exclusive indexed field', () => {
+    const capabilities = inferSafeCapabilities([
+      control({ id: 'radio-1', selector: '[data-webmcp-proof-id="radio-1"]', fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option A' }),
+      control({ id: 'radio-2', selector: '[data-webmcp-proof-id="radio-2"]', fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option B' }),
+      control({ id: 'notes', fieldKey: 'details', formId: 'form-1', type: 'text', label: 'Details' }),
+    ])
+
+    const form = capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(form.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'integer', minimum: 0, maximum: 1 },
+        field_2: { type: 'string' },
+      },
+    })
+    expect(form.sampleInput).toEqual({ field_1: 0, field_2: 'Sample' })
+    expect(form.action.fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'radio-group', selectors: expect.arrayContaining([
+        '[data-webmcp-proof-id="radio-1"]',
+        '[data-webmcp-proof-id="radio-2"]',
+      ]) }),
+    ]))
+  })
+
+  it('keeps generated select samples inside the enabled option range', () => {
+    const capabilities = inferSafeCapabilities([
+      control({
+        id: 'select-1',
+        fieldKey: 'building_type',
+        formId: 'form-1',
+        tag: 'select',
+        type: 'select-one',
+        optionValues: ['only-enabled-option'],
+        optionIndices: [2],
+      }),
+      control({ id: 'text-1', fieldKey: 'details', formId: 'form-1', type: 'text' }),
+    ])
+
+    const form = capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(form.inputSchema).toMatchObject({
+      properties: { field_1: { minimum: 0, maximum: 0 } },
+    })
+    expect(form.sampleInput).toEqual({ field_1: 0, field_2: 'Sample' })
+  })
 })

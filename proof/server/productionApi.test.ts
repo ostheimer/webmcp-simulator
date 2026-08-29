@@ -4,6 +4,7 @@ import {
   handleActionRequest,
   handleAnalyzeRequest,
   handleCloseRequest,
+  handleHealthRequest,
 } from './productionApi.ts'
 import { WRAPPER_MAX_REQUEST_BODY_BYTES, WRAPPER_MAX_RESPONSE_BYTES } from './wrapperLimits.ts'
 import { WrapperServiceError } from './wrapperErrors.ts'
@@ -45,6 +46,21 @@ function backend(overrides: Partial<ProductionWrapperBackend> = {}): ProductionW
 }
 
 describe('production wrapper API boundaries', () => {
+  it('separates liveness from Sandbox readiness and reflects browser-source configuration', async () => {
+    const unconfigured = handleHealthRequest({})
+    expect(unconfigured.status).toBe(200)
+    expect(await unconfigured.json()).toMatchObject({
+      alive: true,
+      ready: false,
+      configuration: 'missing-browser-source',
+    })
+
+    const snapshot = handleHealthRequest({ snapshotId: 'snap_reviewed' })
+    expect(await snapshot.json()).toMatchObject({ alive: true, ready: true, configuration: 'configured' })
+    const image = handleHealthRequest({ image: 'docker.io/reviewed/browser:1' })
+    expect(await image.json()).toMatchObject({ alive: true, ready: true, configuration: 'configured' })
+  })
+
   it('rejects cross-origin requests before invoking the browser backend', async () => {
     const target = backend()
     const response = await handleAnalyzeRequest(request('/api/wrapper/analyze', {

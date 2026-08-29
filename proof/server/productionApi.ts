@@ -240,10 +240,19 @@ export function handleCloseRequest(
   })
 }
 
-export function handleHealthRequest(): Response {
+export function handleHealthRequest(configuration: {
+  snapshotId?: string
+  image?: string
+} = {
+  snapshotId: process.env.WEBMCP_SANDBOX_SNAPSHOT_ID,
+  image: process.env.WEBMCP_SANDBOX_IMAGE,
+}): Response {
+  const ready = Boolean(configuration.snapshotId?.trim() || configuration.image?.trim())
   return jsonResponse(200, {
-    ready: true,
+    alive: true,
+    ready,
     mode: 'vercel-sandbox',
+    configuration: ready ? 'configured' : 'missing-browser-source',
     persistence: false,
     sessionTtlSeconds: 300,
     maxPages: 10,

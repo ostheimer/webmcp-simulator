@@ -10,7 +10,7 @@ The production path keeps the wrapper UI on Vercel and runs each inspected websi
 4. `Sandbox.create` uses `persistent: false`, a hard five-minute timeout, 2 vCPU/4 GB, a reviewed Chromium snapshot, and a fail-closed network policy.
 5. A bundled worker starts on a Unix-domain socket. No browser-control port is exposed publicly.
 6. Follow-up calls use only `Sandbox.get({ name, resume: false })`. Unknown and expired names fail closed. The code never calls `getOrCreate` and never creates a replacement during reconnect.
-7. `POST /api/wrapper/action` forwards the WebMCP AbortSignal through the Vercel Function, Sandbox command, worker request, and Playwright action. A begun failing or aborted action deletes the Sandbox.
+7. `POST /api/wrapper/action` forwards the WebMCP AbortSignal through the Vercel Function, Sandbox command, worker request, and Playwright action. A begun failing or aborted action deletes the Sandbox; input, unavailable-tool, and page-limit rejections that happen before mutation preserve it.
 8. `DELETE /api/wrapper/session` closes the worker and deletes the non-persistent Sandbox. The worker also stops on expiry, function abort, browser failure, or explicit close.
 
 ## Enforced boundaries
@@ -23,6 +23,7 @@ The production path keeps the wrapper UI on Vercel and runs each inspected websi
 - One current page is analyzed by default. Only explicit safe same-origin navigation adds another page; the hard cap is ten pages per session.
 - Request bodies are capped at 32 KiB, serialized responses at 2 MiB, screenshots at 900 KiB, DOM evidence at 80 controls, AX evidence at 40 nodes, analysis at 35 seconds, and actions at 15 seconds.
 - No page content, screenshots, or form values are written to application storage. `persistent: false` prevents automatic Sandbox filesystem snapshots.
+- `GET /api/wrapper/health` reports liveness separately from readiness. `alive` remains true for the Function while `ready` is false until either a reviewed snapshot ID or explicit browser image is configured.
 
 ## Snapshot path
 

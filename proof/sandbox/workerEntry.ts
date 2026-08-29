@@ -84,7 +84,11 @@ const server = createServer(async (request, response) => {
   try {
     const token = request.headers['x-wrapper-capability']
     if (typeof token !== 'string' || !matchesToken(config.capabilityToken, token)) {
-      sendJson(response, 401, { error: 'Invalid session capability.', code: 'invalid_capability' })
+      sendJson(response, 401, {
+        error: 'Invalid session capability.',
+        code: 'invalid_capability',
+        sessionInvalidated: false,
+      })
       return
     }
     if (Date.now() >= config.expiresAtMs) {
@@ -95,7 +99,11 @@ const server = createServer(async (request, response) => {
 
     if (request.method === 'POST' && request.url === '/analyze') {
       if (internalSessionId) {
-        sendJson(response, 409, { error: 'This isolated session was already analyzed.', code: 'invalid_action' })
+        sendJson(response, 409, {
+          error: 'This isolated session was already analyzed.',
+          code: 'invalid_action',
+          sessionInvalidated: false,
+        })
         return
       }
       const analysis = await service.analyze(config.target.url)
@@ -107,7 +115,11 @@ const server = createServer(async (request, response) => {
 
     if (request.method === 'POST' && request.url === '/action') {
       if (!internalSessionId) {
-        sendJson(response, 409, { error: 'The isolated session has not been analyzed.', code: 'invalid_action' })
+        sendJson(response, 409, {
+          error: 'The isolated session has not been analyzed.',
+          code: 'invalid_action',
+          sessionInvalidated: false,
+        })
         return
       }
       const body = await readBody(request)
@@ -139,14 +151,22 @@ const server = createServer(async (request, response) => {
       return
     }
 
-    sendJson(response, 404, { error: 'Unknown worker operation.', code: 'invalid_action' })
+    sendJson(response, 404, {
+      error: 'Unknown worker operation.',
+      code: 'invalid_action',
+      sessionInvalidated: false,
+    })
   } catch (error) {
     if (abortController.signal.aborted) {
       await closeWorker()
       return
     }
     if (error instanceof WrapperServiceError && isPublicWrapperErrorCode(error.code)) {
-      sendJson(response, error.status, { error: error.message, code: error.code })
+      sendJson(response, error.status, {
+        error: error.message,
+        code: error.code,
+        sessionInvalidated: error.sessionInvalidated ?? false,
+      })
       return
     }
     process.stderr.write('[webmcp-wrapper-worker] unexpected internal failure\n')

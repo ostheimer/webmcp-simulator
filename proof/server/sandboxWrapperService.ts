@@ -149,7 +149,7 @@ export function buildSandboxNetworkPolicy(target: PublicTarget): NetworkPolicy {
 
 function parseWorkerResponse<T>(output: string): T {
   let envelope: WorkerResponse
-  let body: T & { error?: string, code?: unknown }
+  let body: T & { error?: string, code?: unknown, sessionInvalidated?: unknown }
   try {
     envelope = JSON.parse(output) as WorkerResponse
     body = JSON.parse(envelope.body) as T & { error?: string, code?: unknown }
@@ -162,6 +162,11 @@ function parseWorkerResponse<T>(output: string): T {
         body.code,
         body.error || 'The isolated browser operation failed.',
         envelope.status,
+        {
+          sessionInvalidated: typeof body.sessionInvalidated === 'boolean'
+            ? body.sessionInvalidated
+            : undefined,
+        },
       )
     }
     throw new Error('The isolated worker failed without a recognized public error code.')
@@ -183,6 +188,12 @@ function sandboxCapacityError(): WrapperServiceError {
     'The isolated browser capacity is temporarily unavailable.',
     503,
   )
+}
+
+function isNonMutatingActionRejection(error: unknown): boolean {
+  return error instanceof WrapperServiceError
+    && error.sessionInvalidated === false
+    && ['invalid_action', 'invalid_capability', 'page_limit'].includes(error.code)
 }
 
 function decorateAnalysis(
@@ -382,7 +393,7 @@ export class SandboxWrapperService {
       )
       return { ...result, analysis, finalUrl: analysis.finalUrl, screenshotDataUrl: analysis.screenshotDataUrl }
     } catch (error) {
-      if (!(error instanceof WrapperServiceError && error.code === 'invalid_capability')) {
+      if (!isNonMutatingActionRejection(error)) {
         await sandbox.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
       }
       if (signal?.aborted) throw new DOMException('The isolated tool call was cancelled.', 'AbortError')

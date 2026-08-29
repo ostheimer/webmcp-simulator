@@ -30,6 +30,45 @@ const NAVIGATION_TIMEOUT_MS = 18_000
 const MAX_CONCURRENT_SESSIONS = 3
 const ACTION_SETTLE_MS = 300
 const UNSAFE_FIELD_HINT = /\b(address|book|buy|card|checkout|comment|contact|delete|email|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
+const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|order|ordering|purchase|purchasing|reservation|reserve|subscribe|termin|bestellen|bestellung|buchen|buchung|kaufen|kasse|reservieren|reservierung|warenkorb)\b/i
+const SENSITIVE_AUTOCOMPLETE_TOKENS = [
+  'additional-name',
+  'address-level1',
+  'address-level2',
+  'address-level3',
+  'address-level4',
+  'address-line1',
+  'address-line2',
+  'address-line3',
+  'bday',
+  'bday-day',
+  'bday-month',
+  'bday-year',
+  'country',
+  'country-name',
+  'current-password',
+  'email',
+  'family-name',
+  'given-name',
+  'honorific-prefix',
+  'honorific-suffix',
+  'impp',
+  'name',
+  'new-password',
+  'nickname',
+  'one-time-code',
+  'organization',
+  'organization-title',
+  'photo',
+  'postal-code',
+  'sex',
+  'street-address',
+  'transaction-amount',
+  'transaction-currency',
+  'url',
+  'username',
+  'webauthn',
+] as const
 
 type SessionNetworkMode = 'observing' | 'blocked' | 'navigation'
 
@@ -73,6 +112,7 @@ export interface WrapperProofServiceOptions {
 
 interface PendingActionEvidence {
   navigationOccurred: boolean
+  stateChanged: () => Promise<boolean>
   verify: () => Promise<void>
 }
 
@@ -96,6 +136,10 @@ function tokenMatches(expected: string, provided: string): boolean {
 
 function abortError(): DOMException {
   return new DOMException('The isolated tool call was cancelled.', 'AbortError')
+}
+
+function actionVerificationError(message: string): WrapperServiceError {
+  return new WrapperServiceError('invalid_action', message, 409)
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -146,18 +190,29 @@ export function isSameOriginHttpUrl(value: string, expectedOrigin: string): bool
 }
 
 async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
-  return page.evaluate(({ unsafePatternSource, maxControls }) => {
+  return page.evaluate(({ unsafePatternSource, unsafeNavigationPatternSource, sensitiveAutocompleteTokens, maxControls }) => {
     const unsafePattern = new RegExp(unsafePatternSource, 'i')
+    const unsafeNavigationPattern = new RegExp(unsafeNavigationPatternSource, 'i')
+    const sensitiveAutocomplete = new Set<string>(sensitiveAutocompleteTokens)
     const normalize = (value: unknown, limit = 140) => String(value ?? '')
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, limit)
     const visible = (element: HTMLElement) => {
-      const style = getComputedStyle(element)
-      return !element.hidden
-        && style.display !== 'none'
-        && style.visibility !== 'hidden'
-        && element.getClientRects().length > 0
+      const rects = Array.from(element.getClientRects())
+      if (element.hidden || !rects.some(({ width, height }) => width > 0 && height > 0)) return false
+      let current: HTMLElement | null = element
+      while (current) {
+        const style = getComputedStyle(current)
+        if (
+          current.hidden
+          || style.display === 'none'
+          || style.visibility === 'hidden'
+          || Number.parseFloat(style.opacity || '1') <= 0
+        ) return false
+        current = current.parentElement
+      }
+      return true
     }
     const controls = Array.from(document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLAnchorElement>(
       'input, select, textarea, a[href]',
@@ -189,7 +244,10 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
         || element.getAttribute('id')
         || element.tagName.toLowerCase()
       const label = normalize(explicitLabel)
-      const autocomplete = element.getAttribute('autocomplete') ?? ''
+      const autocompleteTokens = (element.getAttribute('autocomplete') ?? '')
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(Boolean)
       const type = element instanceof HTMLAnchorElement
         ? 'link'
         : element instanceof HTMLSelectElement
@@ -217,11 +275,24 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
           ? [element.href]
           : undefined
       const optionIndices = enabledOptions?.map(({ optionIndex }) => optionIndex)
-      const unsafeEvidence = `${label} ${'name' in element ? element.name : ''} ${element instanceof HTMLAnchorElement ? element.pathname : ''}`
-        .replace(/[_-]+/g, ' ')
+      const encodedLinkPath = element instanceof HTMLAnchorElement ? `${element.pathname}${element.search}` : ''
+      let decodedLinkPath = encodedLinkPath
+      try {
+        decodedLinkPath = decodeURIComponent(encodedLinkPath)
+      } catch {
+        // A malformed encoded path remains untrusted evidence in its raw form.
+      }
+      const unsafeEvidence = `${label} ${'name' in element ? element.name : ''} ${decodedLinkPath}`
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      const hasSensitiveAutocomplete = autocompleteTokens.some((token) =>
+        sensitiveAutocomplete.has(token)
+        || token.startsWith('cc-')
+        || token.startsWith('tel-')
+        || /(address|birth|card|credential|email|name|otp|passcode|password|phone|postal|secret|token|username)/.test(token))
       const sensitive = ['email', 'file', 'password', 'tel'].includes(type)
-        || /cc-|password|email|tel/.test(autocomplete)
+        || hasSensitiveAutocomplete
         || unsafePattern.test(unsafeEvidence)
+        || (element instanceof HTMLAnchorElement && unsafeNavigationPattern.test(unsafeEvidence))
         || (element instanceof HTMLAnchorElement && !sameOriginLink)
 
       return {
@@ -241,6 +312,8 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
     })
   }, {
     unsafePatternSource: UNSAFE_FIELD_HINT.source,
+    unsafeNavigationPatternSource: UNSAFE_NAVIGATION_HINT.source,
+    sensitiveAutocompleteTokens: [...SENSITIVE_AUTOCOMPLETE_TOKENS],
     maxControls: WRAPPER_MAX_DOM_EVIDENCE,
   })
 }
@@ -313,6 +386,11 @@ function validateActionInput(
       if (!Number.isInteger(value) || Number(value) < 0 || Number(value) >= optionCount) {
         throw new WrapperServiceError('invalid_action', `${key} must reference a visible option.`, 400)
       }
+    } else if (field.type === 'radio-group') {
+      const optionCount = field.selectors?.length ?? 0
+      if (!Number.isInteger(value) || Number(value) < 0 || Number(value) >= optionCount) {
+        throw new WrapperServiceError('invalid_action', `${key} must reference one visible radio choice.`, 400)
+      }
     } else if (field.type === 'checkbox' || field.type === 'radio') {
       if (typeof value !== 'boolean') throw new WrapperServiceError('invalid_action', `${key} must be a boolean.`, 400)
     } else if (field.type === 'number' || field.type === 'range') {
@@ -333,12 +411,14 @@ async function applyAction(
   if (action.kind === 'prepare_search' && action.selector) {
     const value = String(input.query)
     const locator = page.locator(action.selector)
+    const before = await locator.inputValue()
     await locator.fill(value)
     return {
       navigationOccurred: false,
+      stateChanged: async () => await locator.inputValue() !== before,
       verify: async () => {
         if (await locator.inputValue() !== value) {
-          throw new Error('The page did not retain the prepared search value.')
+          throw actionVerificationError('The page did not retain the prepared search value.')
         }
       },
     }
@@ -347,12 +427,15 @@ async function applyAction(
     const optionIndex = action.optionIndices?.[Number(input.optionIndex)]
     if (optionIndex === undefined) throw new Error('The requested filter option is no longer available.')
     const locator = page.locator(action.selector)
+    const before = await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex)
     await locator.selectOption({ index: optionIndex })
     return {
       navigationOccurred: false,
+      stateChanged: async () => await locator.evaluate((element) =>
+        (element as HTMLSelectElement).selectedIndex) !== before,
       verify: async () => {
         const selectedIndex = await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex)
-        if (selectedIndex !== optionIndex) throw new Error('The page did not retain the selected filter option.')
+        if (selectedIndex !== optionIndex) throw actionVerificationError('The page did not retain the selected filter option.')
       },
     }
   }
@@ -363,13 +446,15 @@ async function applyAction(
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
     return {
       navigationOccurred: true,
+      stateChanged: async () => page.url() !== before,
       verify: async () => {
-        if (page.url() === before) throw new Error('The isolated page did not navigate to the requested link.')
+        if (page.url() === before) throw actionVerificationError('The isolated page did not navigate to the requested link.')
       },
     }
   }
 
   const verifications: Array<() => Promise<void>> = []
+  const changeChecks: Array<() => Promise<boolean>> = []
   for (const field of action.fields ?? []) {
     if (!Object.hasOwn(input, field.key)) continue
     const locator = page.locator(field.selector)
@@ -377,31 +462,100 @@ async function applyAction(
     if (field.type === 'select-one') {
       const optionIndex = field.optionIndices?.[Number(value)]
       if (optionIndex === undefined) throw new Error(`${field.key} no longer references a visible option.`)
+      const before = await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex)
       await locator.selectOption({ index: optionIndex })
+      changeChecks.push(async () => await locator.evaluate((element) =>
+        (element as HTMLSelectElement).selectedIndex) !== before)
       verifications.push(async () => {
         const selectedIndex = await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex)
-        if (selectedIndex !== optionIndex) throw new Error(`${field.key} did not retain the selected option.`)
+        if (selectedIndex !== optionIndex) throw actionVerificationError(`${field.key} did not retain the selected option.`)
+      })
+    } else if (field.type === 'radio-group') {
+      const selectors = field.selectors ?? []
+      const selectedIndex = Number(value)
+      const selectedSelector = selectors[selectedIndex]
+      if (!selectedSelector) throw new Error(`${field.key} no longer references a visible radio choice.`)
+      const group = selectors.map((selector) => page.locator(selector))
+      const before = await Promise.all(group.map((radio) => radio.isChecked()))
+      await page.locator(selectedSelector).setChecked(true)
+      changeChecks.push(async () => {
+        const after = await Promise.all(group.map((radio) => radio.isChecked()))
+        return after.some((checked, index) => checked !== before[index])
+      })
+      verifications.push(async () => {
+        const after = await Promise.all(group.map((radio) => radio.isChecked()))
+        if (!after[selectedIndex] || after.filter(Boolean).length !== 1) {
+          throw actionVerificationError(`${field.key} did not retain one exclusive radio choice.`)
+        }
       })
     } else if (field.type === 'checkbox' || field.type === 'radio') {
+      const before = await locator.isChecked()
       await locator.setChecked(Boolean(value))
+      changeChecks.push(async () => await locator.isChecked() !== before)
       verifications.push(async () => {
-        if (await locator.isChecked() !== value) throw new Error(`${field.key} did not retain its checked state.`)
+        if (await locator.isChecked() !== value) throw actionVerificationError(`${field.key} did not retain its checked state.`)
       })
     } else {
       const stringValue = String(value)
+      const before = await locator.inputValue()
       await locator.fill(stringValue)
+      changeChecks.push(async () => await locator.inputValue() !== before)
       verifications.push(async () => {
-        if (await locator.inputValue() !== stringValue) throw new Error(`${field.key} did not retain its prepared value.`)
+        if (await locator.inputValue() !== stringValue) throw actionVerificationError(`${field.key} did not retain its prepared value.`)
       })
     }
   }
   if (verifications.length === 0) throw new Error('No safe form field was prepared.')
   return {
     navigationOccurred: false,
+    stateChanged: async () => {
+      for (const changed of changeChecks) {
+        if (await changed()) return true
+      }
+      return false
+    },
     verify: async () => {
       for (const verify of verifications) await verify()
     },
   }
+}
+
+async function actionWouldChange(
+  page: Page,
+  action: CapabilityAction,
+  input: Record<string, unknown>,
+): Promise<boolean> {
+  if (action.kind === 'prepare_search' && action.selector) {
+    return await page.locator(action.selector).inputValue() !== String(input.query)
+  }
+  if (action.kind === 'filter' && action.selector) {
+    const optionIndex = action.optionIndices?.[Number(input.optionIndex)]
+    if (optionIndex === undefined) return true
+    return await page.locator(action.selector).evaluate((element) =>
+      (element as HTMLSelectElement).selectedIndex) !== optionIndex
+  }
+  if (action.kind === 'navigation') {
+    const url = action.urls?.[Number(input.linkIndex)]
+    return Boolean(url && page.url() !== url)
+  }
+  for (const field of action.fields ?? []) {
+    if (!Object.hasOwn(input, field.key)) continue
+    const locator = page.locator(field.selector)
+    const value = input[field.key]
+    if (field.type === 'select-one') {
+      const optionIndex = field.optionIndices?.[Number(value)]
+      if (optionIndex === undefined) return true
+      if (await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex) !== optionIndex) return true
+    } else if (field.type === 'radio-group') {
+      const selectedSelector = field.selectors?.[Number(value)]
+      if (!selectedSelector || !await page.locator(selectedSelector).isChecked()) return true
+    } else if (field.type === 'checkbox' || field.type === 'radio') {
+      if (await locator.isChecked() !== value) return true
+    } else if (await locator.inputValue() !== String(value)) {
+      return true
+    }
+  }
+  return false
 }
 
 export class WrapperProofService {
@@ -673,6 +827,15 @@ export class WrapperProofService {
         )
       }
       validateActionInput(capability, input)
+      const wouldChange = await raceWithSignal(actionWouldChange(session.page, capability.action, input), signal)
+      throwIfAborted(signal)
+      if (!wouldChange) {
+        throw new WrapperServiceError(
+          'invalid_action',
+          'The isolated page already matches the requested state.',
+          409,
+        )
+      }
 
       const metrics: ActionNetworkMetrics = { allowed: 0, blocked: 0 }
       session.activeNetworkMetrics = metrics
@@ -706,6 +869,11 @@ export class WrapperProofService {
       throwIfAborted(signal)
       await raceWithSignal(evidence.verify(), signal)
       throwIfAborted(signal)
+      const isolatedStateChanged = await raceWithSignal(evidence.stateChanged(), signal)
+      throwIfAborted(signal)
+      if (!isolatedStateChanged) {
+        throw actionVerificationError('The requested action did not change the isolated page state.')
+      }
       session.expiresAt = Math.min(
         session.createdAtMs + WRAPPER_SESSION_TTL_MS,
         Date.now() + WRAPPER_SESSION_TTL_MS,
@@ -732,7 +900,7 @@ export class WrapperProofService {
           toolName,
           actionKind: capability.kind,
           finalUrl: analysis.finalUrl,
-          isolatedStateChanged: true,
+          isolatedStateChanged,
           targetStateVerified: true,
           networkPolicy,
           blockedNetworkRequests: metrics.blocked,
@@ -747,6 +915,9 @@ export class WrapperProofService {
         await actionPromise?.catch(() => undefined)
       }
       if (signal?.aborted) throw abortError()
+      if (actionStarted && error instanceof WrapperServiceError) {
+        throw new WrapperServiceError(error.code, error.message, error.status, { sessionInvalidated: true })
+      }
       throw error
     } finally {
       resolveQueue()

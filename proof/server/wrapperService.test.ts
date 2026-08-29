@@ -40,6 +40,59 @@ async function startFixture(): Promise<Fixture> {
         <main><h1>Second page</h1><input type="search" aria-label="Search destination"></main>`)
       return
     }
+    if (requestUrl === '/radio-form') {
+      response.end(`<!doctype html><title>Radio form</title>
+        <form>
+          <input id="mode-a" type="radio" name="heating_mode" value="a"><label for="mode-a">Option A</label>
+          <input id="mode-b" type="radio" name="heating_mode" value="b"><label for="mode-b">Option B</label>
+          <input type="text" name="details" aria-label="Details">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/single-select-form') {
+      response.end(`<!doctype html><title>Single select form</title>
+        <form>
+          <select name="building_type" aria-label="Building type">
+            <option disabled>Unavailable</option><option value="only">Only enabled option</option>
+          </select>
+          <input type="text" name="details" aria-label="Details">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/visibility') {
+      response.end(`<!doctype html><title>Visibility fixture</title>
+        <input type="search" aria-label="Visible search">
+        <input type="search" aria-label="Transparent search" style="opacity:0">
+        <div style="opacity:0"><input type="search" aria-label="Ancestor transparent search"></div>
+        <input type="search" aria-label="Zero geometry search" style="display:block;width:0;height:0;border:0;padding:0">
+        <a href="/next">Visible link</a>`)
+      return
+    }
+    if (requestUrl === '/sensitive-fields') {
+      response.end(`<!doctype html><title>Sensitive fields</title>
+        <form>
+          <input type="text" name="safe_one" aria-label="First neutral field">
+          <input type="text" name="safe_two" aria-label="Second neutral field">
+          <input type="text" name="neutral_otp" aria-label="Neutral field A" autocomplete="one-time-code">
+          <input type="text" name="neutral_address" aria-label="Neutral field B" autocomplete="street-address">
+          <input type="text" name="neutral_user" aria-label="Neutral field C" autocomplete="username">
+          <input type="text" name="neutral_mail" aria-label="Neutral field D" autocomplete="EMAIL">
+          <input type="text" name="neutral_card" aria-label="Neutral field E" autocomplete="section-x billing cc-number">
+          <input type="text" name="neutral_passcode" aria-label="Neutral field F" autocomplete="SMS-OTP">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/unsafe-links') {
+      response.end(`<!doctype html><title>Unsafe links</title>
+        <a href="/booking">Learn more</a>
+        <a href="/purchase">Details</a>
+        <a href="/book-now">Information</a>
+        <a href="/purchase_order">Overview</a>
+        <a href="/warenkorb/checkout">Explore</a>
+        <a href="/p%75rchase-confirmation">More</a>
+        <a href="/next">History</a>`)
+      return
+    }
     if (requestUrl.startsWith('/chain/')) {
       const pageNumber = Number(requestUrl.slice('/chain/'.length))
       response.end(`<!doctype html><title>Chain ${pageNumber}</title>
@@ -204,6 +257,130 @@ describe('WrapperProofService security boundaries', () => {
     expect(result.finalUrl).toBe(`${fixture.origin}/slow-page`)
   })
 
+  it('executes radio groups as one exclusive indexed choice and keeps select samples in range', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+
+    const radioAnalysis = await service.analyze(`${fixture.origin}/radio-form`)
+    const radioForm = radioAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(radioForm.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'integer', minimum: 0, maximum: 1 },
+        field_2: { type: 'string' },
+      },
+    })
+    const firstChoice = await service.execute(
+      radioAnalysis.sessionId,
+      radioAnalysis.sessionToken,
+      radioForm.name,
+      radioForm.sampleInput,
+    )
+    expect(firstChoice.structuredContent).toMatchObject({
+      isolatedStateChanged: true,
+      targetStateVerified: true,
+    })
+    const updatedForm = firstChoice.analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const secondChoice = await service.execute(
+      radioAnalysis.sessionId,
+      radioAnalysis.sessionToken,
+      updatedForm.name,
+      { field_1: 1 },
+    )
+    expect(secondChoice.structuredContent.isolatedStateChanged).toBe(true)
+
+    const selectAnalysis = await service.analyze(`${fixture.origin}/single-select-form`)
+    const selectForm = selectAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(selectForm.sampleInput).toEqual({ field_1: 0, field_2: 'Sample' })
+    const selectResult = await service.execute(
+      selectAnalysis.sessionId,
+      selectAnalysis.sessionToken,
+      selectForm.name,
+      selectForm.sampleInput,
+    )
+    expect(selectResult.structuredContent.targetStateVerified).toBe(true)
+  })
+
+  it('excludes transparent and zero-geometry controls from visible evidence and capabilities', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/visibility`)
+
+    expect(analysis.domEvidence.map(({ label }) => label)).toEqual(['Visible search', 'Visible link'])
+    expect(analysis.capabilities.map(({ name }) => name)).toEqual(['prepare_page_search', 'open_page_link'])
+  })
+
+  it('excludes normalized sensitive autocomplete fields and consequential navigation paths', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+
+    const formAnalysis = await service.analyze(`${fixture.origin}/sensitive-fields`)
+    const form = formAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(Object.keys((form.inputSchema.properties ?? {}) as object)).toEqual(['field_1', 'field_2'])
+    expect(formAnalysis.domEvidence.filter(({ sensitive }) => sensitive).map(({ label }) => label)).toEqual([
+      'Neutral field A',
+      'Neutral field B',
+      'Neutral field C',
+      'Neutral field D',
+      'Neutral field E',
+      'Neutral field F',
+    ])
+
+    const linkAnalysis = await service.analyze(`${fixture.origin}/unsafe-links`)
+    const navigation = linkAnalysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    expect(navigation.evidenceIds).toHaveLength(1)
+    const safeLink = linkAnalysis.domEvidence.find(({ id }) => navigation.evidenceIds.includes(id))
+    expect(safeLink?.label).toBe('History')
+    expect(linkAnalysis.domEvidence.filter(({ type, sensitive }) => type === 'link' && sensitive)).toHaveLength(6)
+  })
+
+  it('rejects repeated search and filter values before mutation while preserving the session', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const firstSearch = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'same value' },
+    )
+    expect(firstSearch.structuredContent.isolatedStateChanged).toBe(true)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'same value' },
+    )).rejects.toMatchObject({
+      code: 'invalid_action',
+      status: 409,
+      message: 'The isolated page already matches the requested state.',
+    })
+
+    const filter = firstSearch.analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    const firstFilter = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      { optionIndex: 1 },
+    )
+    expect(firstFilter.structuredContent.isolatedStateChanged).toBe(true)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      { optionIndex: 1 },
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409 })
+    expect(await service.closeSession(analysis.sessionId, analysis.sessionToken)).toBe(true)
+  })
+
   it('rejects a preparation when the page changes the value before commit', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -217,7 +394,12 @@ describe('WrapperProofService security boundaries', () => {
       analysis.sessionToken,
       search!.name,
       { query: 'agent-value' },
-    )).rejects.toThrow('did not retain the prepared search value')
+    )).rejects.toMatchObject({
+      code: 'invalid_action',
+      status: 409,
+      sessionInvalidated: true,
+      message: 'The page did not retain the prepared search value.',
+    })
     await expect(service.execute(
       analysis.sessionId,
       analysis.sessionToken,

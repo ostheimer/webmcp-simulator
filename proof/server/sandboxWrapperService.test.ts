@@ -78,6 +78,7 @@ class FakeSandbox {
   deleted = 0
   commandCalls = 0
   forceStatus?: number
+  forceError?: { status: number, code: string, error: string, sessionInvalidated?: boolean }
   delayAction = false
   commandError?: Error
   totalDurationMs = 1_000
@@ -111,8 +112,14 @@ class FakeSandbox {
         }, { once: true })
       })
     }
-    const status = token === this.expectedToken ? (this.forceStatus ?? 200) : 401
-    const body = status === 200
+    const status = token === this.expectedToken ? (this.forceError?.status ?? this.forceStatus ?? 200) : 401
+    const body = this.forceError && token === this.expectedToken
+      ? {
+          error: this.forceError.error,
+          code: this.forceError.code,
+          sessionInvalidated: this.forceError.sessionInvalidated,
+        }
+      : status === 200
       ? operation === 'analyze'
         ? analysisFixture()
         : operation === 'action'
@@ -120,7 +127,7 @@ class FakeSandbox {
           : { ready: true, closed: true }
       : status === 410
         ? { error: 'The isolated browser session expired.', code: 'session_expired' }
-        : { error: 'Invalid session capability.', code: 'invalid_capability' }
+        : { error: 'Invalid session capability.', code: 'invalid_capability', sessionInvalidated: false }
     return commandResult(0, JSON.stringify({ status, body: JSON.stringify(body) }))
   }
 
@@ -262,6 +269,54 @@ describe('SandboxWrapperService session boundaries', () => {
     const validAnalysis = await valid.service.analyze('https://public.example.at')
     expect(await valid.service.closeSession(validAnalysis.sessionId, validAnalysis.sessionToken)).toBe(true)
     expect(valid.sandbox.deleted).toBe(1)
+  })
+
+  it.each([
+    ['invalid_action', 400, 'The requested input is invalid.'],
+    ['page_limit', 422, 'This session reached its page limit.'],
+  ])('preserves the sandbox after the pre-action %s rejection', async (code, status, message) => {
+    const harness = createHarness()
+    const analysis = await harness.service.analyze('https://public.example.at')
+    harness.sandbox.forceError = { code, status, error: message, sessionInvalidated: false }
+
+    await expect(harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'x' },
+    )).rejects.toMatchObject({ code, status })
+    expect(harness.sandbox.deleted).toBe(0)
+
+    harness.sandbox.forceError = undefined
+    await expect(harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'still usable' },
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(harness.sandbox.deleted).toBe(0)
+  })
+
+  it('deletes the sandbox when a public invalid_action follows a begun mutation', async () => {
+    const harness = createHarness()
+    const analysis = await harness.service.analyze('https://public.example.at')
+    harness.sandbox.forceError = {
+      code: 'invalid_action',
+      status: 409,
+      error: 'The page did not retain the requested value.',
+      sessionInvalidated: true,
+    }
+
+    await expect(harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'x' },
+    )).rejects.toMatchObject({
+      code: 'invalid_action',
+      sessionInvalidated: true,
+    })
+    expect(harness.sandbox.deleted).toBe(1)
   })
 
   it('propagates abort to the command and deletes the partially mutable sandbox', async () => {

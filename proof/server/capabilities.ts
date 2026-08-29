@@ -17,6 +17,7 @@ export interface ActionField {
   key: string
   selector: string
   type: string
+  selectors?: string[]
   optionIndices?: number[]
 }
 
@@ -66,6 +67,33 @@ function schemaForField(control: DetectedControl): Record<string, unknown> {
     maxLength: 200,
     description: 'Value for the visible, non-sensitive control.',
   }
+}
+
+interface SafeFormField {
+  control: DetectedControl
+  radioGroup?: DetectedControl[]
+}
+
+function schemaForSafeFormField(field: SafeFormField): Record<string, unknown> {
+  if (field.radioGroup) {
+    return {
+      type: 'integer',
+      minimum: 0,
+      maximum: field.radioGroup.length - 1,
+      description: 'Zero-based choice index from one visible radio group.',
+    }
+  }
+  return schemaForField(field.control)
+}
+
+function sampleForActionField(field: ActionField): unknown {
+  if (field.type === 'radio-group') return 0
+  if (field.type === 'select-one') {
+    return Math.min(1, Math.max(0, (field.optionIndices?.length ?? 1) - 1))
+  }
+  if (field.type === 'number' || field.type === 'range') return 1
+  if (field.type === 'checkbox' || field.type === 'radio') return true
+  return 'Sample'
 }
 
 export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapability[] {
@@ -169,25 +197,50 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
     })
   let formIndex = 0
   for (const group of formGroups.values()) {
-    const safeFields = group.filter((control) =>
+    const safeControls = group.filter((control) =>
       !control.sensitive
       && !UNSAFE_HINT.test(control.label)
       && ['checkbox', 'date', 'month', 'number', 'radio', 'range', 'select-one', 'text', 'time', 'week'].includes(control.type),
-    ).slice(0, 6)
+    )
+    const radioGroups = new Map<string, DetectedControl[]>()
+    safeControls
+      .filter((control) => control.type === 'radio')
+      .forEach((control) => {
+        const key = control.fieldKey || control.id
+        radioGroups.set(key, [...(radioGroups.get(key) ?? []), control])
+      })
+    const claimedRadioGroups = new Set<string>()
+    const safeFields: SafeFormField[] = []
+    for (const control of safeControls) {
+      const radioGroupKey = control.type === 'radio' ? control.fieldKey || control.id : undefined
+      const radioGroup = radioGroupKey
+        ? radioGroups.get(radioGroupKey)
+        : undefined
+      if (radioGroup) {
+        if (claimedRadioGroups.has(radioGroupKey as string)) continue
+        claimedRadioGroups.add(radioGroupKey as string)
+        safeFields.push({ control, radioGroup })
+      } else {
+        safeFields.push({ control })
+      }
+      if (safeFields.length >= 6) break
+    }
     if (safeFields.length < 2) continue
 
     formIndex += 1
     const properties: Record<string, Record<string, unknown>> = Object.create(null)
     const fields: ActionField[] = []
-    safeFields.forEach((control, index) => {
+    safeFields.forEach((field, index) => {
       // Remote names and ids are server-only selector evidence. Agent-facing
       // schemas use wrapper-owned neutral keys exclusively.
       const key = `field_${index + 1}`
-      properties[key] = schemaForField(control)
+      properties[key] = schemaForSafeFormField(field)
+      const { control, radioGroup } = field
       fields.push({
         key,
         selector: control.selector,
-        type: control.type,
+        type: radioGroup ? 'radio-group' : control.type,
+        selectors: radioGroup?.map(({ selector }) => selector),
         optionIndices: control.optionIndices
           ?? control.optionValues?.map((_value, optionIndex) => optionIndex),
       })
@@ -205,15 +258,9 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         minProperties: 1,
         additionalProperties: false,
       },
-      evidenceIds: safeFields.map(({ id }) => id),
-      sampleInput: Object.fromEntries(fields.slice(0, 2).map((field) => [
-        field.key,
-        field.type === 'number' || field.type === 'range' || field.type === 'select-one'
-          ? 1
-          : field.type === 'checkbox' || field.type === 'radio'
-            ? true
-            : 'Sample',
-      ])),
+      evidenceIds: safeFields.flatMap(({ control, radioGroup }) =>
+        (radioGroup ?? [control]).map(({ id }) => id)),
+      sampleInput: Object.fromEntries(fields.slice(0, 2).map((field) => [field.key, sampleForActionField(field)])),
       action: { kind: 'prepare_form', fields },
     })
   }

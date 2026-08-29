@@ -38,4 +38,14 @@ describe('resolvePublicTarget', () => {
       { address: '127.0.0.1', family: 4 },
     ])).rejects.toThrow('private, local, or reserved')
   })
+
+  it('maps DNS resolver failures to a safe invalid_target client error', async () => {
+    await expect(resolvePublicTarget('https://does-not-exist.invalid-domain-test.com', async () => {
+      throw Object.assign(new Error('getaddrinfo ENOTFOUND does-not-exist.invalid-domain-test.com'), { code: 'ENOTFOUND' })
+    })).rejects.toMatchObject({
+      code: 'invalid_target',
+      status: 400,
+      message: 'The public hostname did not resolve to an address.',
+    })
+  })
 })

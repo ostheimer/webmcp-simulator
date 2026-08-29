@@ -41,9 +41,14 @@ export async function resolvePublicTarget(
   }
   const parsedUrl = new URL(url)
   const hostname = parsedUrl.hostname.replace(/^\[|\]$/g, '')
-  const addresses = isIP(hostname)
-    ? [{ address: hostname, family: isIP(hostname) }]
-    : await resolver(hostname)
+  let addresses: ResolvedAddress[]
+  try {
+    addresses = isIP(hostname)
+      ? [{ address: hostname, family: isIP(hostname) }]
+      : await resolver(hostname)
+  } catch {
+    throw new WrapperServiceError('invalid_target', 'The public hostname did not resolve to an address.', 400)
+  }
 
   if (addresses.length === 0) {
     throw new WrapperServiceError('invalid_target', 'The public hostname did not resolve to an address.', 400)

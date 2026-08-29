@@ -79,7 +79,7 @@ export interface WrapperActionResult {
     toolName: string
     actionKind: WrapperInteractionKind
     finalUrl: string
-    isolatedStateChanged: true
+    isolatedStateChanged: boolean
     targetStateVerified: true
     networkPolicy: 'blocked-after-preparation' | 'same-origin-navigation'
     blockedNetworkRequests: number
