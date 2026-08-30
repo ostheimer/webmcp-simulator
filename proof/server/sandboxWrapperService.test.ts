@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { WrapperActionResult, WrapperAnalysis } from '../../src/features/wrapper/types.ts'
 import type { PublicTarget } from './publicTarget.ts'
+import { handleCloseRequest } from './productionApi.ts'
 import { createSandboxLocator, createSessionCapability } from './sessionCapability.ts'
 import {
   buildSandboxNetworkPolicy,
@@ -84,6 +85,7 @@ class FakeSandbox {
   actionCommandGate?: Promise<void>
   actionOutputGate?: Promise<void>
   deleteGate?: Promise<void>
+  deleteErrors: Error[] = []
   legacyActionScreenshot = false
   afterAnalyzeResult?: () => void
   commandError?: Error
@@ -153,6 +155,8 @@ class FakeSandbox {
   async delete() {
     this.deleted += 1
     if (this.deleteGate) await this.deleteGate
+    const error = this.deleteErrors.shift()
+    if (error) throw error
   }
 }
 
@@ -182,6 +186,20 @@ function testTarget(): PublicTarget {
     pinnedAddress: '93.184.216.34',
     addresses: [{ address: '93.184.216.34', family: 4 }],
   }
+}
+
+function closeApiRequest(sessionId: string, sessionToken: string, sourceIp: string): Request {
+  return new Request('https://wrapper.example/api/wrapper/session', {
+    method: 'DELETE',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-WebMCP-Client': `close_adapter_${sourceIp.replaceAll('.', '_')}`,
+      'X-Vercel-Forwarded-For': sourceIp,
+      Origin: 'https://wrapper.example',
+      'Sec-Fetch-Site': 'same-origin',
+    },
+    body: JSON.stringify({ sessionId, sessionToken }),
+  })
 }
 
 function createHarness(
@@ -409,6 +427,59 @@ describe('SandboxWrapperService session boundaries', () => {
     const validAnalysis = await valid.service.analyze('https://public.example.at')
     expect(await valid.service.closeSession(validAnalysis.sessionId, validAnalysis.sessionToken)).toBe(true)
     expect(valid.sandbox.deleted).toBe(1)
+  })
+
+  it('retries provider deletion before reporting a sandbox session as closed', async () => {
+    const retry = createHarness()
+    const retryAnalysis = await retry.service.analyze('https://public.example.at')
+    retry.sandbox.deleteErrors.push(new Error('transient provider delete failure'))
+
+    const retryResponse = await handleCloseRequest(
+      closeApiRequest(retryAnalysis.sessionId, retryAnalysis.sessionToken, '198.51.100.230'),
+      retry.service,
+      { closeTimeoutMs: 1_000 },
+    )
+    expect(retryResponse.status).toBe(200)
+    expect(await retryResponse.json()).toEqual({ closed: true })
+    expect(retry.sandbox.deleted).toBe(2)
+
+    const failed = createHarness()
+    const failedAnalysis = await failed.service.analyze('https://public.example.at')
+    failed.sandbox.deleteErrors.push(
+      new Error('provider secret delete failure one'),
+      new Error('provider secret delete failure two'),
+    )
+    const response = await handleCloseRequest(
+      closeApiRequest(failedAnalysis.sessionId, failedAnalysis.sessionToken, '198.51.100.231'),
+      failed.service,
+      { closeTimeoutMs: 1_000 },
+    )
+
+    expect(response.status).toBe(503)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser session could not be closed.',
+      code: 'action_failed',
+    })
+    expect(failed.sandbox.deleted).toBe(2)
+  })
+
+  it('does not return closed true when provider deletion stalls past the close deadline', async () => {
+    const harness = createHarness()
+    const analysis = await harness.service.analyze('https://public.example.at')
+    harness.sandbox.deleteGate = new Promise(() => undefined)
+
+    const response = await handleCloseRequest(
+      closeApiRequest(analysis.sessionId, analysis.sessionToken, '198.51.100.232'),
+      harness.service,
+      { closeTimeoutMs: 20 },
+    )
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser close operation exceeded its fixed time limit.',
+      code: 'close_timeout',
+    })
+    expect(harness.sandbox.deleted).toBe(1)
   })
 
   it.each([

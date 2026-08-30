@@ -232,6 +232,26 @@ async function captureActionTargetDigests(
   return digests
 }
 
+interface PausedDocumentAnimations {
+  restore(): Promise<void>
+}
+
+async function pauseDocumentAnimations(cdp: CDPSession): Promise<PausedDocumentAnimations> {
+  await cdp.send('Animation.enable')
+  const current = await cdp.send('Animation.getPlaybackRate') as { playbackRate?: number }
+  const playbackRate = Number.isFinite(current.playbackRate) ? Number(current.playbackRate) : 1
+  await cdp.send('Animation.setPlaybackRate', { playbackRate: 0 })
+  let restored = false
+  return {
+    async restore() {
+      if (restored) return
+      await cdp.send('Animation.setPlaybackRate', { playbackRate })
+      await cdp.send('Animation.disable')
+      restored = true
+    },
+  }
+}
+
 function tokenMatches(expected: string, provided: string): boolean {
   const expectedBuffer = Buffer.from(expected)
   const providedBuffer = Buffer.from(provided)
@@ -3822,12 +3842,18 @@ export class WrapperProofService {
 
   private failConsequentialNavigation(session: ProofSession): void {
     if (session.navigationPolicyError) return
-    session.navigationPolicyError = new WrapperServiceError(
-      'invalid_action',
-      'The isolated page attempted a consequential navigation and was stopped.',
-      409,
-      { sessionInvalidated: true },
-    )
+    session.navigationPolicyError = session.networkMode === 'observing'
+      ? new WrapperServiceError(
+          'unsupported_page',
+          'This page could not be loaded safely in the isolated browser.',
+          422,
+        )
+      : new WrapperServiceError(
+          'invalid_action',
+          'The isolated page attempted a consequential navigation and was stopped.',
+          409,
+          { sessionInvalidated: true },
+        )
     this.stopForPolicyFailure(session)
   }
 
@@ -3913,8 +3939,7 @@ export class WrapperProofService {
       }
       if (!event.requestId) return
       const url = event.request?.url ?? ''
-      const consequential = session.networkMode === 'navigation'
-        && event.resourceType === 'Document'
+      const consequential = event.resourceType === 'Document'
         && event.frameId === session.mainFrameId
         && isConsequentialNavigationUrl(url)
       if (consequential) {
@@ -4093,6 +4118,7 @@ export class WrapperProofService {
     try {
       throwIfAborted(signal)
       const target = await raceWithSignal(this.resolveTarget(value), signal)
+      assertSafeAnalysisUrl(target.url, target.origin)
       const pinnedAddress = target.pinnedAddress.includes(':') ? `[${target.pinnedAddress}]` : target.pinnedAddress
       const browserLaunch = this.launchBrowser({
         headless: true,
@@ -4266,8 +4292,7 @@ export class WrapperProofService {
         const resourceType = request.resourceType()
         const isSubframe = request.isNavigationRequest() && request.frame() !== page.mainFrame()
         const isMainFrameDocument = resourceType === 'document' && !isSubframe
-        const consequentialNavigation = session.networkMode === 'navigation'
-          && isMainFrameDocument
+        const consequentialNavigation = isMainFrameDocument
           && isConsequentialNavigationUrl(resourceUrl)
         if (consequentialNavigation) {
           session.blockedRequests += 1
@@ -4392,6 +4417,7 @@ export class WrapperProofService {
     session.queue = previous.then(() => turn, () => turn)
     let actionStarted = false
     let actionPromise: Promise<PendingActionEvidence> | null = null
+    let pausedAnimations: PausedDocumentAnimations | null = null
 
     try {
       await raceWithSignal(previous, signal)
@@ -4456,6 +4482,9 @@ export class WrapperProofService {
       let beforeActionScreenshotDataUrl: string
       let beforeActionTargetDigests: Map<number, string> | null
       try {
+        pausedAnimations = capability.kind === 'navigation'
+          ? null
+          : await raceWithSessionPolicy(session, pauseDocumentAnimations(session.cdp), signal)
         beforeActionScreenshotDataUrl = screenshotDataUrl(await raceWithSessionPolicy(
           session,
           captureViewportScreenshot(session.cdp),
@@ -4537,6 +4566,8 @@ export class WrapperProofService {
       if (!targetChanged) {
         throw actionVerificationError('The requested action did not produce a visible page change.')
       }
+      await raceWithSessionPolicy(session, pausedAnimations?.restore() ?? Promise.resolve(), signal)
+      pausedAnimations = null
       session.networkMode = 'blocked'
       session.activeNetworkMetrics = null
 
@@ -4570,6 +4601,11 @@ export class WrapperProofService {
       if (Date.now() >= session.expiresAt) throw sessionExpiredError()
       return result
     } catch (error) {
+      const animationRestoreFailed = pausedAnimations
+        ? await pausedAnimations.restore().then(() => false, () => true)
+        : false
+      pausedAnimations = null
+      if (animationRestoreFailed) actionStarted = true
       const sessionExpired = error instanceof WrapperServiceError && error.code === 'session_expired'
       if (actionStarted || sessionExpired) {
         await this.destroySession(sessionId)
@@ -4589,6 +4625,7 @@ export class WrapperProofService {
       }
       throw error
     } finally {
+      await pausedAnimations?.restore().catch(() => undefined)
       resolveQueue()
     }
   }

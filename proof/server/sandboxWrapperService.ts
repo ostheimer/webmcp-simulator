@@ -259,6 +259,28 @@ function isNonMutatingActionRejection(error: unknown): boolean {
     && ['invalid_action', 'invalid_capability', 'page_limit'].includes(error.code)
 }
 
+async function deleteClosedSandbox(
+  sandbox: SandboxHandle,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const deletion = sandbox.delete({ deleteOrphanSnapshots: true, signal })
+      if (signal) await raceSandboxOperation(deletion, signal)
+      else await deletion
+      return
+    } catch (error) {
+      if (signal?.aborted) throw error
+      if (attempt === 0) continue
+    }
+  }
+  throw new WrapperServiceError(
+    'action_failed',
+    'The isolated browser session could not be closed.',
+    503,
+  )
+}
+
 function decorateAnalysis(
   analysis: WrapperAnalysis,
   sandbox: SandboxHandle,
@@ -639,7 +661,7 @@ export class SandboxWrapperService {
       await sandbox?.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
       throw error
     }
-    await sandbox.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
+    await deleteClosedSandbox(sandbox, signal)
     return true
   }
 }

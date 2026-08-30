@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http'
 import { createSocket } from 'node:dgram'
 import { once } from 'node:events'
 import { gzipSync } from 'node:zlib'
-import type { Browser, Page } from 'playwright'
+import type { Browser, CDPSession, Page } from 'playwright'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PublicTarget } from './publicTarget.ts'
 import { WRAPPER_SESSION_TTL_MS } from './wrapperLimits.ts'
@@ -1475,9 +1475,13 @@ async function startFixture(): Promise<Fixture> {
     }
     if (requestUrl === '/visible-state-contract') {
       response.end(`<!doctype html><title>Visible state contract</title>
-        <style>@keyframes unrelated-motion { from { transform: translateX(0); } to { transform: translateX(40px); } }</style>
+        <style>
+          @keyframes unrelated-motion { from { transform: translateX(0); } to { transform: translateX(40px); } }
+          @keyframes target-motion { from { background: rgb(255, 0, 0); } to { background: rgb(0, 0, 255); } }
+          #semantic-css-filter { animation: target-motion 80ms linear infinite alternate; }
+        </style>
         <div aria-hidden="true" style="position:absolute;left:700px;top:40px;width:40px;height:40px;background:#f00;animation:unrelated-motion 120ms linear infinite alternate"></div>
-        <select id="semantic-only-filter" aria-label="Semantic only filter">
+        <select id="semantic-css-filter" aria-label="Semantic CSS filter">
           <option value="one" selected>Same visible label</option>
           <option value="two">Same visible label</option>
         </select>
@@ -1485,6 +1489,20 @@ async function startFixture(): Promise<Fixture> {
           <option value="one" selected>First visible label</option>
           <option value="two">Second visible label</option>
         </select>`)
+      return
+    }
+    if (requestUrl === '/visible-state-web-animation') {
+      response.end(`<!doctype html><title>Visible Web Animation contract</title>
+        <select id="semantic-web-animation-filter" aria-label="Semantic Web Animation filter">
+          <option value="one" selected>Same visible label</option>
+          <option value="two">Same visible label</option>
+        </select>
+        <script>
+          document.getElementById('semantic-web-animation-filter').animate(
+            [{ background: 'rgb(255, 0, 0)' }, { background: 'rgb(0, 0, 255)' }],
+            { duration: 80, direction: 'alternate', iterations: Infinity },
+          );
+        </script>`)
       return
     }
     if (requestUrl === '/cssom-capture-stability') {
@@ -1946,6 +1964,7 @@ function createBudgetedService() {
 
 interface InternalProofSession {
   page: Page
+  cdp: CDPSession
   expiresAt: number
   createdAtMs: number
 }
@@ -5188,23 +5207,28 @@ describe('WrapperProofService security boundaries', () => {
   it('requires a screenshot-visible delta before reporting an action as verified', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
-    const service = createService()
-    services.push(service)
-    const analysis = await service.analyze(`${fixture.origin}/visible-state-contract`)
-    const capabilityFor = (snapshot: typeof analysis, label: string) => {
+    const capabilityFor = (snapshot: Awaited<ReturnType<WrapperProofService['analyze']>>, label: string) => {
       const evidence = snapshot.domEvidence.find((item) => item.label === label)!
       return snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))!
     }
-    const semanticOnly = capabilityFor(analysis, 'Semantic only filter')
-    await expect(service.execute(
-      analysis.sessionId,
-      analysis.sessionToken,
-      semanticOnly.name,
-      semanticOnly.sampleInput,
-      undefined,
-      semanticOnly.id,
-    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
-    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+    for (const [path, label] of [
+      ['/visible-state-contract', 'Semantic CSS filter'],
+      ['/visible-state-web-animation', 'Semantic Web Animation filter'],
+    ] as const) {
+      const service = createService()
+      services.push(service)
+      const analysis = await service.analyze(`${fixture.origin}${path}`)
+      const semanticOnly = capabilityFor(analysis, label)
+      await expect(service.execute(
+        analysis.sessionId,
+        analysis.sessionToken,
+        semanticOnly.name,
+        semanticOnly.sampleInput,
+        undefined,
+        semanticOnly.id,
+      )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+      expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+    }
 
     const visibleService = createService()
     services.push(visibleService)
@@ -5220,6 +5244,9 @@ describe('WrapperProofService security boundaries', () => {
     )
     expect(result.analysis.screenshotDataUrl).not.toBe(visibleAnalysis.screenshotDataUrl)
     expect(result.structuredContent).toMatchObject({ isolatedStateChanged: true, targetStateVerified: true })
+    expect(await internalSession(visibleService, result.analysis.sessionId).cdp.send(
+      'Animation.getPlaybackRate',
+    )).toMatchObject({ playbackRate: 1 })
   })
 
   it('fails closed on an over-budget ARIA-disabled ancestor chain while retaining safe controls', async () => {
@@ -6259,6 +6286,7 @@ describe('WrapperProofService security boundaries', () => {
       '/initial-consequential-hash',
       '/about#/%63heckout',
     ]) {
+      const requestsBefore = fixture.requests.length
       let screenshotCalls = 0
       const service = createService({
         beforeAnalysisScreenshot: async () => { screenshotCalls += 1 },
@@ -6270,6 +6298,14 @@ describe('WrapperProofService security boundaries', () => {
       })
       expect(screenshotCalls, path).toBe(0)
       expect(internalServiceState(service), path).toEqual({ sessions: 0, reservations: 0 })
+      const attemptedRequests = fixture.requests.slice(requestsBefore)
+      if (path === '/initial-consequential-redirect') {
+        expect(attemptedRequests).toContain('/initial-consequential-redirect')
+      }
+      if (path === '/purchase' || path === '/about#/%63heckout') {
+        expect(attemptedRequests).toHaveLength(0)
+      }
+      expect(attemptedRequests).not.toContain('/purchase')
     }
   })
 
