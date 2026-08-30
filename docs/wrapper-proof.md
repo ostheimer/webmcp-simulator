@@ -48,6 +48,8 @@ React wrapper page
      -> treat explicit same-origin navigation as a separate read-network policy
         and inspect every server-identified main-document redirect hop before
         network continuation without treating blocked subframes as navigation
+     -> verify the exact origin and decoded path/query/hash after every action,
+        including network-silent search, filter, and form preparation
   <- post-settle verified semantic state + current URL/evidence/tools + measured network result
 ```
 
@@ -72,9 +74,10 @@ wrapper-owned keys; CDP backend-node references and remote identifiers remain
 server-only.
 Every accessible-name and description source is safety evidence: `aria-label`,
 bounded `aria-labelledby` and `aria-describedby` references (including non-HTML
-elements), associated labels, placeholder, name, ID, and autocomplete. Reference,
-label, and text budgets fail closed on overflow. Public display labels remain
-bounded and do not determine whether a field is sensitive.
+elements), every bounded descendant image alt from every associated label,
+label text, placeholder, name, ID, and autocomplete. Reference, label, image,
+traversal, and aggregate text budgets fail closed on overflow. Public display
+labels remain bounded and do not determine whether a field is sensitive.
 Filter and navigation choices use numeric indices. Password, secret, token,
 email, phone, message, payment, account, upload, purchase, booking, publishing,
 deletion, and similar controls are excluded.
@@ -91,8 +94,10 @@ deletion, and similar controls are excluded.
 ### Reused conceptually from `stash@{0}` / Issue #2
 
 - inspect only visible, effectively enabled, writable, named controls and options;
-- derive bounded schemas from native control types, exposing date-like controls
-  only when Chromium can enumerate a complete finite min/max/step value set;
+- derive bounded schemas from native control types, treating `required` as a
+  native minimum-length contract and exposing date-like controls only when
+  Chromium can enumerate a complete finite min/max/step value set with an
+  executable alternative to the analyzed value;
 - use native setters/events for React-compatible preparation;
 - never call `submit()`, `requestSubmit()`, or a submit button;
 - treat labels and choices as untrusted content.

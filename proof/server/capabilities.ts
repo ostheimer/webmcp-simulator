@@ -297,7 +297,8 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       && !control.numericUnsupported
       && !control.textUnsupported
       && (control.type !== 'select-one' || control.selectSampleIndex !== undefined)
-      && (!Object.hasOwn(DATE_LIKE_FIELD_SPECS, control.type) || Boolean(control.dateLikeValues?.length))
+      && (!Object.hasOwn(DATE_LIKE_FIELD_SPECS, control.type)
+        || (Boolean(control.dateLikeValues?.length) && control.dateLikeSample !== undefined))
       && !UNSAFE_HINT.test(control.label)
       && ['checkbox', 'date', 'month', 'number', 'radio', 'range', 'select-one', 'text', 'textarea', 'time', 'week'].includes(control.type),
     )

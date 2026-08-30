@@ -291,16 +291,29 @@ function tokenizeUntrustedEvidence(value: string): string {
 export function isConsequentialNavigationUrl(value: string): boolean {
   try {
     const url = new URL(value)
-    let evidence = `${url.pathname}${url.search}${url.hash}`
-    try {
-      evidence = decodeURIComponent(evidence)
-    } catch {
-      // Malformed escapes remain untrusted in their raw representation.
+    const components = [url.pathname, url.search, url.hash]
+    const decoded: string[] = []
+    for (const component of components) {
+      try {
+        decoded.push(decodeURIComponent(component))
+      } catch {
+        return true
+      }
     }
+    const evidence = decoded.join('')
     return evidence.length > MAX_SAFETY_EVIDENCE_LENGTH
       || UNSAFE_NAVIGATION_HINT.test(tokenizeUntrustedEvidence(evidence))
   } catch {
     return true
+  }
+}
+
+function assertSafeActionUrl(value: string, expectedOrigin: string): void {
+  if (!isSameOriginHttpUrl(value, expectedOrigin)) {
+    throw actionVerificationError('The isolated page left the validated origin.')
+  }
+  if (isConsequentialNavigationUrl(value)) {
+    throw actionVerificationError('The isolated page reached a consequential navigation route.')
   }
 }
 
@@ -385,6 +398,7 @@ function captureIsolatedSafetyEvidence(
   snapshot: string
   overflow: boolean
   optionEntries: Array<{ optionIndex: number, labelAttribute: string, text: string, value: string }>
+  labelEntries: Array<{ text: string, imageAlts: string[] }>
 } {
   const getAttribute = Element.prototype.getAttribute
   const matches = Element.prototype.matches
@@ -421,6 +435,29 @@ function captureIsolatedSafetyEvidence(
       }
     }
     return bounded(value, value.length > maxSafetyEvidenceLength || Boolean(nextNode.call(walker)))
+  }
+  const boundedDescendantImageAlts = (root: Element) => {
+    if (aggregateOverflow) return { values: [] as string[], overflow: true }
+    const walker = createTreeWalker.call(document, root, NodeFilter.SHOW_ELEMENT)
+    const values: string[] = []
+    let nodesInspected = 0
+    let overflow = false
+    while (nodesInspected < 256) {
+      const node = nextNode.call(walker)
+      if (!node) break
+      nodesInspected += 1
+      if (!(node instanceof HTMLImageElement)) continue
+      if (values.length >= 16) {
+        overflow = true
+        break
+      }
+      const alt = bounded(getAttribute.call(node, 'alt') ?? '')
+      values.push(alt.value)
+      overflow ||= alt.overflow
+      if (aggregateOverflow) break
+    }
+    if (!overflow && nodesInspected === 256 && nextNode.call(walker)) overflow = true
+    return { values, overflow: aggregateOverflow || overflow }
   }
   const referenced = (attribute: string) => {
     const rawSource = getAttribute.call(element, attribute) ?? ''
@@ -473,6 +510,7 @@ function captureIsolatedSafetyEvidence(
     'maxlength',
     'pattern',
     'multiple',
+    'required',
   ]
   const attributes: Array<{ name: string, value: string, overflow: boolean }> = []
   for (const name of attributeNames) {
@@ -481,7 +519,11 @@ function captureIsolatedSafetyEvidence(
   }
   const ariaLabelled = referenced('aria-labelledby')
   const ariaDescribed = referenced('aria-describedby')
-  const labels: Array<{ value: string, overflow: boolean }> = []
+  const labels: Array<{
+    text: { value: string, overflow: boolean }
+    imageAlts: string[]
+    overflow: boolean
+  }> = []
   let labelsOverflow = false
   const labelCollection = element instanceof HTMLInputElement
     || element instanceof HTMLSelectElement
@@ -496,12 +538,29 @@ function captureIsolatedSafetyEvidence(
       index += 1
     ) {
       const label = labelCollection.item(index)
-      if (label) labels.push(boundedNodeText(label))
+      if (label) {
+        const text = boundedNodeText(label)
+        const imageAlts = boundedDescendantImageAlts(label)
+        labels.push({
+          text,
+          imageAlts: imageAlts.values,
+          overflow: text.overflow || imageAlts.overflow,
+        })
+      }
     }
   }
   const anchorText = element instanceof HTMLAnchorElement
     ? boundedNodeText(element)
     : { value: '', overflow: false }
+  let nativeRequired: boolean | null = null
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    const prototype = element instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype
+    const requiredGetter = Object.getOwnPropertyDescriptor(prototype, 'required')?.get
+    if (!requiredGetter) aggregateOverflow = true
+    else nativeRequired = Boolean(requiredGetter.call(element))
+  }
   let imageAlt = { value: '', overflow: false }
   if (element instanceof HTMLAnchorElement) {
     const walker = createTreeWalker.call(document, element, NodeFilter.SHOW_ELEMENT)
@@ -560,21 +619,23 @@ function captureIsolatedSafetyEvidence(
     || anchorText.overflow
     || imageAlt.overflow
     || optionOverflow
-  if (overflow) return { snapshot: '', overflow: true, optionEntries: [] }
+  if (overflow) return { snapshot: '', overflow: true, optionEntries: [], labelEntries: [] }
+  const labelEntries = labels.map(({ text, imageAlts }) => ({ text: text.value, imageAlts }))
   const snapshot = JSON.stringify({
       attributes: attributes.map(({ name, value }) => [name, value]),
       ariaLabelled,
       ariaDescribed,
-      labels: labels.map(({ value }) => value),
+      labels: labelEntries,
+      nativeRequired,
       anchorText: anchorText.value,
       imageAlt: imageAlt.value,
       optionEntries,
       overflow,
     })
   if (snapshot.length > maxTotalSafetyEvidenceLength) {
-    return { snapshot: '', overflow: true, optionEntries: [] }
+    return { snapshot: '', overflow: true, optionEntries: [], labelEntries: [] }
   }
-  return { snapshot, overflow: false, optionEntries }
+  return { snapshot, overflow: false, optionEntries, labelEntries }
 }
 
 function classifyDomInIsolatedWorld({
@@ -758,14 +819,6 @@ function classifyDomInIsolatedWorld({
       const ariaLabelled = referencedElements('aria-labelledby')
       const ariaDescribed = referencedElements('aria-describedby')
       const accessibleNodeText = (node: Element) => boundedNodeText(node)
-      const associatedLabels: HTMLLabelElement[] = []
-      if ('labels' in element && element.labels) {
-        for (let labelIndex = 0; labelIndex < element.labels.length && labelIndex < 16; labelIndex += 1) {
-          const labelElement = element.labels.item(labelIndex)
-          if (labelElement) associatedLabels.push(labelElement)
-        }
-      }
-      const associatedLabelsOverflow = 'labels' in element && Boolean(element.labels && element.labels.length > 16)
       const ariaLabelledText = ariaLabelled.nodes
         .map(accessibleNodeText)
         .find((value) => value.trim())
@@ -774,7 +827,8 @@ function classifyDomInIsolatedWorld({
         || (element instanceof HTMLAnchorElement
           ? boundedNodeText(element) || boundedImageAlt(element) || element.title
           : '')
-        || associatedLabels.map((labelElement) => boundedNodeText(labelElement))
+        || safetyCapture.labelEntries
+          .map(({ text: labelText, imageAlts }) => labelText || imageAlts.find((value) => value.trim()) || '')
           .find((value) => value.trim())
         || element.getAttribute('placeholder')
         || element.getAttribute('name')
@@ -983,9 +1037,12 @@ function classifyDomInIsolatedWorld({
               }
             }
             if (!overflowedBudget && values.length > 0 && values.length <= maxDateLikeValues) {
-              dateLikeValues = values
               const currentValue = String(valueGetter.call(element))
-              dateLikeSample = values.find((value) => value !== currentValue) ?? values[0]
+              const alternativeValue = values.find((value) => value !== currentValue)
+              if (alternativeValue !== undefined) {
+                dateLikeValues = values
+                dateLikeSample = alternativeValue
+              }
             }
           }
         }
@@ -1014,16 +1071,21 @@ function classifyDomInIsolatedWorld({
           : HTMLInputElement.prototype
         const minLengthGetter = Object.getOwnPropertyDescriptor(prototype, 'minLength')?.get
         const maxLengthGetter = Object.getOwnPropertyDescriptor(prototype, 'maxLength')?.get
+        const requiredGetter = Object.getOwnPropertyDescriptor(prototype, 'required')?.get
         const valueGetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.get
         const patternSource = Element.prototype.getAttribute.call(element, 'pattern') ?? ''
         if (patternSource.length > maxSafetyEvidenceLength || patternSource.trim()) {
           textUnsupported = true
-        } else if (!minLengthGetter || !maxLengthGetter || !valueGetter) {
+        } else if (!minLengthGetter || !maxLengthGetter || !requiredGetter || !valueGetter) {
           textUnsupported = true
         } else {
           const nativeMinimum = Number(minLengthGetter.call(element))
           const nativeMaximum = Number(maxLengthGetter.call(element))
-          textMinLength = Number.isInteger(nativeMinimum) && nativeMinimum > 0 ? nativeMinimum : undefined
+          const effectiveMinimum = Math.max(
+            Number.isInteger(nativeMinimum) && nativeMinimum > 0 ? nativeMinimum : 0,
+            requiredGetter.call(element) ? 1 : 0,
+          )
+          textMinLength = effectiveMinimum > 0 ? effectiveMinimum : undefined
           // JSON Schema counts Unicode code points while HTML maxlength counts
           // UTF-16 code units. Halving is conservative for every code point.
           textMaxLength = Number.isInteger(nativeMaximum) && nativeMaximum >= 0
@@ -1055,7 +1117,7 @@ function classifyDomInIsolatedWorld({
         ariaDescribed.raw,
         ...ariaDescribed.ids,
         ...ariaDescribed.nodes.map(accessibleNodeText),
-        ...associatedLabels.map((labelElement) => boundedNodeText(labelElement)),
+        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts }) => [labelText, ...imageAlts]),
         element.getAttribute('placeholder') ?? '',
         'name' in element ? element.name : '',
         element.id,
@@ -1090,7 +1152,6 @@ function classifyDomInIsolatedWorld({
         || linkPathOverflow
         || ariaLabelled.overflow
         || ariaDescribed.overflow
-        || associatedLabelsOverflow
         || safetyCapture.overflow
         || hasSensitiveAutocomplete
         || hasUnsafeEvidence
@@ -1431,16 +1492,21 @@ function assertIsolatedTextValueAllowed(
   ) throw new Error('The isolated text control type changed.')
   const minLengthGetter = Object.getOwnPropertyDescriptor(prototype, 'minLength')?.get
   const maxLengthGetter = Object.getOwnPropertyDescriptor(prototype, 'maxLength')?.get
+  const requiredGetter = Object.getOwnPropertyDescriptor(prototype, 'required')?.get
   const valueGetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.get
   const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
   const validityGetter = Object.getOwnPropertyDescriptor(prototype, 'validity')?.get
-  if (!minLengthGetter || !maxLengthGetter || !valueGetter || !valueSetter || !validityGetter) {
+  if (!minLengthGetter || !maxLengthGetter || !requiredGetter || !valueGetter || !valueSetter || !validityGetter) {
     throw new Error('The isolated text length contract is unavailable.')
   }
   const value = String(expectedValue)
   const minimum = Number(minLengthGetter.call(element))
   const maximum = Number(maxLengthGetter.call(element))
-  if ((minimum > 0 && value.length < minimum) || (maximum >= 0 && value.length > maximum)) {
+  if (
+    (requiredGetter.call(element) && value.length === 0)
+    || (minimum > 0 && value.length < minimum)
+    || (maximum >= 0 && value.length > maximum)
+  ) {
     throw new Error('The isolated text value violates its native length contract.')
   }
   const probe = Node.prototype.cloneNode.call(element, false) as HTMLInputElement | HTMLTextAreaElement
@@ -2892,12 +2958,7 @@ export class WrapperProofService {
       })()
       const evidence = await raceWithSessionPolicy(session, actionPromise, signal)
       throwIfAborted(signal)
-      if (!isSameOriginHttpUrl(session.page.url(), session.targetOrigin)) {
-        throw new Error('The action attempted to leave the validated origin.')
-      }
-      if (evidence.navigationOccurred && isConsequentialNavigationUrl(session.page.url())) {
-        throw actionVerificationError('The isolated page reached a consequential navigation route.')
-      }
+      assertSafeActionUrl(session.page.url(), session.targetOrigin)
       await raceWithSessionPolicy(session, evidence.verify(), signal)
       throwIfAborted(signal)
       const isolatedStateChanged = await raceWithSessionPolicy(session, evidence.stateChanged(), signal)
@@ -2908,6 +2969,7 @@ export class WrapperProofService {
       if (evidence.navigationOccurred) session.analyzedPages += 1
       const analysis = await raceWithSessionPolicy(session, this.collectAnalysis(session), signal)
       throwIfAborted(signal)
+      assertSafeActionUrl(session.page.url(), session.targetOrigin)
       session.networkMode = 'blocked'
       session.activeNetworkMetrics = null
 

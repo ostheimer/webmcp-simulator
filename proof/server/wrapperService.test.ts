@@ -496,6 +496,76 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/required-text-contracts') {
+      response.end(`<!doctype html><title>Required text contracts</title>
+        <form id="required-text-form">
+          <input id="required-input" type="text" required aria-label="Required input">
+          <textarea id="required-textarea" required aria-label="Required textarea"></textarea>
+        </form>
+        <form id="late-required-form">
+          <input id="late-required-input" type="text" aria-label="Late required input">
+          <input id="late-required-detail" type="text" aria-label="Late required detail">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/date-like-single-state') {
+      response.end(`<!doctype html><title>Date-like single state</title>
+        <form id="fixed-date-form">
+          <input type="date" min="2026-01-15" max="2026-01-15" value="2026-01-15" aria-label="Fixed date">
+          <input type="month" min="2026-02" max="2026-02" value="2026-02" aria-label="Fixed month">
+        </form>
+        <form id="alternative-date-form">
+          <input id="alternative-date" type="date" min="2026-01-15" max="2026-01-16" value="2026-01-15" aria-label="Alternative date">
+          <input type="text" aria-label="Alternative date detail">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/label-image-alt-safety') {
+      response.end(`<!doctype html><title>Label image alt safety</title>
+        <form id="sensitive-label-form">
+          <label><img alt="Credit card"><input id="sensitive-label-input" name="reference"></label>
+          <input type="text" aria-label="Sensitive label detail">
+        </form>
+        <form id="late-label-form">
+          <label for="late-label-input"><img id="late-label-image" alt="Reference image"></label>
+          <input id="late-label-input" type="text" name="reference">
+          <input id="late-label-detail" type="text" aria-label="Late label detail">
+        </form>
+        <form id="neutral-label-form">
+          <label for="neutral-label-input"><img alt="Neutral reference"></label>
+          <input id="neutral-label-input" type="text" name="reference">
+          <input type="text" aria-label="Neutral label detail">
+        </form>
+        <form id="overflow-label-form">
+          <label id="overflow-image-label" for="overflow-label-input"></label>
+          <input id="overflow-label-input" type="text" name="reference">
+          <input type="text" aria-label="Overflow label detail">
+        </form>
+        <script>
+          const overflowLabel = document.getElementById('overflow-image-label');
+          for (let index = 0; index < 17; index += 1) {
+            const image = document.createElement('img');
+            image.alt = 'Bounded reference ' + index;
+            overflowLabel.append(image);
+          }
+        </script>`)
+      return
+    }
+    if (requestUrl === '/preparation-url-state') {
+      response.end(`<!doctype html><title>Preparation URL state</title>
+        <input id="url-state-search" type="search" aria-label="URL state search" oninput="
+          if (this.value === 'hostile-push') history.pushState({}, '', '/safe#/checkout');
+          if (this.value === 'malformed-push') history.pushState({}, '', '/safe%ZZ?next=%63heckout');
+          if (this.value === 'neutral-hash') location.hash = '#overview';
+        ">
+        <select id="url-state-filter" aria-label="URL state filter" onchange="
+          if (this.value === 'secondary') location.hash = '#/checkout';
+        ">
+          <option value="safe" selected>Safe option</option>
+          <option value="secondary">Secondary option</option>
+        </select>`)
+      return
+    }
     if (requestUrl === '/checked-radio-groups') {
       response.end(`<!doctype html><title>Checked radio groups</title>
         <form id="first-radio-form">
@@ -907,6 +977,7 @@ describe('isConsequentialNavigationUrl', () => {
   it('checks decoded fragment routes without rejecting neutral fragments', () => {
     expect(isConsequentialNavigationUrl('https://public.example.at/about#/checkout')).toBe(true)
     expect(isConsequentialNavigationUrl('https://public.example.at/about#/%62ooking')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://public.example.at/safe%ZZ?next=%63heckout')).toBe(true)
     expect(isConsequentialNavigationUrl('https://public.example.at/about#overview')).toBe(false)
   })
 })
@@ -1374,6 +1445,58 @@ describe('WrapperProofService security boundaries', () => {
     })
   })
 
+  it('classifies every associated-label image alt and revalidates late mutations and budgets', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/label-image-alt-safety`)
+    const sensitiveEvidence = analysis.domEvidence.filter(({ sensitive }) => sensitive)
+
+    expect(sensitiveEvidence.map(({ label }) => label)).toEqual(expect.arrayContaining([
+      'Credit card',
+      'reference',
+    ]))
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    expect(analysis.capabilities.some(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Credit card'))).toBe(false)
+
+    const lateForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#late-label-image').evaluate((image) => image.setAttribute('alt', 'User password'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-label-input').inputValue()).toBe('')
+
+    await page.locator('#late-label-image').evaluate((image) => image.setAttribute('alt', 'Reference image'))
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+
+    const neutralForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
   it('keeps native text contracts aligned for schema, samples, Unicode, and pre-action validation', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -1434,6 +1557,82 @@ describe('WrapperProofService security boundaries', () => {
 
     expect(analysis.domEvidence.find(({ label }) => label === 'Tiny value')).toMatchObject({ sensitive: false })
     expect(analysis.domEvidence.find(({ label }) => label === 'Pattern value')).toMatchObject({ sensitive: false })
+  })
+
+  it('applies native required as the effective text minimum and revalidates late mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/required-text-contracts`)
+    const requiredForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+
+    expect(requiredForm.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'string', minLength: 1 },
+        field_2: { type: 'string', minLength: 1 },
+      },
+    })
+    expect(requiredForm.sampleInput).toEqual({ field_1: 'A', field_2: 'A' })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      requiredForm.name,
+      { field_1: '' },
+      undefined,
+      requiredForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      requiredForm.name,
+      { field_2: '' },
+      undefined,
+      requiredForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
+
+    const requiredResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      requiredForm.name,
+      requiredForm.sampleInput,
+      undefined,
+      requiredForm.id,
+    )
+    expect(requiredResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = requiredResult.analysis
+
+    const lateForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    expect(lateForm.inputSchema).toMatchObject({
+      properties: { field_1: { type: 'string', maxLength: 200 } },
+    })
+    expect((lateForm.inputSchema.properties as Record<string, Record<string, unknown>>).field_1)
+      .not.toHaveProperty('minLength')
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#late-required-input').evaluate((input) => {
+      (input as HTMLInputElement).required = true
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-required-input').inputValue()).toBe('')
+
+    await page.locator('#late-required-input').evaluate((input) => {
+      (input as HTMLInputElement).required = false
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
   it('excludes native-pattern fields and rejects a pattern added after analysis before mutation', async () => {
@@ -1868,6 +2067,36 @@ describe('WrapperProofService security boundaries', () => {
       week.name,
       { field_1: '2026-W53' },
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('excludes current-only date-like controls and publishes an executable alternative', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/date-like-single-state`)
+
+    expect(analysis.domEvidence.find(({ label }) => label === 'Fixed date')).toMatchObject({ sensitive: true })
+    expect(analysis.domEvidence.find(({ label }) => label === 'Fixed month')).toMatchObject({ sensitive: true })
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(1)
+
+    const form = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(form.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'string', enum: ['2026-01-15', '2026-01-16'] },
+      },
+    })
+    expect(form.sampleInput).toMatchObject({ field_1: '2026-01-16' })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
   })
 
   it('publishes executable numeric samples within native bounds and step grids', async () => {
@@ -2707,6 +2936,72 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
     expect(fixture.requests).toContain('/late-fragment')
     expect(internalServiceState(lateService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('rejects consequential URL state after preparation actions and allows a neutral hash', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+
+    const pushStateService = createService()
+    services.push(pushStateService)
+    const pushStateAnalysis = await pushStateService.analyze(`${fixture.origin}/preparation-url-state`)
+    const pushStateSearch = pushStateAnalysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(pushStateService.execute(
+      pushStateAnalysis.sessionId,
+      pushStateAnalysis.sessionToken,
+      pushStateSearch.name,
+      { query: 'hostile-push' },
+      undefined,
+      pushStateSearch.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(internalServiceState(pushStateService)).toEqual({ sessions: 0, reservations: 0 })
+
+    const malformedService = createService()
+    services.push(malformedService)
+    const malformedAnalysis = await malformedService.analyze(`${fixture.origin}/preparation-url-state`)
+    const malformedSearch = malformedAnalysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(malformedService.execute(
+      malformedAnalysis.sessionId,
+      malformedAnalysis.sessionToken,
+      malformedSearch.name,
+      { query: 'malformed-push' },
+      undefined,
+      malformedSearch.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(internalServiceState(malformedService)).toEqual({ sessions: 0, reservations: 0 })
+
+    const hashService = createService()
+    services.push(hashService)
+    const hashAnalysis = await hashService.analyze(`${fixture.origin}/preparation-url-state`)
+    const hashFilter = hashAnalysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    await expect(hashService.execute(
+      hashAnalysis.sessionId,
+      hashAnalysis.sessionToken,
+      hashFilter.name,
+      { optionIndex: 1 },
+      undefined,
+      hashFilter.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(internalServiceState(hashService)).toEqual({ sessions: 0, reservations: 0 })
+
+    const neutralService = createService()
+    services.push(neutralService)
+    const neutralAnalysis = await neutralService.analyze(`${fixture.origin}/preparation-url-state`)
+    const neutralSearch = neutralAnalysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(neutralService.execute(
+      neutralAnalysis.sessionId,
+      neutralAnalysis.sessionToken,
+      neutralSearch.name,
+      { query: 'neutral-hash' },
+      undefined,
+      neutralSearch.id,
+    )).resolves.toMatchObject({
+      finalUrl: `${fixture.origin}/preparation-url-state#overview`,
+      structuredContent: {
+        navigationOccurred: false,
+        targetStateVerified: true,
+      },
+    })
   })
 
   it('blocks consequential subframes without invalidating a safe main-frame navigation', async () => {
