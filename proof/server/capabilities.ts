@@ -40,6 +40,8 @@ export interface DetectedControl extends WrapperDomEvidence {
   textUnsupported?: boolean
   radioGroupSize?: number
   radioGroupComplete?: boolean
+  /** Private native state captured with the analysis evidence; never serialized publicly. */
+  analysisState?: string | number | boolean
   safetySnapshot: string
 }
 

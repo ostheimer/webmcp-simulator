@@ -557,7 +557,7 @@ function captureIsolatedSafetyEvidence(
     value: string
     accessibleEvidence: string[]
   }>
-  labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], descendantAccessibleEntries: Array<Array<[string, string]>>, descendantAccessibleEvidence: string[] }>
+  labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], descendantAccessibleEntries: Array<Array<[string, string]>>, descendantAccessibleEvidence: string[], referenceEvidence: string[], referenceSnapshot: string }>
   ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[], descendantAccessibleEvidence: string[] }>
   ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[], descendantAccessibleEvidence: string[] }>
   anchorImageAlts: string[]
@@ -678,6 +678,17 @@ function captureIsolatedSafetyEvidence(
   for (const value of effectiveAriaDisabled.values) {
     const captured = bounded(value)
     ariaDisabledAncestors.push(captured.value)
+    aggregateOverflow ||= captured.overflow
+  }
+  const effectiveInert = captureEffectiveInert(
+    element,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+  )
+  const inertAncestors: string[] = []
+  for (const value of effectiveInert.values) {
+    const captured = bounded(value)
+    inertAncestors.push(captured.value)
     aggregateOverflow ||= captured.overflow
   }
   const captureNativeControl = (node: Element, excludedNode?: Element) => {
@@ -1122,6 +1133,31 @@ function captureIsolatedSafetyEvidence(
   }
   const ariaLabelled = referenced(element, 'aria-labelledby')
   const ariaDescribed = referenced(element, 'aria-describedby')
+  const referencedEvidence = (reference: ReturnType<typeof referenced>): string[] => [
+    reference.raw,
+    ...reference.ids,
+    ...reference.entries.flatMap((entry) => [
+      entry.text.value,
+      ...entry.imageAlts,
+      entry.ariaLabel.value,
+      entry.ariaDescription.value,
+      entry.ariaLabelledBy.value,
+      entry.ariaDescribedBy.value,
+      entry.title.value,
+      ...entry.generatedContent,
+      entry.nativeControlKind.value,
+      entry.nativeControlValue.value,
+      entry.nativeControlAlt.value,
+      ...entry.nativeControlAccessibleValues,
+      ...entry.descendantAccessibleEvidence,
+    ]),
+  ]
+  const incompleteReference = (reference: ReturnType<typeof referenced>): boolean =>
+    reference.overflow
+    || reference.entries.some((entry) => !entry.found)
+    || reference.entries.some((entry) => Boolean(
+      entry.ariaLabelledBy.value || entry.ariaDescribedBy.value,
+    ))
   const labels: Array<{
     text: { value: string, overflow: boolean }
     imageAlts: string[]
@@ -1130,6 +1166,8 @@ function captureIsolatedSafetyEvidence(
     generatedContent: string[]
     descendantAccessibleEntries: Array<Array<[string, string]>>
     descendantAccessibleEvidence: string[]
+    referenceEvidence: string[]
+    referenceSnapshot: string
     overflow: boolean
   }> = []
   let labelsOverflow = false
@@ -1153,6 +1191,12 @@ function captureIsolatedSafetyEvidence(
         const title = bounded(getAttribute.call(label, 'title') ?? '')
         const generatedContent = boundedGeneratedContent(label)
         const descendantAccessible = captureDescendantAccessibleSources(label, element)
+        const labelAriaLabelled = referenced(label, 'aria-labelledby')
+        const labelAriaDescribed = referenced(label, 'aria-describedby')
+        const labelReferenceEvidence = [
+          ...referencedEvidence(labelAriaLabelled),
+          ...referencedEvidence(labelAriaDescribed),
+        ]
         labels.push({
           text,
           imageAlts: imageAlts.values,
@@ -1161,12 +1205,19 @@ function captureIsolatedSafetyEvidence(
           generatedContent: generatedContent.values,
           descendantAccessibleEntries: descendantAccessible.entries,
           descendantAccessibleEvidence: descendantAccessible.evidence,
+          referenceEvidence: labelReferenceEvidence,
+          referenceSnapshot: JSON.stringify({
+            ariaLabelled: labelAriaLabelled,
+            ariaDescribed: labelAriaDescribed,
+          }),
           overflow: text.overflow
             || imageAlts.overflow
             || ariaLabel.overflow
             || title.overflow
             || generatedContent.overflow
-            || descendantAccessible.overflow,
+            || descendantAccessible.overflow
+            || incompleteReference(labelAriaLabelled)
+            || incompleteReference(labelAriaDescribed),
         })
       }
     }
@@ -1335,6 +1386,7 @@ function captureIsolatedSafetyEvidence(
     || optionOverflow
     || ownerContextOverflow
     || effectiveAriaDisabled.overflow
+    || effectiveInert.overflow
   if (overflow) {
     return {
       snapshot: '',
@@ -1348,7 +1400,7 @@ function captureIsolatedSafetyEvidence(
       ownerContextEvidence: [],
     }
   }
-  const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title, generatedContent, descendantAccessibleEntries, descendantAccessibleEvidence }) => ({
+  const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title, generatedContent, descendantAccessibleEntries, descendantAccessibleEvidence, referenceEvidence, referenceSnapshot }) => ({
     text: text.value,
     imageAlts,
     ariaLabel: ariaLabel.value,
@@ -1356,6 +1408,8 @@ function captureIsolatedSafetyEvidence(
     generatedContent,
     descendantAccessibleEntries,
     descendantAccessibleEvidence,
+    referenceEvidence,
+    referenceSnapshot,
   }))
   const ariaLabelledEntries = ariaLabelled.entries
     .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => ({
@@ -1401,6 +1455,7 @@ function captureIsolatedSafetyEvidence(
       optionEntries,
       ownerContext: ownerContextSnapshots,
       ariaDisabledAncestors,
+      inertAncestors,
       overflow,
     })
   if (snapshot.length > maxTotalSafetyEvidenceLength) {
@@ -1461,6 +1516,42 @@ function captureEffectiveAriaDisabled(
     values,
     overflow: current !== null,
   }
+}
+
+function captureEffectiveInert(
+  element: Element,
+  maxSafetyEvidenceLength: number,
+  maxTotalSafetyEvidenceLength: number,
+): { inert: boolean, values: string[], overflow: boolean } {
+  const getAttribute = Element.prototype.getAttribute
+  const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get
+  const inertGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'inert')?.get
+  if (!parentElementGetter || !inertGetter) return { inert: true, values: [], overflow: true }
+  const values: string[] = []
+  let inert = false
+  let retainedLength = 0
+  let current: Element | null = element
+  let inspected = 0
+  while (current && inspected < 256) {
+    const raw = getAttribute.call(current, 'inert')
+    const source = raw === null ? '' : String(raw)
+    if (source.length > maxSafetyEvidenceLength) {
+      return { inert: true, values, overflow: true }
+    }
+    const nativeInert = current instanceof HTMLElement
+      ? Boolean(inertGetter.call(current))
+      : raw !== null
+    const captured = `${raw === null ? '0' : '1'}:${source}:${nativeInert ? '1' : '0'}`
+    retainedLength += JSON.stringify(captured).length + 8
+    if (retainedLength > maxTotalSafetyEvidenceLength) {
+      return { inert: true, values, overflow: true }
+    }
+    values.push(captured)
+    if (raw !== null || nativeInert) inert = true
+    current = parentElementGetter.call(current) as Element | null
+    inspected += 1
+  }
+  return { inert, values, overflow: current !== null }
 }
 
 function classifyDomInIsolatedWorld({
@@ -1592,6 +1683,11 @@ function classifyDomInIsolatedWorld({
         maxSafetyEvidenceLength,
         maxTotalSafetyEvidenceLength,
       )
+      const effectiveInert = captureEffectiveInert(
+        node,
+        maxSafetyEvidenceLength,
+        maxTotalSafetyEvidenceLength,
+      )
       if (
         controls.length < maxControls
         &&
@@ -1599,6 +1695,8 @@ function classifyDomInIsolatedWorld({
         && !matches.call(node, ':disabled')
         && !ariaDisabled.disabled
         && !ariaDisabled.overflow
+        && !effectiveInert.inert
+        && !effectiveInert.overflow
         && !isReadOnlyControl(node)
       ) controls.push(node)
     }
@@ -2005,13 +2103,14 @@ function classifyDomInIsolatedWorld({
           ...descendantAccessibleEvidence,
           ...generatedContent,
         ]),
-        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title, generatedContent, descendantAccessibleEvidence }) => [
+        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title, generatedContent, descendantAccessibleEvidence, referenceEvidence }) => [
           labelText,
           ...imageAlts,
           ariaLabel,
           title,
           ...generatedContent,
           ...descendantAccessibleEvidence,
+          ...referenceEvidence,
         ]),
         element.getAttribute('placeholder') ?? '',
         'name' in element ? element.name : '',
@@ -2073,6 +2172,25 @@ function classifyDomInIsolatedWorld({
         ? Boolean(traversalComplete && currentRadioGroupKey && radioGroupSize)
         : undefined
 
+      let analysisState: IsolatedControlState | undefined
+      if (element instanceof HTMLSelectElement) {
+        const getter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.get
+        if (getter) analysisState = Number(getter.call(element))
+      } else if (element instanceof HTMLTextAreaElement) {
+        const getter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
+        const value = getter ? String(getter.call(element)) : undefined
+        if (value !== undefined && value.length <= maxSafetyEvidenceLength) analysisState = value
+      } else if (element instanceof HTMLInputElement) {
+        if (type === 'checkbox' || type === 'radio') {
+          const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.get
+          if (getter) analysisState = Boolean(getter.call(element))
+        } else {
+          const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+          const value = getter ? String(getter.call(element)) : undefined
+          if (value !== undefined && value.length <= maxSafetyEvidenceLength) analysisState = value
+        }
+      }
+
       return {
         id,
         tag: element.tagName.toLowerCase() as 'a' | 'input' | 'select' | 'textarea',
@@ -2103,8 +2221,9 @@ function classifyDomInIsolatedWorld({
         textUnsupported,
         radioGroupSize,
         radioGroupComplete,
+        analysisState,
         safetySnapshot: safetyCapture.snapshot,
-        sensitive,
+        sensitive: sensitive || (!(element instanceof HTMLAnchorElement) && analysisState === undefined),
       }
     })
     return { descriptors, elements }
@@ -2213,7 +2332,7 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
     }
     const classification = await cdp.send('Runtime.evaluate', {
-      expression: `(() => { const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
+      expression: `(() => { const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
       contextId: executionContextId,
       objectGroup,
       returnByValue: true,
@@ -2574,6 +2693,16 @@ async function createAnalysisCaptureGuard(
 
 type IsolatedControlState = string | number | boolean
 
+interface AtomicFormStateBinding {
+  backendNodeIds: number[]
+  expectedTypes: string[]
+  safetySnapshots: string[]
+  expectedStates: IsolatedControlState[]
+  beforeStates: IsolatedControlState[]
+  expectedOptionIndices: number[]
+  expectedRadioGroupSize: number
+}
+
 function assertIsolatedSafetySnapshot(
   element: Element,
   expectedSnapshot: string,
@@ -2611,6 +2740,14 @@ function assertIsolatedControlOperable(
   )
   if (ariaDisabled.disabled || ariaDisabled.overflow) {
     throw new Error('The isolated control is aria-disabled.')
+  }
+  const effectiveInert = captureEffectiveInert(
+    element,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+  )
+  if (effectiveInert.inert || effectiveInert.overflow) {
+    throw new Error('The isolated control is inert.')
   }
   if (element instanceof HTMLInputElement) {
     const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'readOnly')?.get
@@ -2972,6 +3109,76 @@ function writeIsolatedRadioGroupState(
   return before
 }
 
+function verifyIsolatedFormState(
+  this: Element,
+  bindingsJson: string,
+  viewportWidth: number,
+  viewportHeight: number,
+  maxSafetyEvidenceLength: number,
+  maxTotalSafetyEvidenceLength: number,
+  maxSelectOptionsInspected: number,
+  maxElementsInspected: number,
+  ...elements: Element[]
+): { changed: boolean } {
+  let bindings: unknown
+  try {
+    bindings = JSON.parse(bindingsJson)
+  } catch {
+    throw new Error('The isolated form verification binding is invalid.')
+  }
+  if (!Array.isArray(bindings) || bindings.length === 0) {
+    throw new Error('The isolated form verification binding is empty.')
+  }
+  let elementOffset = 0
+  let changed = false
+  for (const rawBinding of bindings) {
+    const binding = rawBinding as Omit<AtomicFormStateBinding, 'backendNodeIds'> & { memberCount: number }
+    if (
+      !Number.isInteger(binding.memberCount)
+      || binding.memberCount < 1
+      || !Array.isArray(binding.expectedTypes)
+      || !Array.isArray(binding.safetySnapshots)
+      || !Array.isArray(binding.expectedStates)
+      || !Array.isArray(binding.beforeStates)
+      || !Array.isArray(binding.expectedOptionIndices)
+      || binding.expectedTypes.length !== binding.memberCount
+      || binding.safetySnapshots.length !== binding.memberCount
+      || binding.expectedStates.length !== binding.memberCount
+      || binding.beforeStates.length !== binding.memberCount
+      || binding.expectedOptionIndices.length !== binding.memberCount
+    ) throw new Error('The isolated form verification binding changed.')
+    const members = elements.slice(elementOffset, elementOffset + binding.memberCount)
+    if (members.length !== binding.memberCount) {
+      throw new Error('The isolated form verification identity expired.')
+    }
+    elementOffset += binding.memberCount
+    for (let index = 0; index < members.length; index += 1) {
+      const state = readIsolatedControlState.call(
+        members[index],
+        binding.expectedTypes[index],
+        true,
+        viewportWidth,
+        viewportHeight,
+        binding.expectedOptionIndices[index],
+        binding.expectedRadioGroupSize,
+        binding.safetySnapshots[index],
+        maxSafetyEvidenceLength,
+        maxTotalSafetyEvidenceLength,
+        maxSelectOptionsInspected,
+        maxElementsInspected,
+      )
+      if (state !== binding.expectedStates[index]) {
+        throw new Error('The isolated form did not retain every prepared value.')
+      }
+      if (state !== binding.beforeStates[index]) changed = true
+    }
+  }
+  if (elementOffset !== elements.length) {
+    throw new Error('The isolated form verification binding changed.')
+  }
+  return { changed }
+}
+
 function readIsolatedLinkTarget(
   this: Element,
   expectedUrl: string,
@@ -2987,11 +3194,18 @@ function readIsolatedLinkTarget(
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
   )
+  const effectiveInert = captureEffectiveInert(
+    this,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+  )
   if (
     !(this instanceof HTMLAnchorElement)
     || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)
     || ariaDisabled.disabled
     || ariaDisabled.overflow
+    || effectiveInert.inert
+    || effectiveInert.overflow
     || this.href !== expectedUrl
   ) {
     throw new Error('The isolated visible link is no longer available.')
@@ -3028,7 +3242,7 @@ async function callOnIsolatedNode<T>(
       throw new Error('The isolated browser control is not visibly painted.')
     }
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
       arguments: args.map((value) => ({ value })),
       objectGroup,
@@ -3137,7 +3351,7 @@ async function writeRadioGroupState(
     }))
     const selectedObjectId = resolved[selectedIndex]
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); return (${writeIsolatedRadioGroupState.toString()}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); return (${writeIsolatedRadioGroupState.toString()}).apply(this, args); }`,
       objectId: selectedObjectId,
       arguments: [
         { value: selectedIndex },
@@ -3159,6 +3373,62 @@ async function writeRadioGroupState(
       throw new Error('The isolated radio group operation failed.')
     }
     return called.result.value
+  } finally {
+    await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+    await cdp.detach().catch(() => undefined)
+  }
+}
+
+async function verifyFormState(
+  context: BrowserContext,
+  page: Page,
+  bindings: AtomicFormStateBinding[],
+): Promise<{ changed: boolean }> {
+  if (bindings.length === 0) throw new Error('No isolated form state was bound for verification.')
+  const flattened = bindings.flatMap(({ backendNodeIds }) => backendNodeIds)
+  const cdp = await context.newCDPSession(page)
+  const objectGroup = `webmcp-form-verification-${randomUUID()}`
+  try {
+    const executionContextId = await createIsolatedWorld(cdp)
+    const resolved = await Promise.all(flattened.map(async (backendNodeId) => {
+      const result = await cdp.send('DOM.resolveNode', {
+        backendNodeId,
+        executionContextId,
+        objectGroup,
+      }) as { object?: { objectId?: string } }
+      const objectId = result.object?.objectId
+      if (!objectId) throw new Error('The isolated form identity expired.')
+      if (!await isCdpPaintVisible(cdp, executionContextId, objectId, backendNodeId, objectGroup)) {
+        throw new Error('The isolated form control is not visibly painted.')
+      }
+      return objectId
+    }))
+    const called = await cdp.send('Runtime.callFunctionOn', {
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const readIsolatedControlState = (${readIsolatedControlState.toString()}); return (${verifyIsolatedFormState.toString()}).apply(this, args); }`,
+      objectId: resolved[0],
+      arguments: [
+        {
+          value: JSON.stringify(bindings.map(({ backendNodeIds, ...binding }) => ({
+            ...binding,
+            memberCount: backendNodeIds.length,
+          }))),
+        },
+        { value: CAPTURE_VIEWPORT_WIDTH },
+        { value: CAPTURE_VIEWPORT_HEIGHT },
+        { value: MAX_SAFETY_EVIDENCE_LENGTH },
+        { value: MAX_TOTAL_SAFETY_EVIDENCE_LENGTH },
+        { value: WRAPPER_MAX_SELECT_OPTIONS_INSPECTED },
+        { value: WRAPPER_MAX_DOM_ELEMENTS_INSPECTED },
+        ...resolved.map((objectId) => ({ objectId })),
+      ],
+      objectGroup,
+      returnByValue: true,
+      awaitPromise: true,
+    }) as { result?: { value?: { changed?: boolean } }, exceptionDetails?: unknown }
+    if (called.exceptionDetails || typeof called.result?.value?.changed !== 'boolean') {
+      throw new Error('The isolated form verification failed.')
+    }
+    return { changed: called.result.value.changed }
   } finally {
     await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
     await cdp.detach().catch(() => undefined)
@@ -3209,7 +3479,7 @@ async function revalidateDomEvidence(
         )
         return
       }
-      await readControlState(
+      const currentState = await readControlState(
         context,
         page,
         control.backendNodeId,
@@ -3219,6 +3489,9 @@ async function revalidateDomEvidence(
         -1,
         control.type === 'radio' ? control.radioGroupSize ?? -1 : -1,
       )
+      if (currentState !== control.analysisState) {
+        throw new Error('The isolated control state changed while analysis evidence was captured.')
+      }
     }))
 }
 
@@ -3481,8 +3754,7 @@ async function applyAction(
     }
   }
 
-  const verifications: Array<() => Promise<void>> = []
-  const changeChecks: Array<() => Promise<boolean>> = []
+  const formBindings: AtomicFormStateBinding[] = []
   for (const field of action.fields ?? []) {
     if (!Object.hasOwn(input, field.key)) continue
     const value = input[field.key]
@@ -3507,27 +3779,14 @@ async function applyAction(
         field.safetySnapshot,
         optionIndex,
       )
-      changeChecks.push(async () =>
-        await readControlState(
-          context,
-          page,
-          field.backendNodeId,
-          field.type,
-          true,
-          field.safetySnapshot,
-          optionIndex,
-        ) !== before)
-      verifications.push(async () => {
-        const selectedIndex = await readControlState(
-          context,
-          page,
-          field.backendNodeId,
-          field.type,
-          true,
-          field.safetySnapshot,
-          optionIndex,
-        )
-        if (selectedIndex !== optionIndex) throw actionVerificationError(`${field.key} did not retain the selected option.`)
+      formBindings.push({
+        backendNodeIds: [field.backendNodeId],
+        expectedTypes: [field.type],
+        safetySnapshots: [field.safetySnapshot],
+        expectedStates: [optionIndex],
+        beforeStates: [before],
+        expectedOptionIndices: [optionIndex],
+        expectedRadioGroupSize: -1,
       })
     } else if (field.type === 'radio-group') {
       const backendNodeIds = field.backendNodeIds ?? []
@@ -3544,35 +3803,14 @@ async function applyAction(
         safetySnapshots,
         field.radioGroupSize ?? -1,
       )
-      changeChecks.push(async () => {
-        const after = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
-          readControlState(
-            context,
-            page,
-            backendNodeId,
-            'radio',
-            true,
-            safetySnapshots[index],
-            -1,
-            field.radioGroupSize ?? -1,
-          )))
-        return after.some((checked, index) => checked !== before[index])
-      })
-      verifications.push(async () => {
-        const after = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
-          readControlState(
-            context,
-            page,
-            backendNodeId,
-            'radio',
-            true,
-            safetySnapshots[index],
-            -1,
-            field.radioGroupSize ?? -1,
-          )))
-        if (!after[selectedIndex] || after.filter(Boolean).length !== 1) {
-          throw actionVerificationError(`${field.key} did not retain one exclusive radio choice.`)
-        }
+      formBindings.push({
+        backendNodeIds,
+        expectedTypes: backendNodeIds.map(() => 'radio'),
+        safetySnapshots,
+        expectedStates: backendNodeIds.map((_, index) => index === selectedIndex),
+        beforeStates: before,
+        expectedOptionIndices: backendNodeIds.map(() => -1),
+        expectedRadioGroupSize: field.radioGroupSize ?? -1,
       })
     } else if (field.type === 'checkbox' || field.type === 'radio') {
       const before = await readControlState(
@@ -3595,30 +3833,14 @@ async function applyAction(
         -1,
         field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
       )
-      changeChecks.push(async () =>
-        await readControlState(
-          context,
-          page,
-          field.backendNodeId,
-          field.type,
-          true,
-          field.safetySnapshot,
-          -1,
-          field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
-        ) !== before)
-      verifications.push(async () => {
-        if (await readControlState(
-          context,
-          page,
-          field.backendNodeId,
-          field.type,
-          true,
-          field.safetySnapshot,
-          -1,
-          field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
-        ) !== value) {
-          throw actionVerificationError(`${field.key} did not retain its checked state.`)
-        }
+      formBindings.push({
+        backendNodeIds: [field.backendNodeId],
+        expectedTypes: [field.type],
+        safetySnapshots: [field.safetySnapshot],
+        expectedStates: [Boolean(value)],
+        beforeStates: [before],
+        expectedOptionIndices: [-1],
+        expectedRadioGroupSize: field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
       })
     } else {
       const stringValue = String(value)
@@ -3638,41 +3860,22 @@ async function applyAction(
         stringValue,
         field.safetySnapshot,
       )
-      changeChecks.push(async () =>
-        await readControlState(
-          context,
-          page,
-          field.backendNodeId,
-          field.type,
-          true,
-          field.safetySnapshot,
-        ) !== before)
-      verifications.push(async () => {
-        if (await readControlState(
-          context,
-          page,
-          field.backendNodeId,
-          field.type,
-          true,
-          field.safetySnapshot,
-        ) !== stringValue) {
-          throw actionVerificationError(`${field.key} did not retain its prepared value.`)
-        }
+      formBindings.push({
+        backendNodeIds: [field.backendNodeId],
+        expectedTypes: [field.type],
+        safetySnapshots: [field.safetySnapshot],
+        expectedStates: [stringValue],
+        beforeStates: [before],
+        expectedOptionIndices: [-1],
+        expectedRadioGroupSize: -1,
       })
     }
   }
-  if (verifications.length === 0) throw new Error('No safe form field was prepared.')
+  if (formBindings.length === 0) throw new Error('No safe form field was prepared.')
   return {
     navigationOccurred: false,
-    stateChanged: async () => {
-      for (const changed of changeChecks) {
-        if (await changed()) return true
-      }
-      return false
-    },
-    verify: async () => {
-      for (const verify of verifications) await verify()
-    },
+    stateChanged: async () => (await verifyFormState(context, page, formBindings)).changed,
+    verify: async () => { await verifyFormState(context, page, formBindings) },
   }
 }
 
@@ -3991,7 +4194,6 @@ export class WrapperProofService {
         await this.beforeAnalysisScreenshot?.(session.page, attempt)
         const candidateScreenshot = await guard.screenshot()
         await this.afterAnalysisScreenshot?.(session.page, attempt)
-        await revalidateDomEvidence(session.context, session.page, candidateDomEvidence)
         const candidateAxEvidence = await collectAxEvidence(
           session.context,
           session.page,
@@ -3999,6 +4201,7 @@ export class WrapperProofService {
             .filter(({ sensitive }) => !sensitive)
             .map(({ backendNodeId }) => backendNodeId),
         )
+        await revalidateDomEvidence(session.context, session.page, candidateDomEvidence)
         const after = await guard.snapshot()
         if (
           after.overflow
@@ -4080,6 +4283,7 @@ export class WrapperProofService {
         textUnsupported: _textUnsupported,
         radioGroupSize: _radioGroupSize,
         radioGroupComplete: _radioGroupComplete,
+        analysisState: _analysisState,
         safetySnapshot: _safetySnapshot,
         ...evidence
       }) => evidence),

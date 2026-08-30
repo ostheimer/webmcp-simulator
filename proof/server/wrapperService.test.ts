@@ -1031,6 +1031,83 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/label-reference-safety') {
+      response.end(`<!doctype html><title>Label reference safety</title>
+        <span id="sensitive-label-reference">Credit card number</span>
+        <span id="neutral-label-reference">Reference context</span>
+        <span id="late-label-reference">Helpful overview</span>
+        <span id="nested-label-reference" aria-describedby="neutral-label-reference">Reference context</span>
+        <form id="sensitive-label-reference-form">
+          <label aria-labelledby="sensitive-label-reference">Sensitive reference<input type="text" name="reference" aria-label="Sensitive reference"></label>
+          <input type="text" aria-label="Sensitive reference detail">
+        </form>
+        <form id="missing-label-reference-form">
+          <label aria-describedby="missing-reference">Missing reference<input type="text" name="reference" aria-label="Missing reference"></label>
+          <input type="text" aria-label="Missing reference detail">
+        </form>
+        <form id="nested-label-reference-form">
+          <label aria-labelledby="nested-label-reference">Nested reference<input type="text" name="reference" aria-label="Nested reference"></label>
+          <input type="text" aria-label="Nested reference detail">
+        </form>
+        <form id="late-label-reference-form">
+          <label id="late-reference-label" aria-describedby="late-label-reference">Late reference<input id="late-reference-input" type="text" name="reference" aria-label="Late reference"></label>
+          <input id="late-reference-detail" type="text" aria-label="Late reference detail">
+        </form>
+        <form id="neutral-label-reference-form">
+          <label aria-labelledby="neutral-label-reference">Neutral reference<input type="text" name="reference" aria-label="Neutral reference"></label>
+          <input type="text" aria-label="Neutral reference detail">
+        </form>
+        <form id="overflow-label-reference-form">
+          <label id="overflow-label-reference">Overflow reference<input type="text" name="reference" aria-label="Overflow reference"></label>
+          <input type="text" aria-label="Overflow reference detail">
+        </form>
+        <script>document.getElementById('overflow-label-reference').setAttribute('aria-labelledby', 'x'.repeat(4097))</script>`)
+      return
+    }
+    if (requestUrl === '/inert-boundary') {
+      response.end(`<!doctype html><title>Inert boundary</title>
+        <form inert><input type="text" aria-label="Direct inert value"><input type="text" aria-label="Direct inert detail"></form>
+        <div inert><form><input type="text" aria-label="Ancestor inert value"><input type="text" aria-label="Ancestor inert detail"></form></div>
+        <form inert="false"><input type="text" aria-label="Boolean inert value"><input type="text" aria-label="Boolean inert detail"></form>
+        <div id="late-inert-owner"><form><input id="late-inert-value" type="text" aria-label="Late inert value"><input id="late-inert-detail" type="text" aria-label="Late inert detail"></form></div>
+        <form><input type="text" aria-label="Neutral inert value"><input type="text" aria-label="Neutral inert detail"></form>
+        <a inert href="/about#inert">Inert destination</a>
+        <a href="/about#neutral-inert">Neutral destination</a>`)
+      return
+    }
+    if (requestUrl === '/analysis-native-state') {
+      response.end(`<!doctype html><title>Analysis native state</title>
+        <form>
+          <input id="state-text" type="text" aria-label="State text" value="before">
+          <input id="state-checkbox" type="checkbox" aria-label="State checkbox">
+          <select id="state-select" aria-label="State select"><option selected>One</option><option>Two</option></select>
+          <input id="state-number" type="number" min="1" max="3" step="1" value="1" aria-label="State number">
+          <input id="state-date" type="date" min="2026-01-01" max="2026-01-02" value="2026-01-01" aria-label="State date">
+          <input id="state-radio-a" type="radio" name="state-radio" checked><label for="state-radio-a">State radio A</label>
+          <input id="state-radio-b" type="radio" name="state-radio"><label for="state-radio-b">State radio B</label>
+        </form>
+        <input id="stable-state-search" type="search" aria-label="Stable catalog search">`)
+      return
+    }
+    if (requestUrl === '/atomic-form-verification') {
+      response.end(`<!doctype html><title>Atomic form verification</title>
+        <form>
+          <input id="atomic-first" type="text" aria-label="Atomic first">
+          <input id="atomic-second" type="text" aria-label="Atomic second">
+        </form>
+        <form>
+          <input id="stable-first" type="text" aria-label="Stable first">
+          <input id="stable-second" type="text" aria-label="Stable second">
+        </form>
+        <script>
+          setInterval(() => {
+            const first = document.getElementById('atomic-first');
+            const second = document.getElementById('atomic-second');
+            if (second.value) first.value = '';
+          }, 1);
+        </script>`)
+      return
+    }
     if (requestUrl === '/link-image-alt-safety') {
       response.end(`<!doctype html><title>Link image alt safety</title>
         <a id="sensitive-multi-image-link" href="/about#sensitive">
@@ -3701,6 +3778,201 @@ describe('WrapperProofService security boundaries', () => {
       neutralForm.sampleInput,
       undefined,
       neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('resolves associated-label ARIA references privately and fails closed on incomplete or drifting evidence', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/label-reference-safety`)
+
+    const evidenceByLabel = new Map(analysis.domEvidence.map((evidence) => [evidence.label, evidence]))
+    for (const label of ['Sensitive reference', 'Missing reference', 'Nested reference', 'Overflow reference']) {
+      expect(evidenceByLabel.get(label)?.sensitive).toBe(true)
+    }
+    const page = internalSession(service, analysis.sessionId).page
+    const lateForm = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Late reference'))!
+    expect(lateForm).toBeDefined()
+    expect(JSON.stringify(analysis)).not.toContain('Credit card number')
+
+    await page.locator('#late-label-reference').evaluate((node) => { node.textContent = 'User password' })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-reference-input').inputValue()).toBe('')
+    expect(await page.locator('#late-reference-detail').inputValue()).toBe('')
+
+    await page.locator('#late-label-reference').evaluate((node) => { node.textContent = 'Helpful overview' })
+    const result = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(result.structuredContent.targetStateVerified).toBe(true)
+    analysis = result.analysis
+    const neutralForm = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Neutral reference'))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('excludes effective inert ancestry and revalidates boolean inert semantics before action', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/inert-boundary`)
+
+    const labels = analysis.domEvidence.map(({ label }) => label)
+    expect(labels).not.toContain('Direct inert value')
+    expect(labels).not.toContain('Ancestor inert value')
+    expect(labels).not.toContain('Boolean inert value')
+    expect(labels).not.toContain('Inert destination')
+    expect(labels).toEqual(expect.arrayContaining([
+      'Late inert value',
+      'Neutral inert value',
+      'Neutral destination',
+    ]))
+    const lateForm = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Late inert value'))!
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#late-inert-owner').evaluate((owner) => owner.setAttribute('inert', 'false'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-inert-value').inputValue()).toBe('')
+    expect(await page.locator('#late-inert-detail').inputValue()).toBe('')
+
+    await page.locator('#late-inert-owner').evaluate((owner) => owner.removeAttribute('inert'))
+    const result = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(result.structuredContent.targetStateVerified).toBe(true)
+    analysis = result.analysis
+    const neutralForm = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Neutral inert value'))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('retries on native descriptor-state drift and never publishes stale private control values', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      afterAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          setTimeout(() => {
+            const text = document.querySelector<HTMLInputElement>('#state-text')!
+            text.value = 'private-state-after-screenshot'
+            document.querySelector<HTMLInputElement>('#state-checkbox')!.checked = true
+            document.querySelector<HTMLSelectElement>('#state-select')!.selectedIndex = 1
+            document.querySelector<HTMLInputElement>('#state-number')!.value = '2'
+            document.querySelector<HTMLInputElement>('#state-date')!.value = '2026-01-02'
+            document.querySelector<HTMLInputElement>('#state-radio-b')!.checked = true
+          }, 0)
+        })
+        await page.waitForTimeout(20)
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/analysis-native-state`)
+    expect(captureCalls).toBe(2)
+    expect(JSON.stringify(analysis)).not.toContain('private-state-after-screenshot')
+    const search = analysis.capabilities.find(({ kind }) => kind === 'prepare_search')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    let driftingCalls = 0
+    const driftingService = createService({
+      afterAnalysisScreenshot: async (page) => {
+        driftingCalls += 1
+        await page.evaluate(() => {
+          const control = document.querySelector<HTMLInputElement>('#state-text')!
+          control.value = control.value === 'drift-a' ? 'drift-b' : 'drift-a'
+        })
+      },
+    })
+    services.push(driftingService)
+    await expect(driftingService.analyze(`${fixture.origin}/analysis-native-state`)).rejects.toMatchObject({
+      code: 'unsupported_page',
+      status: 422,
+    })
+    expect(driftingCalls).toBe(2)
+    expect(internalServiceState(driftingService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('verifies every prepared form field atomically against periodic hostile resets', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionSettleMs: 80 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/atomic-form-verification`)
+    const hostileForm = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Atomic first'))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      hostileForm.name,
+      hostileForm.sampleInput,
+      undefined,
+      hostileForm.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+
+    const stableService = createService({ actionSettleMs: 20 })
+    services.push(stableService)
+    const stableAnalysis = await stableService.analyze(`${fixture.origin}/atomic-form-verification`)
+    const stableCapability = stableAnalysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => stableAnalysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Stable first'))!
+    await expect(stableService.execute(
+      stableAnalysis.sessionId,
+      stableAnalysis.sessionToken,
+      stableCapability.name,
+      stableCapability.sampleInput,
+      undefined,
+      stableCapability.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
