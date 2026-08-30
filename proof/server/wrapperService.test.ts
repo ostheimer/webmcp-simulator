@@ -1291,6 +1291,109 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/option-and-readonly-safety') {
+      response.end(`<!doctype html><title>Option and readonly safety</title>
+        <select id="direct-disabled-option" aria-label="Direct disabled option filter">
+          <option value="one" selected>One</option>
+          <option value="two" aria-disabled="true">Two</option>
+        </select>
+        <select id="ancestor-disabled-option" aria-label="Ancestor disabled option filter">
+          <option value="one" selected>One</option>
+          <optgroup aria-disabled="true"><option value="two">Two</option></optgroup>
+        </select>
+        <select id="aria-false-option" aria-label="ARIA false option filter">
+          <option value="one" aria-disabled="false" selected>One</option>
+          <option value="two" aria-disabled="false">Two</option>
+        </select>
+        <select id="late-option-operability" aria-label="Late option operability filter">
+          <option value="one" selected>One</option><option id="late-option-target" value="two">Two</option>
+        </select>
+        <form id="initial-readonly-form">
+          <input aria-label="Initial readonly value" aria-readonly="true">
+          <textarea aria-label="Initial readonly detail" aria-readonly="true"></textarea>
+        </form>
+        <form id="false-readonly-form">
+          <input id="false-readonly-value" aria-label="False readonly value" aria-readonly="false">
+          <textarea aria-label="False readonly detail" aria-readonly="false"></textarea>
+        </form>
+        <form id="late-readonly-form">
+          <input id="late-readonly-value" aria-label="Late readonly value">
+          <textarea aria-label="Late readonly detail"></textarea>
+        </form>`)
+      return
+    }
+    if (requestUrl === '/option-described-safety') {
+      response.end(`<!doctype html><title>Option described safety</title>
+        <span id="sensitive-option-description">Credit card number</span>
+        <span id="late-option-description">Neutral option context</span>
+        <span id="nested-option-description" aria-labelledby="nested-option-sensitive">Neutral nested context</span>
+        <span id="nested-option-sensitive">Credit card number</span>
+        ${Array.from({ length: 17 }, (_, index) => `<span hidden id="count-option-description-${index}">Reference ${index}</span>`).join('')}
+        ${Array.from({ length: 7 }, (_, index) => `<span hidden id="aggregate-option-description-${index}">${'x'.repeat(3_900)}</span>`).join('')}
+        <span hidden id="deep-option-description">${'<span>'.repeat(300)}Deep reference${'</span>'.repeat(300)}</span>
+        <select id="direct-description-option" aria-label="Direct description option filter">
+          <option value="one" selected>One</option>
+          <option value="two" aria-description="Password">Two</option>
+        </select>
+        <select id="referenced-description-option" aria-label="Referenced description option filter">
+          <option value="one" selected>One</option>
+          <option value="two" aria-describedby="sensitive-option-description">Two</option>
+        </select>
+        <select aria-label="Nested description option filter">
+          <option value="one" selected>One</option>
+          <option value="two" aria-describedby="nested-option-description">Two</option>
+        </select>
+        <select id="neutral-description-option" aria-label="Neutral description option filter">
+          <option value="one" selected>One</option>
+          <option value="two" aria-description="Second neutral choice">Two</option>
+        </select>
+        <select id="late-description-option" aria-label="Late description option filter">
+          <option value="one" selected>One</option>
+          <option id="late-description-target" value="two" aria-describedby="late-option-description">Two</option>
+        </select>
+        <select aria-label="Missing description option filter">
+          <option value="one" selected>One</option><option value="two" aria-describedby="missing-description">Two</option>
+        </select>
+        <select aria-label="Overflow description option filter">
+          <option value="one" selected>One</option><option value="two" aria-description="${'x'.repeat(4_200)}">Two</option>
+        </select>
+        <select aria-label="Count overflow description option filter">
+          <option value="one" selected>One</option><option value="two" aria-describedby="${Array.from({ length: 17 }, (_, index) => `count-option-description-${index}`).join(' ')}">Two</option>
+        </select>
+        <select aria-label="Aggregate overflow description option filter">
+          <option value="one" selected>One</option><option value="two" aria-describedby="${Array.from({ length: 7 }, (_, index) => `aggregate-option-description-${index}`).join(' ')}">Two</option>
+        </select>
+        <select aria-label="Traversal overflow description option filter">
+          <option value="one" selected>One</option><option value="two" aria-describedby="deep-option-description">Two</option>
+        </select>`)
+      return
+    }
+    if (requestUrl === '/visible-state-contract') {
+      response.end(`<!doctype html><title>Visible state contract</title>
+        <style>@keyframes unrelated-motion { from { transform: translateX(0); } to { transform: translateX(40px); } }</style>
+        <div aria-hidden="true" style="position:absolute;left:700px;top:40px;width:40px;height:40px;background:#f00;animation:unrelated-motion 120ms linear infinite alternate"></div>
+        <select id="semantic-only-filter" aria-label="Semantic only filter">
+          <option value="one" selected>Same visible label</option>
+          <option value="two">Same visible label</option>
+        </select>
+        <select id="visible-filter" aria-label="Visible result filter">
+          <option value="one" selected>First visible label</option>
+          <option value="two">Second visible label</option>
+        </select>`)
+      return
+    }
+    if (requestUrl === '/cssom-capture-stability') {
+      response.end(`<!doctype html><title>CSSOM capture stability</title>
+        <style id="mutable-sheet">.cssom-control { color: rgb(10, 20, 30); }</style>
+        <input class="cssom-control" type="search" aria-label="CSSOM stable search">
+        <script>
+          const constructed = new CSSStyleSheet();
+          constructed.replaceSync('.constructed-control { color: rgb(20, 30, 40); }');
+          document.adoptedStyleSheets = [...document.adoptedStyleSheets, constructed];
+          window.fixtureConstructedSheet = constructed;
+        </script>`)
+      return
+    }
     if (requestUrl === '/date-like-forms') {
       response.end(`<!doctype html><title>Date-like forms</title>
         <form><input type="date" min="2026-01-14" max="2026-01-18" name="start_date" aria-label="Start date"><input type="text" name="date_details" aria-label="Date details"></form>
@@ -1674,8 +1777,10 @@ function createService(options: {
   actionStartDelayMs?: number
   actionSettleMs?: number
   sessionExpiresAtMs?: number
+  sessionTtlMs?: number
   maxTargetResourceBytes?: number
   maxTargetSessionBytes?: number
+  beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
 } = {}) {
@@ -1694,8 +1799,10 @@ function createService(options: {
     actionStartDelayMs: options.actionStartDelayMs,
     actionSettleMs: options.actionSettleMs ?? 80,
     sessionExpiresAtMs: options.sessionExpiresAtMs,
+    sessionTtlMs: options.sessionTtlMs,
     maxTargetResourceBytes: options.maxTargetResourceBytes,
     maxTargetSessionBytes: options.maxTargetSessionBytes,
+    beforeDomEvidenceCollection: options.beforeDomEvidenceCollection,
     beforeAnalysisScreenshot: options.beforeAnalysisScreenshot,
     beforeRadioGroupWrite: options.beforeRadioGroupWrite,
   })
@@ -3503,6 +3610,76 @@ describe('WrapperProofService security boundaries', () => {
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
+  it('retries once for CSSOM and style-tree drift, then publishes only stable evidence', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    for (const mutation of ['insertRule', 'replaceSync', 'head-style'] as const) {
+      let captureCalls = 0
+      const service = createService({
+        beforeAnalysisScreenshot: async (page) => {
+          captureCalls += 1
+          if (captureCalls !== 1) return
+          await page.evaluate((kind) => {
+            if (kind === 'insertRule') {
+              document.styleSheets[0].insertRule('.cssom-control { background: rgb(240, 240, 240); }')
+            } else if (kind === 'replaceSync') {
+              ;(window as unknown as { fixtureConstructedSheet: CSSStyleSheet }).fixtureConstructedSheet
+                .replaceSync('.constructed-control { background: rgb(240, 240, 240); }')
+            } else {
+              const style = document.createElement('style')
+              style.textContent = '.cssom-control { border-color: rgb(30, 40, 50); }'
+              document.head.append(style)
+            }
+          }, mutation)
+        },
+      })
+      services.push(service)
+      const analysis = await service.analyze(`${fixture.origin}/cssom-capture-stability`)
+      expect(captureCalls).toBe(2)
+      expect(analysis.capabilities.some(({ kind }) => kind === 'prepare_search')).toBe(true)
+    }
+
+    let preDomCaptureCalls = 0
+    const preDomService = createService({
+      beforeDomEvidenceCollection: async (page) => {
+        preDomCaptureCalls += 1
+        if (preDomCaptureCalls !== 1) return
+        await page.evaluate(() => {
+          const meta = document.createElement('meta')
+          meta.name = 'fixture-head-drift'
+          meta.content = 'changed-before-dom-capture'
+          document.head.append(meta)
+        })
+      },
+    })
+    services.push(preDomService)
+    const preDomAnalysis = await preDomService.analyze(`${fixture.origin}/cssom-capture-stability`)
+    expect(preDomCaptureCalls).toBe(2)
+    expect(preDomAnalysis.capabilities.some(({ kind }) => kind === 'prepare_search')).toBe(true)
+  })
+
+  it('fails closed after exactly one retry when CSSOM keeps changing during capture', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      beforeAnalysisScreenshot: async (page) => {
+        captureCalls += 1
+        await page.evaluate((call) => {
+          document.styleSheets[0].insertRule(`.cssom-${call} { color: rgb(${call}, 10, 20); }`)
+        }, captureCalls)
+      },
+    })
+    services.push(service)
+
+    await expect(service.analyze(`${fixture.origin}/cssom-capture-stability`)).rejects.toMatchObject({
+      code: 'unsupported_page',
+      status: 422,
+    })
+    expect(captureCalls).toBe(2)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
   it('normalizes Unicode safety evidence identically and fails closed on late disguised terms', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -4384,6 +4561,227 @@ describe('WrapperProofService security boundaries', () => {
 
     await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('excludes effectively aria-disabled select options and aria-readonly controls at both action boundaries', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/option-and-readonly-safety`)
+    const capabilityFor = (snapshot: typeof analysis, label: string) => {
+      const evidence = snapshot.domEvidence.find((item) => item.label === label)
+      return evidence && snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))
+    }
+
+    expect(capabilityFor(analysis, 'Direct disabled option filter')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Ancestor disabled option filter')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Initial readonly value')).toBeUndefined()
+    const ariaFalseOption = capabilityFor(analysis, 'ARIA false option filter')!
+    const falseReadonlyForm = capabilityFor(analysis, 'False readonly value')!
+    expect(ariaFalseOption).toBeDefined()
+    expect(falseReadonlyForm).toBeDefined()
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      ariaFalseOption.name,
+      ariaFalseOption.sampleInput,
+      undefined,
+      ariaFalseOption.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const optionService = createService()
+    services.push(optionService)
+    const optionAnalysis = await optionService.analyze(`${fixture.origin}/option-and-readonly-safety`)
+    const optionPage = internalSession(optionService, optionAnalysis.sessionId).page
+    const lateOption = capabilityFor(optionAnalysis, 'Late option operability filter')!
+    await optionPage.locator('#late-option-target').evaluate((option) => option.setAttribute('aria-disabled', 'true'))
+    await expect(optionService.execute(
+      optionAnalysis.sessionId,
+      optionAnalysis.sessionToken,
+      lateOption.name,
+      lateOption.sampleInput,
+      undefined,
+      lateOption.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await optionPage.locator('#late-option-operability').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(0)
+
+    const readonlyService = createService()
+    services.push(readonlyService)
+    const readonlyAnalysis = await readonlyService.analyze(`${fixture.origin}/option-and-readonly-safety`)
+    const readonlyPage = internalSession(readonlyService, readonlyAnalysis.sessionId).page
+    const lateReadonly = capabilityFor(readonlyAnalysis, 'Late readonly value')!
+    await readonlyPage.locator('#late-readonly-value').evaluate((input) => input.setAttribute('aria-readonly', 'true'))
+    await expect(readonlyService.execute(
+      readonlyAnalysis.sessionId,
+      readonlyAnalysis.sessionToken,
+      lateReadonly.name,
+      lateReadonly.sampleInput,
+      undefined,
+      lateReadonly.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await readonlyPage.locator('#late-readonly-value').inputValue()).toBe('')
+    await readonlyPage.locator('#late-readonly-value').evaluate((input) => input.removeAttribute('aria-readonly'))
+    await expect(readonlyService.execute(
+      readonlyAnalysis.sessionId,
+      readonlyAnalysis.sessionToken,
+      lateReadonly.name,
+      lateReadonly.sampleInput,
+      undefined,
+      lateReadonly.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('invalidates admitted option and readonly actions when their ARIA operability changes', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const capabilityFor = (snapshot: Awaited<ReturnType<WrapperProofService['analyze']>>, label: string) => {
+      const evidence = snapshot.domEvidence.find((item) => item.label === label)!
+      return snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))!
+    }
+
+    const optionService = createService({ actionStartDelayMs: 180 })
+    services.push(optionService)
+    const optionAnalysis = await optionService.analyze(`${fixture.origin}/option-and-readonly-safety`)
+    const optionPage = internalSession(optionService, optionAnalysis.sessionId).page
+    const lateOption = capabilityFor(optionAnalysis, 'Late option operability filter')
+    const pendingOption = optionService.execute(
+      optionAnalysis.sessionId,
+      optionAnalysis.sessionToken,
+      lateOption.name,
+      lateOption.sampleInput,
+      undefined,
+      lateOption.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await optionPage.locator('#late-option-target').evaluate((option) => option.setAttribute('aria-disabled', 'true'))
+    await expect(pendingOption).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+
+    const readonlyService = createService({ actionStartDelayMs: 180 })
+    services.push(readonlyService)
+    const readonlyAnalysis = await readonlyService.analyze(`${fixture.origin}/option-and-readonly-safety`)
+    const readonlyPage = internalSession(readonlyService, readonlyAnalysis.sessionId).page
+    const lateReadonly = capabilityFor(readonlyAnalysis, 'Late readonly value')
+    const pendingReadonly = readonlyService.execute(
+      readonlyAnalysis.sessionId,
+      readonlyAnalysis.sessionToken,
+      lateReadonly.name,
+      lateReadonly.sampleInput,
+      undefined,
+      lateReadonly.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await readonlyPage.locator('#late-readonly-value').evaluate((input) => input.setAttribute('aria-readonly', 'true'))
+    await expect(pendingReadonly).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+  })
+
+  it('classifies option descriptions privately and revalidates described evidence before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/option-described-safety`)
+    const capabilityFor = (snapshot: typeof analysis, label: string) => {
+      const evidence = snapshot.domEvidence.find((item) => item.label === label)
+      return evidence && snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))
+    }
+    expect(capabilityFor(analysis, 'Direct description option filter')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Referenced description option filter')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Nested description option filter')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Missing description option filter')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Overflow description option filter')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Count overflow description option filter')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Aggregate overflow description option filter')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Traversal overflow description option filter')).toBeUndefined()
+    const neutral = capabilityFor(analysis, 'Neutral description option filter')!
+    expect(neutral).toBeDefined()
+    expect(JSON.stringify(analysis)).not.toMatch(/Credit card number|Password|sensitive-option-description/)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutral.name,
+      neutral.sampleInput,
+      undefined,
+      neutral.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const lateService = createService()
+    services.push(lateService)
+    const lateAnalysis = await lateService.analyze(`${fixture.origin}/option-described-safety`)
+    const latePage = internalSession(lateService, lateAnalysis.sessionId).page
+    const late = capabilityFor(lateAnalysis, 'Late description option filter')!
+    await latePage.locator('#late-option-description').evaluate((node) => {
+      node.setAttribute('aria-description', 'Credit card number')
+    })
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      late.name,
+      late.sampleInput,
+      undefined,
+      late.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await latePage.locator('#late-description-option').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(0)
+
+    const admittedService = createService({ actionStartDelayMs: 180 })
+    services.push(admittedService)
+    const admittedAnalysis = await admittedService.analyze(`${fixture.origin}/option-described-safety`)
+    const admittedPage = internalSession(admittedService, admittedAnalysis.sessionId).page
+    const admitted = capabilityFor(admittedAnalysis, 'Late description option filter')!
+    const pending = admittedService.execute(
+      admittedAnalysis.sessionId,
+      admittedAnalysis.sessionToken,
+      admitted.name,
+      admitted.sampleInput,
+      undefined,
+      admitted.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await admittedPage.locator('#late-option-description').evaluate((node) => {
+      node.setAttribute('aria-description', 'Credit card number')
+    })
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+  })
+
+  it('requires a screenshot-visible delta before reporting an action as verified', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/visible-state-contract`)
+    const capabilityFor = (snapshot: typeof analysis, label: string) => {
+      const evidence = snapshot.domEvidence.find((item) => item.label === label)!
+      return snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))!
+    }
+    const semanticOnly = capabilityFor(analysis, 'Semantic only filter')
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      semanticOnly.name,
+      semanticOnly.sampleInput,
+      undefined,
+      semanticOnly.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+
+    const visibleService = createService()
+    services.push(visibleService)
+    const visibleAnalysis = await visibleService.analyze(`${fixture.origin}/visible-state-contract`)
+    const visible = capabilityFor(visibleAnalysis, 'Visible result filter')
+    const result = await visibleService.execute(
+      visibleAnalysis.sessionId,
+      visibleAnalysis.sessionToken,
+      visible.name,
+      visible.sampleInput,
+      undefined,
+      visible.id,
+    )
+    expect(result.analysis.screenshotDataUrl).not.toBe(visibleAnalysis.screenshotDataUrl)
+    expect(result.structuredContent).toMatchObject({ isolatedStateChanged: true, targetStateVerified: true })
   })
 
   it('fails closed on an over-budget ARIA-disabled ancestor chain while retaining safe controls', async () => {
@@ -5881,6 +6279,50 @@ describe('WrapperProofService security boundaries', () => {
 
     await firstExpectation
     await secondExpectation
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('actively destroys local sessions at their TTL and releases capacity without a follow-up request', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ sessionTtlMs: 1_800 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const page = internalSession(service, analysis.sessionId).page
+    let pageCloseCount = 0
+    page.on('close', () => { pageCloseCount += 1 })
+    const remainingMs = Math.max(0, Date.parse(analysis.expiresAt) - Date.now())
+
+    await new Promise((resolve) => setTimeout(resolve, remainingMs + 180))
+    await vi.waitFor(() => {
+      expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+      expect(page.isClosed()).toBe(true)
+      expect(pageCloseCount).toBe(1)
+    }, { timeout: 2_000 })
+
+    const fresh = await service.analyze(`${fixture.origin}/action-operability`)
+    expect(fresh.capabilities.length).toBeGreaterThan(0)
+  })
+
+  it('keeps explicit-close and expiry races idempotent', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ sessionTtlMs: 1_800 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const page = internalSession(service, analysis.sessionId).page
+    let pageCloseCount = 0
+    page.on('close', () => { pageCloseCount += 1 })
+    const remainingMs = Math.max(0, Date.parse(analysis.expiresAt) - Date.now())
+
+    const concurrentExplicitClose = new Promise<boolean>((resolve) => {
+      setTimeout(() => {
+        void service.closeSession(analysis.sessionId, analysis.sessionToken).then(resolve)
+      }, remainingMs)
+    })
+    await concurrentExplicitClose
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    expect(pageCloseCount).toBe(1)
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 

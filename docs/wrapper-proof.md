@@ -140,7 +140,8 @@ metadata.
 - Each successful navigation returns the current final URL, re-collects DOM and
   accessibility evidence, replaces the server capability map, and re-registers
   the destination tool catalog before the updated page is shown.
-- Ephemeral sessions live in memory for five minutes. Atomic reservations cap
+- Ephemeral sessions live in memory for five minutes and an active server-side
+  deadline timer tears down their browser resources at expiry. Atomic reservations cap
   active plus launching local sessions at three; a fourth client receives a
   capacity error instead of evicting or racing an existing browser. Sessions
   disappear when the dev server stops. There is no durable queue,

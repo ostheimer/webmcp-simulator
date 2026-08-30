@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { chromium, type Browser, type BrowserContext, type CDPSession, type Page, type Request } from 'playwright'
 import type {
   WrapperActionResult,
@@ -105,6 +105,7 @@ interface ProofSession {
   capabilities: Map<string, InferredCapability>
   queue: Promise<void>
   expiresAt: number
+  expiryTimer: ReturnType<typeof setTimeout> | null
   blockedRequests: number
   allowedRequests: number
   analyzedPages: number
@@ -136,8 +137,12 @@ export interface WrapperProofServiceOptions {
   actionStartDelayMs?: number
   actionSettleMs?: number
   sessionExpiresAtMs?: number
+  /** Test-only local session lifetime override, still clamped to the production TTL. */
+  sessionTtlMs?: number
   maxTargetResourceBytes?: number
   maxTargetSessionBytes?: number
+  /** Test-only hook for deterministic head drift before DOM evidence collection. */
+  beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   /** Test-only hook for deterministic DOM drift at the capture boundary. */
   beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   /** Test-only hook for deterministic radio-group drift immediately before the atomic write. */
@@ -159,6 +164,69 @@ function screenshotDataUrl(buffer: Buffer): string {
     throw new WrapperServiceError('response_limit', 'The isolated screenshot exceeded the response safety limit.', 507)
   }
   return `data:image/jpeg;base64,${buffer.toString('base64')}`
+}
+
+async function captureViewportScreenshot(cdp: CDPSession): Promise<Buffer> {
+  const captured = await cdp.send('Page.captureScreenshot', {
+    format: 'jpeg',
+    quality: 72,
+    fromSurface: true,
+    captureBeyondViewport: false,
+  }) as { data?: string }
+  if (!captured.data) throw new Error('The isolated screenshot capture failed.')
+  return Buffer.from(captured.data, 'base64')
+}
+
+function screenshotDigest(buffer: Buffer): string {
+  return createHash('sha256').update(buffer).digest('hex')
+}
+
+function actionTargetBackendNodeIds(
+  action: CapabilityAction,
+  input: Record<string, unknown>,
+): number[] {
+  const ids = new Set<number>()
+  if (action.backendNodeId !== undefined) ids.add(action.backendNodeId)
+  for (const backendNodeId of action.backendNodeIds ?? []) ids.add(backendNodeId)
+  for (const field of action.fields ?? []) {
+    if (!Object.hasOwn(input, field.key)) continue
+    ids.add(field.backendNodeId)
+    for (const backendNodeId of field.backendNodeIds ?? []) ids.add(backendNodeId)
+  }
+  return [...ids]
+}
+
+async function captureActionTargetDigests(
+  cdp: CDPSession,
+  action: CapabilityAction,
+  input: Record<string, unknown>,
+): Promise<Map<number, string>> {
+  const digests = new Map<number, string>()
+  for (const backendNodeId of actionTargetBackendNodeIds(action, input)) {
+    const box = await cdp.send('DOM.getBoxModel', { backendNodeId }) as {
+      model?: { border?: number[] }
+    }
+    const border = box.model?.border
+    if (!border || border.length < 8) throw new Error('The isolated action target has no painted bounds.')
+    const x = Math.max(0, Math.min(border[0], border[2], border[4], border[6]))
+    const y = Math.max(0, Math.min(border[1], border[3], border[5], border[7]))
+    const right = Math.min(CAPTURE_VIEWPORT_WIDTH, Math.max(border[0], border[2], border[4], border[6]))
+    const bottom = Math.min(CAPTURE_VIEWPORT_HEIGHT, Math.max(border[1], border[3], border[5], border[7]))
+    const width = right - x
+    const height = bottom - y
+    if (width <= 0 || height <= 0) throw new Error('The isolated action target left the captured viewport.')
+    const captured = await cdp.send('Page.captureScreenshot', {
+      format: 'jpeg',
+      quality: 72,
+      fromSurface: true,
+      captureBeyondViewport: false,
+      clip: { x, y, width, height, scale: 1 },
+    }) as { data?: string }
+    if (!captured.data) throw new Error('The isolated action target screenshot failed.')
+    digests.set(backendNodeId, screenshotDigest(Buffer.from(captured.data, 'base64')))
+  }
+  if (digests.size === 0) throw new Error('The isolated action has no visible target binding.')
+  return digests
 }
 
 function tokenMatches(expected: string, provided: string): boolean {
@@ -467,8 +535,8 @@ function captureIsolatedSafetyEvidence(
     accessibleEvidence: string[]
   }>
   labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControls: Array<{ kind: string, value: string, alt: string, accessibleValues: string[] }> }>
-  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
-  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
+  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
+  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
   anchorImageAlts: string[]
   generatedContent: string[]
   ownerContextEvidence: string[]
@@ -707,6 +775,9 @@ function captureIsolatedSafetyEvidence(
       text: { value: string, overflow: boolean }
       imageAlts: string[]
       ariaLabel: { value: string, overflow: boolean }
+      ariaDescription: { value: string, overflow: boolean }
+      ariaLabelledBy: { value: string, overflow: boolean }
+      ariaDescribedBy: { value: string, overflow: boolean }
       title: { value: string, overflow: boolean }
       generatedContent: string[]
       nativeControlKind: { value: string, overflow: boolean }
@@ -724,6 +795,9 @@ function captureIsolatedSafetyEvidence(
         ? boundedDescendantImageAlts(node)
         : { values: [] as string[], overflow: false }
       const ariaLabel = bounded(node instanceof Element ? getAttribute.call(node, 'aria-label') ?? '' : '')
+      const ariaDescription = bounded(node instanceof Element ? getAttribute.call(node, 'aria-description') ?? '' : '')
+      const ariaLabelledBy = bounded(node instanceof Element ? getAttribute.call(node, 'aria-labelledby') ?? '' : '')
+      const ariaDescribedBy = bounded(node instanceof Element ? getAttribute.call(node, 'aria-describedby') ?? '' : '')
       const title = bounded(node instanceof Element ? getAttribute.call(node, 'title') ?? '' : '')
       const generatedContent = node instanceof Element
         ? boundedGeneratedContent(node)
@@ -735,6 +809,9 @@ function captureIsolatedSafetyEvidence(
         text,
         imageAlts: imageAlts.values,
         ariaLabel,
+        ariaDescription,
+        ariaLabelledBy,
+        ariaDescribedBy,
         title,
         generatedContent: generatedContent.values,
         nativeControlKind: nativeControl.kind,
@@ -745,6 +822,9 @@ function captureIsolatedSafetyEvidence(
         overflow: text.overflow
           || imageAlts.overflow
           || ariaLabel.overflow
+          || ariaDescription.overflow
+          || ariaLabelledBy.overflow
+          || ariaDescribedBy.overflow
           || title.overflow
           || generatedContent.overflow
           || nativeControl.overflow,
@@ -794,6 +874,9 @@ function captureIsolatedSafetyEvidence(
         entry.imageAlts.forEach((alt, altIndex) =>
           retainExisting(`${attribute}:image:${index}:${altIndex}`, alt))
         retainExisting(`${attribute}:aria-label:${index}`, entry.ariaLabel.value)
+        retainExisting(`${attribute}:aria-description:${index}`, entry.ariaDescription.value)
+        retainExisting(`${attribute}:aria-labelledby:${index}`, entry.ariaLabelledBy.value)
+        retainExisting(`${attribute}:aria-describedby:${index}`, entry.ariaDescribedBy.value)
         retainExisting(`${attribute}:title:${index}`, entry.title.value)
         retainExisting(`${attribute}:native-kind:${index}`, entry.nativeControlKind.value)
         retainExisting(`${attribute}:native-value:${index}`, entry.nativeControlValue.value)
@@ -894,6 +977,7 @@ function captureIsolatedSafetyEvidence(
     'aria-describedby',
     'aria-description',
     'aria-disabled',
+    'aria-readonly',
     'autocomplete',
     'placeholder',
     'name',
@@ -1050,12 +1134,21 @@ function captureIsolatedSafetyEvidence(
         const nativeValue = option instanceof HTMLOptionElement
           ? bounded(optionValueGetter.call(option))
           : bounded('', true)
+        const optionAriaDisabled = option instanceof HTMLOptionElement
+          ? captureEffectiveAriaDisabled(
+              option,
+              maxSafetyEvidenceLength,
+              maxTotalSafetyEvidenceLength,
+            )
+          : { disabled: true, values: [] as string[], overflow: true }
         const requiredEmptyOption = nativeRequired === true
           && !nativeValue.overflow
           && nativeValue.value === ''
         const retainable = !(
           !(option instanceof HTMLOptionElement)
           || matches.call(option, ':disabled')
+          || optionAriaDisabled.disabled
+          || optionAriaDisabled.overflow
           || !isEffectivelyVisibleSelectOption(option)
           || requiredEmptyOption
         )
@@ -1065,7 +1158,7 @@ function captureIsolatedSafetyEvidence(
             && selectedGetter.call(option)
             && !requiredEmptyOption
           ) optionOverflow = true
-          optionOverflow ||= nativeValue.overflow
+          optionOverflow ||= nativeValue.overflow || optionAriaDisabled.overflow
           continue
         }
         if (optionEntries.length >= 30) {
@@ -1075,13 +1168,17 @@ function captureIsolatedSafetyEvidence(
         const text = boundedNodeText(option)
         const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
         const ariaLabel = bounded(getAttribute.call(option, 'aria-label') ?? '')
+        const ariaDescription = bounded(getAttribute.call(option, 'aria-description') ?? '')
         const title = bounded(getAttribute.call(option, 'title') ?? '')
         const ariaLabelled = referenced(option, 'aria-labelledby')
+        const ariaDescribed = referenced(option, 'aria-describedby')
         const imageAlts = boundedDescendantImageAlts(option)
         const generatedContent = boundedGeneratedContent(option)
         const accessibleEvidence = [
           ariaLabel.value,
+          ariaDescription.value,
           title.value,
+          ...optionAriaDisabled.values,
           ...imageAlts.values,
           ...generatedContent.values,
           ariaLabelled.raw,
@@ -1090,6 +1187,25 @@ function captureIsolatedSafetyEvidence(
             entry.text.value,
             ...entry.imageAlts,
             entry.ariaLabel.value,
+            entry.ariaDescription.value,
+            entry.ariaLabelledBy.value,
+            entry.ariaDescribedBy.value,
+            entry.title.value,
+            ...entry.generatedContent,
+            entry.nativeControlKind.value,
+            entry.nativeControlValue.value,
+            entry.nativeControlAlt.value,
+            ...entry.nativeControlAccessibleValues,
+          ]),
+          ariaDescribed.raw,
+          ...ariaDescribed.ids,
+          ...ariaDescribed.entries.flatMap((entry) => [
+            entry.text.value,
+            ...entry.imageAlts,
+            entry.ariaLabel.value,
+            entry.ariaDescription.value,
+            entry.ariaLabelledBy.value,
+            entry.ariaDescribedBy.value,
             entry.title.value,
             ...entry.generatedContent,
             entry.nativeControlKind.value,
@@ -1102,9 +1218,16 @@ function captureIsolatedSafetyEvidence(
         optionOverflow ||= text.overflow
           || labelAttribute.overflow
           || ariaLabel.overflow
+          || ariaDescription.overflow
           || title.overflow
           || ariaLabelled.overflow
           || ariaLabelled.entries.some((entry) => !entry.found)
+          || ariaLabelled.entries.some((entry) =>
+            Boolean(entry.ariaLabelledBy.value || entry.ariaDescribedBy.value))
+          || ariaDescribed.overflow
+          || ariaDescribed.entries.some((entry) => !entry.found)
+          || ariaDescribed.entries.some((entry) =>
+            Boolean(entry.ariaLabelledBy.value || entry.ariaDescribedBy.value))
           || imageAlts.overflow
           || generatedContent.overflow
           || value.overflow
@@ -1157,10 +1280,13 @@ function captureIsolatedSafetyEvidence(
     })),
   }))
   const ariaLabelledEntries = ariaLabelled.entries
-    .map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => ({
+    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
+      ariaDescription: ariaDescription.value,
+      ariaLabelledBy: ariaLabelledBy.value,
+      ariaDescribedBy: ariaDescribedBy.value,
       title: title.value,
       generatedContent,
       nativeControlKind: nativeControlKind.value,
@@ -1169,10 +1295,13 @@ function captureIsolatedSafetyEvidence(
       nativeControlAccessibleValues,
     }))
   const ariaDescribedEntries = ariaDescribed.entries
-    .map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => ({
+    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
+      ariaDescription: ariaDescription.value,
+      ariaLabelledBy: ariaLabelledBy.value,
+      ariaDescribedBy: ariaDescribedBy.value,
       title: title.value,
       generatedContent,
       nativeControlKind: nativeControlKind.value,
@@ -1477,6 +1606,12 @@ function classifyDomInIsolatedWorld({
           : element instanceof HTMLTextAreaElement
             ? 'textarea'
             : element.type.toLowerCase()
+      const ariaReadOnlySource = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+        ? getAttribute.call(element, 'aria-readonly') ?? ''
+        : ''
+      const ariaReadOnlyOverflow = ariaReadOnlySource.length > maxSafetyEvidenceLength
+      const ariaReadOnly = !ariaReadOnlyOverflow
+        && ariaReadOnlySource.trim().toLowerCase() === 'true'
       const role = element.getAttribute('role')
         || (element instanceof HTMLAnchorElement ? 'link' : type === 'search' ? 'searchbox' : element instanceof HTMLSelectElement ? 'combobox' : 'textbox')
       const linkHrefSource = element instanceof HTMLAnchorElement ? element.getAttribute('href') ?? '' : ''
@@ -1763,9 +1898,10 @@ function classifyDomInIsolatedWorld({
         ariaLabelled.raw,
         ...ariaLabelled.ids,
         ...ariaLabelled.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => [
+        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => [
           ...imageAlts,
           ariaLabel,
+          ariaDescription,
           title,
           nativeControlKind,
           nativeControlValue,
@@ -1776,9 +1912,10 @@ function classifyDomInIsolatedWorld({
         ariaDescribed.raw,
         ...ariaDescribed.ids,
         ...ariaDescribed.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => [
+        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => [
           ...imageAlts,
           ariaLabel,
+          ariaDescription,
           title,
           nativeControlKind,
           nativeControlValue,
@@ -1834,6 +1971,8 @@ function classifyDomInIsolatedWorld({
         || checkboxIndeterminate
         || (type === 'checkbox' && checkboxRequired === undefined)
         || autocompleteSource.length > maxSafetyEvidenceLength
+        || ariaReadOnlyOverflow
+        || ariaReadOnly
         || numericAttributeOverflow
         || (dateLikeInput && !dateLikeValues)
         || linkTargetOverflow
@@ -2046,6 +2185,7 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
 interface AnalysisCaptureGuardSnapshot {
   mutationCount: number
   navigationCount: number
+  styleSheetChangeCount: number
   url: string
   title: string
   overflow: boolean
@@ -2061,6 +2201,8 @@ async function createAnalysisCaptureGuard(
   stop: () => Promise<void>
 }> {
   const cdp = await context.newCDPSession(page)
+  await cdp.send('DOM.enable')
+  await cdp.send('CSS.enable')
   const storageKey = `__webmcp_capture_guard_${randomUUID().replaceAll('-', '')}`
   const objectGroup = `webmcp-capture-watch-${randomUUID()}`
   const frameTree = await cdp.send('Page.getFrameTree') as { frameTree?: { frame?: { id?: string } } }
@@ -2071,12 +2213,17 @@ async function createAnalysisCaptureGuard(
   }
   const executionContextId = await createIsolatedWorld(cdp)
   let navigationCount = 0
+  let styleSheetChangeCount = 0
   const recordNavigation = (rawEvent: unknown) => {
     const event = rawEvent as { frame?: { id?: string }, frameId?: string }
     if ((event.frame?.id ?? event.frameId) === mainFrameId) navigationCount += 1
   }
   cdp.on('Page.frameNavigated', recordNavigation)
   cdp.on('Page.navigatedWithinDocument', recordNavigation)
+  const recordStyleSheetChange = () => { styleSheetChangeCount += 1 }
+  cdp.on('CSS.styleSheetAdded', recordStyleSheetChange)
+  cdp.on('CSS.styleSheetChanged', recordStyleSheetChange)
+  cdp.on('CSS.styleSheetRemoved', recordStyleSheetChange)
   const initialized = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
       const state = { mutationCount: 0, observer: null, watched: [] };
@@ -2086,15 +2233,25 @@ async function createAnalysisCaptureGuard(
         const contains = Node.prototype.contains;
         for (const record of records) {
           const target = record.target;
+          const head = document.head;
+          const headChanged = head instanceof Node
+            && (target === head || contains.call(head, target));
           if (state.watched.some((node) =>
             target === node
             || contains.call(node, target)
-            || contains.call(target, node))) {
+            || contains.call(target, node))
+            || headChanged) {
             state.mutationCount = 1;
             state.observer.disconnect();
             break;
           }
         }
+      });
+      state.observer.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
       });
       globalThis[${JSON.stringify(storageKey)}] = state;
       return true;
@@ -2131,7 +2288,7 @@ async function createAnalysisCaptureGuard(
       if (captured.exceptionDetails || !captured.result?.value) {
         throw new Error('The isolated analysis mutation guard became unavailable.')
       }
-      return { ...captured.result.value, navigationCount }
+      return { ...captured.result.value, navigationCount, styleSheetChangeCount }
     },
     arm: async (backendNodeIds) => {
       for (const backendNodeId of backendNodeIds) {
@@ -2180,13 +2337,14 @@ async function createAnalysisCaptureGuard(
               }
             }
           }
-          state.mutationCount = 0;
-          state.observer.observe(document.documentElement, {
-            subtree: true,
-            childList: true,
-            characterData: true,
-            attributes: true,
-          });
+          if (state.mutationCount === 0) {
+            state.observer.observe(document.documentElement, {
+              subtree: true,
+              childList: true,
+              characterData: true,
+              attributes: true,
+            });
+          }
           return true;
         })()`,
         contextId: executionContextId,
@@ -2197,14 +2355,7 @@ async function createAnalysisCaptureGuard(
       }
     },
     screenshot: async () => {
-      const captured = await cdp.send('Page.captureScreenshot', {
-        format: 'jpeg',
-        quality: 72,
-        fromSurface: true,
-        captureBeyondViewport: false,
-      }) as { data?: string }
-      if (!captured.data) throw new Error('The isolated screenshot capture failed.')
-      return Buffer.from(captured.data, 'base64')
+      return captureViewportScreenshot(cdp)
     },
     stop: async () => {
       await cdp.send('Runtime.evaluate', {
@@ -2217,6 +2368,8 @@ async function createAnalysisCaptureGuard(
         returnByValue: true,
       }).catch(() => undefined)
       await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+      await cdp.send('CSS.disable').catch(() => undefined)
+      await cdp.send('DOM.disable').catch(() => undefined)
       await cdp.detach().catch(() => undefined)
     },
   }
@@ -2269,6 +2422,14 @@ function assertIsolatedControlOperable(
     const getter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'readOnly')?.get
     if (!getter || getter.call(element)) throw new Error('The isolated control is read-only.')
   }
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    const ariaReadOnlySource = String(Element.prototype.getAttribute.call(element, 'aria-readonly') ?? '')
+    if (
+      ariaReadOnlySource.length > maxSafetyEvidenceLength
+      || JSON.stringify(ariaReadOnlySource).length + 8 > maxTotalSafetyEvidenceLength
+      || ariaReadOnlySource.trim().toLowerCase() === 'true'
+    ) throw new Error('The isolated control is aria-readonly.')
+  }
   if (expectedType === 'select-one') {
     if (!(element instanceof HTMLSelectElement)) throw new Error('The isolated control type changed.')
     const multipleGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple')?.get
@@ -2302,9 +2463,18 @@ function assertIsolatedControlOperable(
     const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
     const options = optionsGetter?.call(element) as HTMLOptionsCollection | undefined
     const option = options?.item(expectedOptionIndex)
+    const optionAriaDisabled = option instanceof HTMLOptionElement
+      ? captureEffectiveAriaDisabled(
+          option,
+          maxSafetyEvidenceLength,
+          maxTotalSafetyEvidenceLength,
+        )
+      : { disabled: true, values: [] as string[], overflow: true }
     if (
       !(option instanceof HTMLOptionElement)
       || matches.call(option, ':disabled')
+      || optionAriaDisabled.disabled
+      || optionAriaDisabled.overflow
       || !isEffectivelyVisibleSelectOption(option)
     ) {
       throw new Error('The isolated select option is disabled.')
@@ -3416,8 +3586,10 @@ export class WrapperProofService {
   private readonly actionStartDelayMs: number
   private readonly actionSettleMs: number
   private readonly sessionExpiresAtMs: number
+  private readonly sessionTtlMs: number
   private readonly maxTargetResourceBytes: number
   private readonly maxTargetSessionBytes: number
+  private readonly beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   private readonly beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   private readonly beforeRadioGroupWrite?: (page: Page) => Promise<void>
 
@@ -3427,8 +3599,13 @@ export class WrapperProofService {
     this.actionStartDelayMs = options.actionStartDelayMs ?? 0
     this.actionSettleMs = options.actionSettleMs ?? ACTION_SETTLE_MS
     this.sessionExpiresAtMs = options.sessionExpiresAtMs ?? Number.POSITIVE_INFINITY
+    this.sessionTtlMs = Math.min(
+      Math.max(1, options.sessionTtlMs ?? WRAPPER_SESSION_TTL_MS),
+      WRAPPER_SESSION_TTL_MS,
+    )
     this.maxTargetResourceBytes = options.maxTargetResourceBytes ?? WRAPPER_MAX_TARGET_RESOURCE_BYTES
     this.maxTargetSessionBytes = options.maxTargetSessionBytes ?? WRAPPER_MAX_TARGET_SESSION_BYTES
+    this.beforeDomEvidenceCollection = options.beforeDomEvidenceCollection
     this.beforeAnalysisScreenshot = options.beforeAnalysisScreenshot
     this.beforeRadioGroupWrite = options.beforeRadioGroupWrite
   }
@@ -3601,6 +3778,7 @@ export class WrapperProofService {
           || isConsequentialNavigationUrl(before.url)
         ) throw new Error('The isolated analysis capture started from an unsafe page state.')
 
+        await this.beforeDomEvidenceCollection?.(session.page, attempt)
         const candidateDomEvidence = await collectDomEvidence(session.context, session.page)
         await guard.arm(candidateDomEvidence.map(({ backendNodeId }) => backendNodeId))
         await this.beforeAnalysisScreenshot?.(session.page, attempt)
@@ -3618,6 +3796,7 @@ export class WrapperProofService {
           after.overflow
           || after.mutationCount !== 0
           || after.navigationCount !== 0
+          || after.styleSheetChangeCount !== before.styleSheetChangeCount
           || after.url !== before.url
           || after.title !== before.title
           || !isSameOriginHttpUrl(after.url, session.targetOrigin)
@@ -3853,7 +4032,8 @@ export class WrapperProofService {
         targetOrigin: target.origin,
         capabilities: new Map(),
         queue: Promise.resolve(),
-        expiresAt: Math.min(createdAtMs + WRAPPER_SESSION_TTL_MS, this.sessionExpiresAtMs),
+        expiresAt: Math.min(createdAtMs + this.sessionTtlMs, this.sessionExpiresAtMs),
+        expiryTimer: null,
         blockedRequests: 0,
         allowedRequests: 0,
         analyzedPages: 1,
@@ -3873,6 +4053,11 @@ export class WrapperProofService {
       }
         releaseAnalysisReservation()
         this.sessions.set(id, session)
+        const remainingLifetimeMs = Math.max(0, session.expiresAt - Date.now())
+        session.expiryTimer = setTimeout(() => {
+          void this.destroySession(id)
+        }, remainingLifetimeMs)
+        session.expiryTimer.unref?.()
         createdSessionId = id
       this.installTargetTrafficMonitor(session)
       this.installNavigationDocumentGuard(session)
@@ -4082,6 +4267,30 @@ export class WrapperProofService {
         )
       }
 
+      let beforeActionScreenshotDataUrl: string
+      let beforeActionTargetDigests: Map<number, string> | null
+      try {
+        beforeActionScreenshotDataUrl = screenshotDataUrl(await raceWithSessionPolicy(
+          session,
+          captureViewportScreenshot(session.cdp),
+          signal,
+        ))
+        beforeActionTargetDigests = capability.kind === 'navigation'
+          ? null
+          : await raceWithSessionPolicy(
+              session,
+              captureActionTargetDigests(session.cdp, capability.action, acceptedInput),
+              signal,
+            )
+      } catch (error) {
+        if (signal?.aborted || error instanceof WrapperServiceError) throw error
+        throw preActionError(
+          'invalid_action',
+          'The isolated page could not establish a visible pre-action state.',
+          409,
+        )
+      }
+
       const metrics: ActionNetworkMetrics = { allowed: 0, blocked: 0 }
       session.activeNetworkMetrics = metrics
       actionStarted = true
@@ -4128,6 +4337,20 @@ export class WrapperProofService {
       const analysis = await raceWithSessionPolicy(session, this.collectAnalysis(session), signal)
       throwIfAborted(signal)
       assertSafeActionUrl(session.page.url(), session.targetOrigin)
+      let targetChanged = beforeActionTargetDigests === null
+        && analysis.screenshotDataUrl !== beforeActionScreenshotDataUrl
+      if (beforeActionTargetDigests !== null) {
+        const afterActionTargetDigests = await raceWithSessionPolicy(
+          session,
+          captureActionTargetDigests(session.cdp, capability.action, acceptedInput),
+          signal,
+        )
+        targetChanged = [...beforeActionTargetDigests].some(([backendNodeId, beforeDigest]) =>
+          afterActionTargetDigests.get(backendNodeId) !== beforeDigest)
+      }
+      if (!targetChanged) {
+        throw actionVerificationError('The requested action did not produce a visible page change.')
+      }
       session.networkMode = 'blocked'
       session.activeNetworkMetrics = null
 
@@ -4188,6 +4411,10 @@ export class WrapperProofService {
     const session = this.sessions.get(id)
     if (!session) return
     this.sessions.delete(id)
+    if (session.expiryTimer) {
+      clearTimeout(session.expiryTimer)
+      session.expiryTimer = null
+    }
     await session.cdp.detach().catch(() => undefined)
     await session.context.close().catch(() => undefined)
     await session.browser.close().catch(() => undefined)
