@@ -22,6 +22,8 @@ import {
   WRAPPER_MAX_DOM_EVIDENCE,
   WRAPPER_MAX_PAGES,
   WRAPPER_MAX_SCREENSHOT_BYTES,
+  WRAPPER_MAX_TARGET_RESOURCE_BYTES,
+  WRAPPER_MAX_TARGET_SESSION_BYTES,
   WRAPPER_MEMORY_MB,
   WRAPPER_SESSION_TTL_MS,
   WRAPPER_VCPUS,
@@ -81,6 +83,12 @@ interface ActionNetworkMetrics {
   blocked: number
 }
 
+interface TargetResourceTransfer {
+  decodedBytes: number
+  encodedBytes: number
+  accountedBytes: number
+}
+
 interface ProofSession {
   id: string
   token: string
@@ -100,6 +108,13 @@ interface ProofSession {
   networkMode: SessionNetworkMode
   activeNetworkMetrics: ActionNetworkMetrics | null
   inFlightRequests: Set<Request>
+  cdp: CDPSession
+  targetResourceTransfers: Map<string, TargetResourceTransfer>
+  targetTrafficBytes: number
+  targetTrafficError: WrapperServiceError | null
+  targetTrafficFailure: Promise<WrapperServiceError>
+  resolveTargetTrafficFailure: (error: WrapperServiceError) => void
+  navigationPolicyError: WrapperServiceError | null
 }
 
 interface AxNode {
@@ -112,6 +127,8 @@ export interface WrapperProofServiceOptions {
   resolveTarget?: (value: string) => Promise<PublicTarget>
   actionStartDelayMs?: number
   actionSettleMs?: number
+  maxTargetResourceBytes?: number
+  maxTargetSessionBytes?: number
 }
 
 interface PendingActionEvidence {
@@ -144,6 +161,14 @@ function abortError(): DOMException {
 
 function actionVerificationError(message: string): WrapperServiceError {
   return new WrapperServiceError('invalid_action', message, 409)
+}
+
+function preActionError(
+  code: 'invalid_action' | 'invalid_capability' | 'page_limit',
+  message: string,
+  status: number,
+): WrapperServiceError {
+  return new WrapperServiceError(code, message, status, { sessionInvalidated: false })
 }
 
 function isValidDateLikeInput(type: keyof typeof DATE_LIKE_FIELD_SPECS, value: unknown): value is string {
@@ -196,11 +221,36 @@ async function waitForNetworkQuiescence(
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (session.inFlightRequests.size > 0) {
+    if (session.targetTrafficError) throw session.targetTrafficError
+    if (session.navigationPolicyError) throw session.navigationPolicyError
     if (Date.now() >= deadline) {
       throw new Error('The page kept a network request open beyond the isolation deadline.')
     }
     await raceWithSignal(waitFor(25), signal)
   }
+}
+
+async function raceWithSessionPolicy<T>(
+  session: ProofSession,
+  promise: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (session.targetTrafficError) throw session.targetTrafficError
+  if (session.navigationPolicyError) throw session.navigationPolicyError
+  let result: T
+  try {
+    result = await raceWithSignal(Promise.race([
+      promise,
+      session.targetTrafficFailure.then((error) => Promise.reject(error)),
+    ]), signal)
+  } catch (error) {
+    if (session.targetTrafficError) throw session.targetTrafficError
+    if (session.navigationPolicyError) throw session.navigationPolicyError
+    throw error
+  }
+  if (session.targetTrafficError) throw session.targetTrafficError
+  if (session.navigationPolicyError) throw session.navigationPolicyError
+  return result
 }
 
 export function isSameOriginHttpUrl(value: string, expectedOrigin: string): boolean {
@@ -210,6 +260,94 @@ export function isSameOriginHttpUrl(value: string, expectedOrigin: string): bool
   } catch {
     return false
   }
+}
+
+function tokenizeUntrustedEvidence(value: string): string {
+  return value
+    .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
+    .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, '$1 $2')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+}
+
+export function isConsequentialNavigationUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    let evidence = `${url.pathname}${url.search}`
+    try {
+      evidence = decodeURIComponent(evidence)
+    } catch {
+      // Malformed escapes remain untrusted in their raw representation.
+    }
+    return evidence.length > MAX_SAFETY_EVIDENCE_LENGTH
+      || UNSAFE_NAVIGATION_HINT.test(tokenizeUntrustedEvidence(evidence))
+  } catch {
+    return true
+  }
+}
+
+function isElementScreenshotVisible(
+  element: HTMLElement,
+  viewportWidth: number,
+  viewportHeight: number,
+): boolean {
+  if (!element.isConnected || element.hidden) return false
+  const rects = Array.from(element.getClientRects())
+  for (const rect of rects) {
+    let left = Math.max(0, rect.left)
+    let top = Math.max(0, rect.top)
+    let right = Math.min(viewportWidth, rect.right)
+    let bottom = Math.min(viewportHeight, rect.bottom)
+    if (right <= left || bottom <= top) continue
+
+    let current: HTMLElement | null = element
+    let clippedOut = false
+    while (current) {
+      const style = getComputedStyle(current)
+      if (
+        current.hidden
+        || style.display === 'none'
+        || style.visibility === 'hidden'
+        || Number.parseFloat(style.opacity || '1') <= 0
+      ) {
+        clippedOut = true
+        break
+      }
+      if (style.clipPath !== 'none') {
+        const clipRect = current.getBoundingClientRect()
+        if (clipRect.width <= 0 || clipRect.height <= 0) {
+          clippedOut = true
+          break
+        }
+      }
+      const ancestorRect = current.getBoundingClientRect()
+      if (style.overflowX !== 'visible') {
+        left = Math.max(left, ancestorRect.left)
+        right = Math.min(right, ancestorRect.right)
+      }
+      if (style.overflowY !== 'visible') {
+        top = Math.max(top, ancestorRect.top)
+        bottom = Math.min(bottom, ancestorRect.bottom)
+      }
+      if (right <= left || bottom <= top) {
+        clippedOut = true
+        break
+      }
+      current = current.parentElement
+    }
+    if (clippedOut) continue
+
+    const xFractions = [0.1, 0.5, 0.9]
+    const yFractions = [0.1, 0.5, 0.9]
+    for (const xFraction of xFractions) {
+      for (const yFraction of yFractions) {
+        const x = left + (right - left) * xFraction
+        const y = top + (bottom - top) * yFraction
+        const hit = document.elementFromPoint(x, y)
+        if (hit === element || (hit instanceof Node && element.contains(hit))) return true
+      }
+    }
+  }
+  return false
 }
 
 function classifyDomInIsolatedWorld({
@@ -246,32 +384,9 @@ function classifyDomInIsolatedWorld({
       const numeric = Number(normalized)
       return Number.isFinite(numeric) ? numeric : undefined
     }
-    const visible = (element: HTMLElement) => {
-      const rects = Array.from(element.getClientRects())
-      const intersectsViewport = rects.some(({ width, height, top, right, bottom, left }) =>
-        width > 0
-        && height > 0
-        && right > 0
-        && bottom > 0
-        && left < viewportWidth
-        && top < viewportHeight)
-      if (element.hidden || !intersectsViewport) return false
-      let current: HTMLElement | null = element
-      while (current) {
-        const style = getComputedStyle(current)
-        if (
-          current.hidden
-          || style.display === 'none'
-          || style.visibility === 'hidden'
-          || Number.parseFloat(style.opacity || '1') <= 0
-        ) return false
-        current = current.parentElement
-      }
-      return true
-    }
     const controls = Array.from(document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLAnchorElement>(
       'input, select, textarea, a[href]',
-    )).filter((element) => visible(element)
+    )).filter((element) => isElementScreenshotVisible(element, viewportWidth, viewportHeight)
       && !('disabled' in element && element.disabled)
       && !('readOnly' in element && element.readOnly))
 
@@ -496,7 +611,7 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
     }
     const classification = await cdp.send('Runtime.evaluate', {
-      expression: `(() => { const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
+      expression: `(() => { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
       contextId: executionContextId,
       objectGroup,
       returnByValue: true,
@@ -552,31 +667,11 @@ function readIsolatedControlState(
   viewportWidth: number,
   viewportHeight: number,
 ): IsolatedControlState {
-  const visible = (element: HTMLElement) => {
-    if (!element.isConnected) return false
-    const rects = Array.from(element.getClientRects())
-    const intersectsViewport = rects.some(({ width, height, top, right, bottom, left }) =>
-      width > 0
-      && height > 0
-      && right > 0
-      && bottom > 0
-      && left < viewportWidth
-      && top < viewportHeight)
-    if (element.hidden || !intersectsViewport) return false
-    let current: HTMLElement | null = element
-    while (current) {
-      const style = getComputedStyle(current)
-      if (
-        current.hidden
-        || style.display === 'none'
-        || style.visibility === 'hidden'
-        || Number.parseFloat(style.opacity || '1') <= 0
-      ) return false
-      current = current.parentElement
-    }
-    return true
-  }
-  if (!(this instanceof HTMLElement) || !this.isConnected || (requireVisible && !visible(this))) {
+  if (
+    !(this instanceof HTMLElement)
+    || !this.isConnected
+    || (requireVisible && !isElementScreenshotVisible(this, viewportWidth, viewportHeight))
+  ) {
     throw new Error('The isolated control is no longer available.')
   }
   if (expectedType === 'select-one') {
@@ -600,31 +695,7 @@ function writeIsolatedControlState(
   viewportWidth: number,
   viewportHeight: number,
 ): void {
-  const visible = (element: HTMLElement) => {
-    if (!element.isConnected) return false
-    const rects = Array.from(element.getClientRects())
-    const intersectsViewport = rects.some(({ width, height, top, right, bottom, left }) =>
-      width > 0
-      && height > 0
-      && right > 0
-      && bottom > 0
-      && left < viewportWidth
-      && top < viewportHeight)
-    if (element.hidden || !intersectsViewport) return false
-    let current: HTMLElement | null = element
-    while (current) {
-      const style = getComputedStyle(current)
-      if (
-        current.hidden
-        || style.display === 'none'
-        || style.visibility === 'hidden'
-        || Number.parseFloat(style.opacity || '1') <= 0
-      ) return false
-      current = current.parentElement
-    }
-    return true
-  }
-  if (!(this instanceof HTMLElement) || !visible(this)) {
+  if (!(this instanceof HTMLElement) || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)) {
     throw new Error('The isolated control is no longer available.')
   }
   if (expectedType === 'select-one' && !(this instanceof HTMLSelectElement)) {
@@ -666,31 +737,11 @@ function readIsolatedLinkTarget(
   viewportWidth: number,
   viewportHeight: number,
 ): string {
-  const visible = (element: HTMLElement) => {
-    if (!element.isConnected) return false
-    const rects = Array.from(element.getClientRects())
-    const intersectsViewport = rects.some(({ width, height, top, right, bottom, left }) =>
-      width > 0
-      && height > 0
-      && right > 0
-      && bottom > 0
-      && left < viewportWidth
-      && top < viewportHeight)
-    if (element.hidden || !intersectsViewport) return false
-    let current: HTMLElement | null = element
-    while (current) {
-      const style = getComputedStyle(current)
-      if (
-        current.hidden
-        || style.display === 'none'
-        || style.visibility === 'hidden'
-        || Number.parseFloat(style.opacity || '1') <= 0
-      ) return false
-      current = current.parentElement
-    }
-    return true
-  }
-  if (!(this instanceof HTMLAnchorElement) || !visible(this) || this.href !== expectedUrl) {
+  if (
+    !(this instanceof HTMLAnchorElement)
+    || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)
+    || this.href !== expectedUrl
+  ) {
     throw new Error('The isolated visible link is no longer available.')
   }
   return this.href
@@ -715,7 +766,7 @@ async function callOnIsolatedNode<T>(
     const objectId = resolved.object?.objectId
     if (!objectId) throw new Error('The isolated browser element identity expired.')
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration,
+      functionDeclaration: `function(...args) { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
       arguments: args.map((value) => ({ value })),
       objectGroup,
@@ -812,7 +863,7 @@ function validateActionInput(
   if (capability.kind === 'prepare_search') {
     const query = input.query
     if (typeof query !== 'string' || !query.trim() || Array.from(query).length > 80) {
-      throw new WrapperServiceError('invalid_action', 'query must be a non-empty string of at most 80 characters.', 400)
+      throw preActionError('invalid_action', 'query must be a non-empty string of at most 80 characters.', 400)
     }
     return
   }
@@ -820,7 +871,7 @@ function validateActionInput(
     const optionIndex = input.optionIndex
     const optionCount = capability.action.optionIndices?.length ?? 0
     if (!Number.isInteger(optionIndex) || Number(optionIndex) < 0 || Number(optionIndex) >= optionCount) {
-      throw new WrapperServiceError('invalid_action', 'optionIndex must reference a visible option.', 400)
+      throw preActionError('invalid_action', 'optionIndex must reference a visible option.', 400)
     }
     return
   }
@@ -828,14 +879,14 @@ function validateActionInput(
     const linkIndex = input.linkIndex
     const linkCount = capability.action.urls?.length ?? 0
     if (!Number.isInteger(linkIndex) || Number(linkIndex) < 0 || Number(linkIndex) >= linkCount) {
-      throw new WrapperServiceError('invalid_action', 'linkIndex must reference a visible same-origin link.', 400)
+      throw preActionError('invalid_action', 'linkIndex must reference a visible same-origin link.', 400)
     }
     return
   }
 
   const fields = new Map(capability.action.fields?.map((field) => [field.key, field]))
   if (Object.keys(input).length === 0 || Object.keys(input).some((key) => !fields.has(key))) {
-    throw new WrapperServiceError('invalid_action', 'Provide at least one detected safe field and no unknown fields.', 400)
+    throw preActionError('invalid_action', 'Provide at least one detected safe field and no unknown fields.', 400)
   }
   for (const [key, value] of Object.entries(input)) {
     const field = fields.get(key)
@@ -843,25 +894,25 @@ function validateActionInput(
     if (field.type === 'select-one') {
       const optionCount = field.optionIndices?.length ?? 0
       if (!Number.isInteger(value) || Number(value) < 0 || Number(value) >= optionCount) {
-        throw new WrapperServiceError('invalid_action', `${key} must reference a visible option.`, 400)
+        throw preActionError('invalid_action', `${key} must reference a visible option.`, 400)
       }
     } else if (field.type === 'radio-group') {
       const optionCount = field.backendNodeIds?.length ?? 0
       if (!Number.isInteger(value) || Number(value) < 0 || Number(value) >= optionCount) {
-        throw new WrapperServiceError('invalid_action', `${key} must reference one visible radio choice.`, 400)
+        throw preActionError('invalid_action', `${key} must reference one visible radio choice.`, 400)
       }
     } else if (field.type === 'checkbox' || field.type === 'radio') {
-      if (typeof value !== 'boolean') throw new WrapperServiceError('invalid_action', `${key} must be a boolean.`, 400)
+      if (typeof value !== 'boolean') throw preActionError('invalid_action', `${key} must be a boolean.`, 400)
     } else if (field.type === 'number' || field.type === 'range') {
       if (typeof value !== 'number' || !Number.isFinite(value)) {
-        throw new WrapperServiceError('invalid_action', `${key} must be a finite number.`, 400)
+        throw preActionError('invalid_action', `${key} must be a finite number.`, 400)
       }
       const tolerance = 1e-9
       if (field.minimum !== undefined && value < field.minimum - tolerance) {
-        throw new WrapperServiceError('invalid_action', `${key} must be at least ${field.minimum}.`, 400)
+        throw preActionError('invalid_action', `${key} must be at least ${field.minimum}.`, 400)
       }
       if (field.maximum !== undefined && value > field.maximum + tolerance) {
-        throw new WrapperServiceError('invalid_action', `${key} must be at most ${field.maximum}.`, 400)
+        throw preActionError('invalid_action', `${key} must be at most ${field.maximum}.`, 400)
       }
       if (
         field.numericStep !== undefined
@@ -871,20 +922,20 @@ function validateActionInput(
           - Math.round((value - field.numericStepBase) / field.numericStep),
         ) >= tolerance
       ) {
-        throw new WrapperServiceError('invalid_action', `${key} must match the visible numeric step.`, 400)
+        throw preActionError('invalid_action', `${key} must match the visible numeric step.`, 400)
       }
       if (
         field.numericValues
         && !field.numericValues.some((allowed) => Math.abs(allowed - value) < tolerance)
       ) {
-        throw new WrapperServiceError('invalid_action', `${key} must be one of the visible numeric values.`, 400)
+        throw preActionError('invalid_action', `${key} must be one of the visible numeric values.`, 400)
       }
     } else if (Object.hasOwn(DATE_LIKE_FIELD_SPECS, field.type)) {
       if (!isValidDateLikeInput(field.type as keyof typeof DATE_LIKE_FIELD_SPECS, value)) {
-        throw new WrapperServiceError('invalid_action', `${key} must match the visible ${field.type} format.`, 400)
+        throw preActionError('invalid_action', `${key} must match the visible ${field.type} format.`, 400)
       }
     } else if (typeof value !== 'string' || Array.from(value).length > 200) {
-      throw new WrapperServiceError('invalid_action', `${key} must be a string of at most 200 characters.`, 400)
+      throw preActionError('invalid_action', `${key} must be a string of at most 200 characters.`, 400)
     }
   }
 }
@@ -1060,11 +1111,145 @@ export class WrapperProofService {
   private readonly resolveTarget: (value: string) => Promise<PublicTarget>
   private readonly actionStartDelayMs: number
   private readonly actionSettleMs: number
+  private readonly maxTargetResourceBytes: number
+  private readonly maxTargetSessionBytes: number
 
   constructor(options: WrapperProofServiceOptions = {}) {
     this.resolveTarget = options.resolveTarget ?? resolvePublicTarget
     this.actionStartDelayMs = options.actionStartDelayMs ?? 0
     this.actionSettleMs = options.actionSettleMs ?? ACTION_SETTLE_MS
+    this.maxTargetResourceBytes = options.maxTargetResourceBytes ?? WRAPPER_MAX_TARGET_RESOURCE_BYTES
+    this.maxTargetSessionBytes = options.maxTargetSessionBytes ?? WRAPPER_MAX_TARGET_SESSION_BYTES
+  }
+
+  private stopForPolicyFailure(session: ProofSession): void {
+    session.networkLocked = true
+    session.networkMode = 'blocked'
+    void session.cdp.send('Page.stopLoading').catch(() => undefined)
+    void session.context.setOffline(true).catch(() => undefined)
+  }
+
+  private failTargetTrafficBudget(session: ProofSession): void {
+    if (session.targetTrafficError) return
+    const error = new WrapperServiceError(
+      'response_limit',
+      'The isolated target exceeded the download safety limit.',
+      507,
+      { sessionInvalidated: true },
+    )
+    session.targetTrafficError = error
+    session.resolveTargetTrafficFailure(error)
+    this.stopForPolicyFailure(session)
+  }
+
+  private failConsequentialNavigation(session: ProofSession): void {
+    if (session.navigationPolicyError) return
+    session.navigationPolicyError = new WrapperServiceError(
+      'invalid_action',
+      'The isolated page attempted a consequential navigation and was stopped.',
+      409,
+      { sessionInvalidated: true },
+    )
+    this.stopForPolicyFailure(session)
+  }
+
+  private accountTargetTransfer(
+    session: ProofSession,
+    requestId: string,
+    values: { decodedBytes?: number, encodedBytes?: number },
+  ): void {
+    if (session.targetTrafficError) return
+    const transfer = session.targetResourceTransfers.get(requestId)
+    if (!transfer) return
+    if (values.decodedBytes !== undefined && Number.isFinite(values.decodedBytes)) {
+      transfer.decodedBytes += Math.max(0, values.decodedBytes)
+    }
+    if (values.encodedBytes !== undefined && Number.isFinite(values.encodedBytes)) {
+      transfer.encodedBytes = Math.max(transfer.encodedBytes, Math.max(0, values.encodedBytes))
+    }
+    const observedBytes = Math.max(transfer.decodedBytes, transfer.encodedBytes)
+    const newlyObservedBytes = Math.max(0, observedBytes - transfer.accountedBytes)
+    transfer.accountedBytes = observedBytes
+    session.targetTrafficBytes += newlyObservedBytes
+    if (
+      observedBytes > this.maxTargetResourceBytes
+      || session.targetTrafficBytes > this.maxTargetSessionBytes
+    ) {
+      this.failTargetTrafficBudget(session)
+    }
+  }
+
+  private installTargetTrafficMonitor(session: ProofSession): void {
+    session.cdp.on('Network.responseReceived', (rawEvent: unknown) => {
+      const event = rawEvent as {
+        requestId?: string
+        response?: { url?: string, headers?: Record<string, unknown> }
+      }
+      const requestId = event.requestId
+      const url = event.response?.url
+      if (!requestId || !url || !isSameOriginHttpUrl(url, session.targetOrigin)) return
+      session.targetResourceTransfers.set(requestId, {
+        decodedBytes: 0,
+        encodedBytes: 0,
+        accountedBytes: 0,
+      })
+      const contentLengthEntry = Object.entries(event.response?.headers ?? {})
+        .find(([name]) => name.toLowerCase() === 'content-length')
+      const contentLength = Number(contentLengthEntry?.[1])
+      if (Number.isFinite(contentLength) && contentLength > this.maxTargetResourceBytes) {
+        this.failTargetTrafficBudget(session)
+      }
+    })
+    session.cdp.on('Network.dataReceived', (rawEvent: unknown) => {
+      const event = rawEvent as { requestId?: string, dataLength?: number, encodedDataLength?: number }
+      if (!event.requestId) return
+      const transfer = session.targetResourceTransfers.get(event.requestId)
+      if (!transfer) return
+      transfer.encodedBytes += Math.max(0, Number(event.encodedDataLength) || 0)
+      this.accountTargetTransfer(session, event.requestId, {
+        decodedBytes: Number(event.dataLength) || 0,
+        encodedBytes: transfer.encodedBytes,
+      })
+    })
+    session.cdp.on('Network.loadingFinished', (rawEvent: unknown) => {
+      const event = rawEvent as { requestId?: string, encodedDataLength?: number }
+      if (!event.requestId) return
+      this.accountTargetTransfer(session, event.requestId, {
+        encodedBytes: Number(event.encodedDataLength) || 0,
+      })
+      session.targetResourceTransfers.delete(event.requestId)
+    })
+    session.cdp.on('Network.loadingFailed', (rawEvent: unknown) => {
+      const event = rawEvent as { requestId?: string }
+      if (event.requestId) session.targetResourceTransfers.delete(event.requestId)
+    })
+  }
+
+  private installNavigationDocumentGuard(session: ProofSession): void {
+    session.cdp.on('Fetch.requestPaused', (rawEvent: unknown) => {
+      const event = rawEvent as {
+        requestId?: string
+        resourceType?: string
+        request?: { url?: string }
+      }
+      if (!event.requestId) return
+      const url = event.request?.url ?? ''
+      const consequential = session.networkMode === 'navigation'
+        && event.resourceType === 'Document'
+        && isConsequentialNavigationUrl(url)
+      if (consequential) {
+        session.blockedRequests += 1
+        if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
+        this.failConsequentialNavigation(session)
+        void session.cdp.send('Fetch.failRequest', {
+          requestId: event.requestId,
+          errorReason: 'BlockedByClient',
+        }).catch(() => undefined)
+        return
+      }
+      void session.cdp.send('Fetch.continueRequest', { requestId: event.requestId })
+        .catch(() => undefined)
+    })
   }
 
   private async closeExpiredSessions(): Promise<void> {
@@ -1208,9 +1393,16 @@ export class WrapperProofService {
     })
     await context.routeWebSocket(/.*/, (webSocket) => webSocket.close())
     const page = await context.newPage()
+    const cdp = await context.newCDPSession(page)
+    await cdp.send('Page.enable')
+    await cdp.send('Network.enable')
     const id = randomUUID()
     const token = createSessionCapability()
     const createdAtMs = Date.now()
+    let resolveTargetTrafficFailure!: (error: WrapperServiceError) => void
+    const targetTrafficFailure = new Promise<WrapperServiceError>((resolve) => {
+      resolveTargetTrafficFailure = resolve
+    })
     const session: ProofSession = {
       id,
       token,
@@ -1230,8 +1422,20 @@ export class WrapperProofService {
       networkMode: 'observing',
       activeNetworkMetrics: null,
       inFlightRequests: new Set(),
+      cdp,
+      targetResourceTransfers: new Map(),
+      targetTrafficBytes: 0,
+      targetTrafficError: null,
+      targetTrafficFailure,
+      resolveTargetTrafficFailure,
+      navigationPolicyError: null,
     }
     this.sessions.set(id, session)
+    this.installTargetTrafficMonitor(session)
+    this.installNavigationDocumentGuard(session)
+    await cdp.send('Fetch.enable', {
+      patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Request' }],
+    })
 
     await context.route('**/*', async (route) => {
       const request = route.request()
@@ -1243,11 +1447,24 @@ export class WrapperProofService {
       const method = request.method().toUpperCase()
       const resourceType = request.resourceType()
       const isSubframe = request.isNavigationRequest() && request.frame() !== page.mainFrame()
+      const isMainFrameDocument = resourceType === 'document' && !isSubframe
+      const consequentialNavigation = session.networkMode === 'navigation'
+        && isMainFrameDocument
+        && isConsequentialNavigationUrl(resourceUrl)
+      if (consequentialNavigation) {
+        session.blockedRequests += 1
+        if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
+        this.failConsequentialNavigation(session)
+        await route.abort('blockedbyclient')
+        return
+      }
       const allowedByOrigin = isSameOriginHttpUrl(resourceUrl, session.targetOrigin)
         && ['GET', 'HEAD'].includes(method)
         && ['document', 'stylesheet', 'image', 'font', 'script'].includes(resourceType)
         && !isSubframe
-      const blockForFrozenSession = session.networkMode === 'blocked' || session.networkLocked
+      const blockForFrozenSession = session.networkMode === 'blocked'
+        || session.networkLocked
+        || Boolean(session.targetTrafficError)
       if (blockForFrozenSession || !allowedByOrigin) {
         session.blockedRequests += 1
         if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
@@ -1273,18 +1490,23 @@ export class WrapperProofService {
     page.on('requestfailed', (request) => session.inFlightRequests.delete(request))
 
     try {
-      await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
-      await page.waitForTimeout(600)
+      await raceWithSessionPolicy(
+        session,
+        page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }),
+      )
+      await raceWithSessionPolicy(session, page.waitForTimeout(600))
       if (!isSameOriginHttpUrl(page.url(), session.targetOrigin)) {
         throw new Error('The page redirected outside its validated origin.')
       }
       session.networkMode = 'blocked'
-      await context.setOffline(true)
+      await raceWithSessionPolicy(session, context.setOffline(true))
       await waitForNetworkQuiescence(session)
-      const analysis = await this.collectAnalysis(session)
+      const analysis = await raceWithSessionPolicy(session, this.collectAnalysis(session))
       return analysis
     } catch (error) {
       await this.destroySession(id)
+      if (session.targetTrafficError) throw session.targetTrafficError
+      if (session.navigationPolicyError) throw session.navigationPolicyError
       if (error instanceof WrapperServiceError) throw error
       throw new WrapperServiceError(
         'unsupported_page',
@@ -1306,10 +1528,15 @@ export class WrapperProofService {
     throwIfAborted(signal)
     const session = this.sessions.get(sessionId)
     if (!session) {
-      throw new WrapperServiceError('session_expired', 'The isolated browser session expired. Analyze the site again.', 410)
+      throw new WrapperServiceError(
+        'session_expired',
+        'The isolated browser session expired. Analyze the site again.',
+        410,
+        { sessionInvalidated: true },
+      )
     }
     if (!tokenMatches(session.token, sessionToken)) {
-      throw new WrapperServiceError('invalid_capability', 'The isolated browser session capability is invalid.', 401)
+      throw preActionError('invalid_capability', 'The isolated browser session capability is invalid.', 401)
     }
     const acceptedCapability = session.capabilities.get(toolName)
     if (!acceptedCapability || (capabilityId !== undefined && capabilityId !== acceptedCapability.id)) {
@@ -1336,7 +1563,12 @@ export class WrapperProofService {
       await raceWithSignal(previous, signal)
       throwIfAborted(signal)
       if (this.sessions.get(sessionId) !== session) {
-        throw new WrapperServiceError('session_expired', 'The isolated browser session expired. Analyze the site again.', 410)
+        throw new WrapperServiceError(
+          'session_expired',
+          'The isolated browser session expired. Analyze the site again.',
+          410,
+          { sessionInvalidated: true },
+        )
       }
       if (session.capabilities.get(toolName) !== acceptedCapability) {
         throw new WrapperServiceError(
@@ -1348,19 +1580,20 @@ export class WrapperProofService {
       }
       const capability = acceptedCapability
       if (capability.kind === 'navigation' && session.analyzedPages >= WRAPPER_MAX_PAGES) {
-        throw new WrapperServiceError(
+        throw preActionError(
           'page_limit',
           `This session reached its ${WRAPPER_MAX_PAGES}-page analysis limit.`,
           422,
         )
       }
-      const wouldChange = await raceWithSignal(
+      const wouldChange = await raceWithSessionPolicy(
+        session,
         actionWouldChange(session.context, session.page, capability.action, acceptedInput),
         signal,
       )
       throwIfAborted(signal)
       if (!wouldChange) {
-        throw new WrapperServiceError(
+        throw preActionError(
           'invalid_action',
           'The isolated page already matches the requested state.',
           409,
@@ -1371,7 +1604,7 @@ export class WrapperProofService {
       session.activeNetworkMetrics = metrics
       actionStarted = true
       if (capability.kind === 'navigation') {
-        await raceWithSignal(session.context.setOffline(false), signal)
+        await raceWithSessionPolicy(session, session.context.setOffline(false), signal)
         session.networkMode = 'navigation'
       } else {
         session.networkLocked = true
@@ -1379,30 +1612,34 @@ export class WrapperProofService {
       }
       actionPromise = (async () => {
         if (this.actionStartDelayMs > 0) {
-          await raceWithSignal(waitFor(this.actionStartDelayMs), signal)
+          await raceWithSessionPolicy(session, waitFor(this.actionStartDelayMs), signal)
         }
         throwIfAborted(signal)
-        const evidence = await applyAction(session.context, session.page, capability.action, acceptedInput)
+        const evidence = await raceWithSessionPolicy(
+          session,
+          applyAction(session.context, session.page, capability.action, acceptedInput),
+          signal,
+        )
         session.networkMode = 'blocked'
-        await raceWithSignal(session.context.setOffline(true), signal)
+        await raceWithSessionPolicy(session, session.context.setOffline(true), signal)
         await waitForNetworkQuiescence(session, signal)
-        await raceWithSignal(waitFor(this.actionSettleMs), signal)
+        await raceWithSessionPolicy(session, waitFor(this.actionSettleMs), signal)
         return evidence
       })()
-      const evidence = await raceWithSignal(actionPromise, signal)
+      const evidence = await raceWithSessionPolicy(session, actionPromise, signal)
       throwIfAborted(signal)
       if (!isSameOriginHttpUrl(session.page.url(), session.targetOrigin)) {
         throw new Error('The action attempted to leave the validated origin.')
       }
-      await raceWithSignal(evidence.verify(), signal)
+      await raceWithSessionPolicy(session, evidence.verify(), signal)
       throwIfAborted(signal)
-      const isolatedStateChanged = await raceWithSignal(evidence.stateChanged(), signal)
+      const isolatedStateChanged = await raceWithSessionPolicy(session, evidence.stateChanged(), signal)
       throwIfAborted(signal)
       if (!isolatedStateChanged) {
         throw actionVerificationError('The requested action did not change the isolated page state.')
       }
       if (evidence.navigationOccurred) session.analyzedPages += 1
-      const analysis = await raceWithSignal(this.collectAnalysis(session), signal)
+      const analysis = await raceWithSessionPolicy(session, this.collectAnalysis(session), signal)
       throwIfAborted(signal)
       session.expiresAt = Math.min(
         session.createdAtMs + WRAPPER_SESSION_TTL_MS,
@@ -1466,6 +1703,7 @@ export class WrapperProofService {
     const session = this.sessions.get(id)
     if (!session) return
     this.sessions.delete(id)
+    await session.cdp.detach().catch(() => undefined)
     await session.context.close().catch(() => undefined)
     await session.browser.close().catch(() => undefined)
   }

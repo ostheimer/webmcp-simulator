@@ -56,11 +56,12 @@ async function readResponse<T>(response: Response): Promise<T> {
   return body
 }
 
-export async function analyzeWebsiteInWrapper(url: string): Promise<WrapperAnalysis> {
+export async function analyzeWebsiteInWrapper(url: string, signal?: AbortSignal): Promise<WrapperAnalysis> {
   return readResponse(await fetch('/api/wrapper/analyze', {
     method: 'POST',
     headers: wrapperHeaders(),
     body: JSON.stringify({ url }),
+    signal,
   }))
 }
 

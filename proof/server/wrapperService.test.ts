@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http'
 import { once } from 'node:events'
+import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { PublicTarget } from './publicTarget.ts'
 import { isSameOriginHttpUrl, WrapperProofService } from './wrapperService.ts'
@@ -9,11 +10,16 @@ interface Fixture {
   origin: string
   requests: string[]
   slowCompletedAt: number[]
+  declaredResponseBytesSent: number[]
 }
+
+const TEST_TARGET_RESOURCE_BYTES = 8 * 1024
+const TEST_TARGET_SESSION_BYTES = 24 * 1024
 
 async function startFixture(): Promise<Fixture> {
   const requests: string[] = []
   const slowCompletedAt: number[] = []
+  const declaredResponseBytesSent: number[] = []
   const server = createServer((request, response) => {
     const requestUrl = request.url ?? '/'
     requests.push(requestUrl)
@@ -79,6 +85,154 @@ async function startFixture(): Promise<Fixture> {
       response.end(`<!doctype html><title>Viewport action fixture</title>
         <input type="search" aria-label="Moving search" style="position:absolute;left:20px;top:40px;width:140px;height:32px"
           oninput="this.style.transform='translateX(2000px)'">`)
+      return
+    }
+    if (requestUrl === '/clipped-visibility') {
+      response.end(`<!doctype html><title>Clipped visibility fixture</title>
+        <input type="search" aria-label="Clip path hidden search" style="position:absolute;left:20px;top:20px;width:140px;height:32px;clip-path:inset(100%)">
+        <div style="position:absolute;left:20px;top:80px;width:0;height:0;overflow:hidden">
+          <input type="search" aria-label="Overflow hidden search" style="width:140px;height:32px">
+        </div>
+        <div style="position:absolute;left:20px;top:140px;width:60px;height:32px;overflow:hidden">
+          <input type="search" aria-label="Partially clipped search" style="width:140px;height:32px">
+        </div>`)
+      return
+    }
+    if (requestUrl === '/clipped-action') {
+      response.end(`<!doctype html><title>Clipped action fixture</title>
+        <input type="search" aria-label="Clipping search" style="position:absolute;left:20px;top:40px;width:140px;height:32px"
+          oninput="this.style.clipPath='inset(100%)'">`)
+      return
+    }
+    if (requestUrl === '/redirect-source') {
+      response.end(`<!doctype html><title>Redirect source</title>
+        <a href="/about-risk">Neutral risky redirect</a>
+        <a href="/about-safe">Neutral safe redirect</a>`)
+      return
+    }
+    if (requestUrl === '/about-risk') {
+      response.statusCode = 302
+      response.setHeader('Location', '/purchase')
+      response.end()
+      return
+    }
+    if (requestUrl === '/about-safe') {
+      response.statusCode = 302
+      response.setHeader('Location', '/next')
+      response.end()
+      return
+    }
+    if (requestUrl === '/purchase') {
+      response.end('<!doctype html><title>Purchase must not load</title>')
+      return
+    }
+    if (requestUrl === '/oversized-content-length') {
+      const declaredLength = TEST_TARGET_RESOURCE_BYTES * 4
+      response.setHeader('Content-Length', declaredLength)
+      let sent = 0
+      const writeChunk = () => {
+        if (response.destroyed || response.writableEnded) return
+        const chunk = Buffer.alloc(Math.min(1_024, declaredLength - sent), 1)
+        sent += chunk.byteLength
+        declaredResponseBytesSent.push(sent)
+        response.write(chunk)
+        if (sent >= declaredLength) response.end()
+      }
+      writeChunk()
+      const interval = setInterval(writeChunk, 10)
+      response.once('close', () => clearInterval(interval))
+      response.once('finish', () => clearInterval(interval))
+      return
+    }
+    if (requestUrl === '/oversized-chunked') {
+      response.write('<!doctype html><title>Oversized chunked document</title>')
+      for (let index = 0; index < 5; index += 1) response.write('x'.repeat(2_048))
+      response.end()
+      return
+    }
+    if (requestUrl === '/oversized-compressed') {
+      const decoded = `<!doctype html><title>Oversized compressed document</title>${'x'.repeat(TEST_TARGET_RESOURCE_BYTES)}`
+      const body = gzipSync(decoded)
+      response.setHeader('Content-Encoding', 'gzip')
+      response.setHeader('Content-Length', body.byteLength)
+      response.end(body)
+      return
+    }
+    if (requestUrl === '/oversized-script-page') {
+      response.end('<!doctype html><title>Script budget</title><script src="/oversized-script.js"></script>')
+      return
+    }
+    if (requestUrl === '/oversized-script.js') {
+      const body = `/*${'x'.repeat(TEST_TARGET_RESOURCE_BYTES)}*/`
+      response.setHeader('Content-Type', 'text/javascript')
+      response.setHeader('Content-Length', Buffer.byteLength(body))
+      response.end(body)
+      return
+    }
+    if (requestUrl === '/oversized-style-page') {
+      response.end('<!doctype html><title>Style budget</title><link rel="stylesheet" href="/oversized-style.css">')
+      return
+    }
+    if (requestUrl === '/oversized-style.css') {
+      const body = `/*${'x'.repeat(TEST_TARGET_RESOURCE_BYTES)}*/`
+      response.setHeader('Content-Type', 'text/css')
+      response.setHeader('Content-Length', Buffer.byteLength(body))
+      response.end(body)
+      return
+    }
+    if (requestUrl === '/oversized-image-page') {
+      response.end('<!doctype html><title>Image budget</title><img src="/oversized-image.png" alt="Fixture">')
+      return
+    }
+    if (requestUrl === '/oversized-image.png') {
+      const body = Buffer.alloc(TEST_TARGET_RESOURCE_BYTES + 1, 1)
+      response.setHeader('Content-Type', 'image/png')
+      response.setHeader('Content-Length', body.byteLength)
+      response.end(body)
+      return
+    }
+    if (requestUrl === '/cumulative-resources') {
+      response.end(`<!doctype html><title>Cumulative budget</title>${Array.from({ length: 6 }, (_unused, index) =>
+        `<script defer src="/small-resource-${index}.js"></script>`).join('')}`)
+      return
+    }
+    if (/^\/small-resource-\d+\.js$/.test(requestUrl)) {
+      const body = `/*${'x'.repeat(5 * 1024)}*/`
+      response.setHeader('Content-Type', 'text/javascript')
+      response.setHeader('Content-Length', Buffer.byteLength(body))
+      response.end(body)
+      return
+    }
+    if (requestUrl === '/under-budget') {
+      response.end(`<!doctype html><title>Under budget</title>
+        <link rel="stylesheet" href="/small-style.css">
+        <script src="/small-script.js"></script>
+        <input type="search" aria-label="Budget-safe search">
+        <a href="/under-budget-next">Budget-safe next page</a>`)
+      return
+    }
+    if (requestUrl === '/small-style.css') {
+      response.setHeader('Content-Type', 'text/css')
+      response.end(`/*${'x'.repeat(1_024)}*/`)
+      return
+    }
+    if (requestUrl === '/small-script.js') {
+      response.setHeader('Content-Type', 'text/javascript')
+      response.end(`/*${'x'.repeat(1_024)}*/`)
+      return
+    }
+    if (requestUrl === '/under-budget-next') {
+      response.end('<!doctype html><title>Budget-safe next</title><input type="search" aria-label="Next safe search">')
+      return
+    }
+    if (requestUrl === '/oversized-navigation-source') {
+      response.end('<!doctype html><title>Navigation budget source</title><a href="/oversized-navigation">More details</a>')
+      return
+    }
+    if (requestUrl === '/oversized-navigation') {
+      const body = `<!doctype html><title>Oversized navigation</title>${'x'.repeat(TEST_TARGET_RESOURCE_BYTES)}`
+      response.setHeader('Content-Length', Buffer.byteLength(body))
+      response.end(body)
       return
     }
     if (requestUrl === '/next') {
@@ -278,10 +432,16 @@ async function startFixture(): Promise<Fixture> {
     origin: `http://proof.example.at:${address.port}`,
     requests,
     slowCompletedAt,
+    declaredResponseBytesSent,
   }
 }
 
-function createService(options: { actionStartDelayMs?: number, actionSettleMs?: number } = {}) {
+function createService(options: {
+  actionStartDelayMs?: number
+  actionSettleMs?: number
+  maxTargetResourceBytes?: number
+  maxTargetSessionBytes?: number
+} = {}) {
   const resolveTarget = async (value: string): Promise<PublicTarget> => {
     const url = new URL(value)
     return {
@@ -296,6 +456,15 @@ function createService(options: { actionStartDelayMs?: number, actionSettleMs?: 
     resolveTarget,
     actionStartDelayMs: options.actionStartDelayMs,
     actionSettleMs: options.actionSettleMs ?? 80,
+    maxTargetResourceBytes: options.maxTargetResourceBytes,
+    maxTargetSessionBytes: options.maxTargetSessionBytes,
+  })
+}
+
+function createBudgetedService() {
+  return createService({
+    maxTargetResourceBytes: TEST_TARGET_RESOURCE_BYTES,
+    maxTargetSessionBytes: TEST_TARGET_SESSION_BYTES,
   })
 }
 
@@ -457,7 +626,7 @@ describe('WrapperProofService security boundaries', () => {
       analysis.sessionToken,
       initialDate.name,
       { field_1: '2026-02-31' },
-    )).rejects.toMatchObject({ code: 'invalid_action', status: 400 })
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
 
     const expectedSamples = ['2026-01-15', '2026-01', '12:00', '2026-W01']
     for (let index = 0; index < expectedSamples.length; index += 1) {
@@ -620,6 +789,53 @@ describe('WrapperProofService security boundaries', () => {
       analysis.sessionToken,
       search.name,
       { query: 'stale' },
+    )).rejects.toMatchObject({ code: 'session_expired' })
+  })
+
+  it('excludes fully clipped controls while retaining a genuinely visible clipped portion', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/clipped-visibility`)
+
+    expect(analysis.domEvidence.map(({ label }) => label)).toEqual(['Partially clipped search'])
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'visible clipped state' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
+  })
+
+  it('fails closed when a control becomes fully clipped before verification', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/clipped-action`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'hide after write' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'stale' },
+      undefined,
+      search.id,
     )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
@@ -892,6 +1108,163 @@ describe('WrapperProofService security boundaries', () => {
     })
     expect(result.structuredContent.allowedNetworkRequests).toBeGreaterThanOrEqual(1)
     expect(fixture.requests).toContain('/next')
+  })
+
+  it('blocks consequential redirect hops before requesting them and allows neutral redirects', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const blockedService = createService()
+    services.push(blockedService)
+    const blockedAnalysis = await blockedService.analyze(`${fixture.origin}/redirect-source`)
+    const blockedNavigation = blockedAnalysis.capabilities.find(({ name }) => name === 'open_page_link')!
+
+    await expect(blockedService.execute(
+      blockedAnalysis.sessionId,
+      blockedAnalysis.sessionToken,
+      blockedNavigation.name,
+      { linkIndex: 0 },
+      undefined,
+      blockedNavigation.id,
+    )).rejects.toMatchObject({
+      code: 'invalid_action',
+      sessionInvalidated: true,
+      message: 'The isolated page attempted a consequential navigation and was stopped.',
+    })
+    expect(fixture.requests).toContain('/about-risk')
+    expect(fixture.requests).not.toContain('/purchase')
+    await expect(blockedService.execute(
+      blockedAnalysis.sessionId,
+      blockedAnalysis.sessionToken,
+      blockedNavigation.name,
+      { linkIndex: 1 },
+      undefined,
+      blockedNavigation.id,
+    )).rejects.toMatchObject({ code: 'session_expired' })
+
+    const safeService = createService()
+    services.push(safeService)
+    const safeAnalysis = await safeService.analyze(`${fixture.origin}/redirect-source`)
+    const safeNavigation = safeAnalysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    await expect(safeService.execute(
+      safeAnalysis.sessionId,
+      safeAnalysis.sessionToken,
+      safeNavigation.name,
+      { linkIndex: 1 },
+      undefined,
+      safeNavigation.id,
+    )).resolves.toMatchObject({
+      finalUrl: `${fixture.origin}/next`,
+      structuredContent: { targetStateVerified: true, navigationOccurred: true },
+    })
+    expect(fixture.requests).toContain('/about-safe')
+    expect(fixture.requests).toContain('/next')
+  })
+
+  it('rejects oversized target documents from headers and live chunk measurement', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+
+    for (const path of ['/oversized-content-length', '/oversized-chunked', '/oversized-compressed']) {
+      const service = createBudgetedService()
+      services.push(service)
+      await expect(service.analyze(`${fixture.origin}${path}`)).rejects.toMatchObject({
+        code: 'response_limit',
+        status: 507,
+        message: 'The isolated target exceeded the download safety limit.',
+      })
+    }
+    expect(fixture.declaredResponseBytesSent.at(-1)).toBeLessThan(TEST_TARGET_RESOURCE_BYTES * 4)
+  })
+
+  it.each([
+    '/oversized-script-page',
+    '/oversized-style-page',
+    '/oversized-image-page',
+  ])('rejects an oversized target subresource on %s', async (path) => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createBudgetedService()
+    services.push(service)
+
+    await expect(service.analyze(`${fixture.origin}${path}`)).rejects.toMatchObject({
+      code: 'response_limit',
+      status: 507,
+    })
+  })
+
+  it('rejects cumulative target traffic made from individually small resources', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createBudgetedService()
+    services.push(service)
+
+    await expect(service.analyze(`${fixture.origin}/cumulative-resources`)).rejects.toMatchObject({
+      code: 'response_limit',
+      status: 507,
+    })
+  })
+
+  it('keeps an under-budget analysis and navigation session usable', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createBudgetedService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/under-budget`)
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    const navigationResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      { linkIndex: 0 },
+      undefined,
+      navigation.id,
+    )
+    expect(navigationResult).toMatchObject({
+      finalUrl: `${fixture.origin}/under-budget-next`,
+      structuredContent: { targetStateVerified: true },
+    })
+    analysis = navigationResult.analysis
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'within budget' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({
+      structuredContent: { targetStateVerified: true },
+    })
+  })
+
+  it('invalidates a begun navigation when its target exceeds the resource budget', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createBudgetedService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/oversized-navigation-source`)
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      { linkIndex: 0 },
+      undefined,
+      navigation.id,
+    )).rejects.toMatchObject({
+      code: 'response_limit',
+      status: 507,
+      sessionInvalidated: true,
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      { linkIndex: 0 },
+      undefined,
+      navigation.id,
+    )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
   it('propagates abort before a delayed action and leaves no stale server state', async () => {

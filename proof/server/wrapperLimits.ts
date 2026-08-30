@@ -5,8 +5,14 @@ export const WRAPPER_MEMORY_MB = WRAPPER_VCPUS * 2048
 export const WRAPPER_MAX_REQUEST_BODY_BYTES = 32 * 1024
 export const WRAPPER_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 export const WRAPPER_MAX_SCREENSHOT_BYTES = 900 * 1024
+// Untrusted target traffic is bounded independently from API and screenshot payloads.
+// The per-resource limit catches single large responses; the session limit covers
+// the initial page plus every explicit same-origin navigation in the five-minute session.
+export const WRAPPER_MAX_TARGET_RESOURCE_BYTES = 4 * 1024 * 1024
+export const WRAPPER_MAX_TARGET_SESSION_BYTES = 20 * 1024 * 1024
 export const WRAPPER_MAX_DOM_EVIDENCE = 80
 export const WRAPPER_MAX_AX_EVIDENCE = 40
+export const WRAPPER_MAX_RATE_IDENTITIES_PER_FUNCTION = 512
 export const WRAPPER_ANALYSIS_TIMEOUT_MS = 35_000
 export const WRAPPER_ACTION_TIMEOUT_MS = 15_000
 
@@ -45,4 +51,3 @@ export function estimateWrapperCost(usage: WrapperRuntimeUsage): WrapperCostEsti
     basis: 'illustrative-list-price',
   }
 }
-

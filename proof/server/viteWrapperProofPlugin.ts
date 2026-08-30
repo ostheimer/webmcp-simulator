@@ -2,6 +2,38 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Plugin } from 'vite'
 import { WrapperProofService } from './wrapperService.ts'
 import { WRAPPER_MAX_REQUEST_BODY_BYTES } from './wrapperLimits.ts'
+import { WrapperServiceError } from './wrapperErrors.ts'
+
+export function localPublicError(
+  error: unknown,
+  actionRequest: boolean,
+): { status: number, body: { error: string, code: string, sessionInvalidated?: boolean } } {
+  if (error instanceof WrapperServiceError) {
+    const sessionInvalidated = error.sessionInvalidated
+      ?? (actionRequest ? true : undefined)
+    return {
+      status: error.status,
+      body: {
+        error: error.message,
+        code: error.code,
+        ...(typeof sessionInvalidated === 'boolean' ? { sessionInvalidated } : {}),
+      },
+    }
+  }
+  console.error('[webmcp-wrapper-local] unexpected internal failure', {
+    causeType: error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,40}$/.test(error.name)
+      ? error.name
+      : 'unknown',
+  })
+  return {
+    status: 500,
+    body: {
+      error: 'The isolated browser operation failed.',
+      code: 'internal_error',
+      ...(actionRequest ? { sessionInvalidated: true } : {}),
+    },
+  }
+}
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = []
@@ -134,9 +166,8 @@ export function wrapperProofPlugin(): Plugin {
           }
           next()
         } catch (error) {
-          sendJson(response, 400, {
-            error: error instanceof Error ? error.message : 'Wrapper proof failed.',
-          })
+          const safe = localPublicError(error, request.url === '/action')
+          sendJson(response, safe.status, safe.body)
         }
       })
       server.httpServer?.once('close', () => void service.close())

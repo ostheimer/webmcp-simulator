@@ -4,6 +4,7 @@ import { SandboxWrapperService } from './sandboxWrapperService.ts'
 import { WrapperServiceError } from './wrapperErrors.ts'
 import {
   WRAPPER_MAX_REQUEST_BODY_BYTES,
+  WRAPPER_MAX_RATE_IDENTITIES_PER_FUNCTION,
   WRAPPER_MAX_RESPONSE_BYTES,
 } from './wrapperLimits.ts'
 
@@ -18,9 +19,45 @@ interface RateEntry {
   resetAt: number
 }
 
+export class BoundedRateStore {
+  private readonly entries = new Map<string, RateEntry>()
+  private readonly capacity: number
+  private readonly now: () => number
+
+  constructor(
+    capacity = WRAPPER_MAX_RATE_IDENTITIES_PER_FUNCTION,
+    now: () => number = Date.now,
+  ) {
+    this.capacity = capacity
+    this.now = now
+  }
+
+  consume(
+    key: string,
+    max: number,
+    windowMs: number,
+  ): 'allowed' | 'limited' | 'capacity' {
+    const now = this.now()
+    for (const [identity, entry] of this.entries) {
+      if (entry.resetAt <= now) this.entries.delete(identity)
+    }
+    const previous = this.entries.get(key)
+    if (!previous && this.entries.size >= this.capacity) return 'capacity'
+    const entry = previous ?? { count: 0, resetAt: now + windowMs }
+    if (entry.count >= max) return 'limited'
+    entry.count += 1
+    this.entries.set(key, entry)
+    return 'allowed'
+  }
+
+  get size(): number {
+    return this.entries.size
+  }
+}
+
 const activeAnalyses = new Set<string>()
-const analysisRates = new Map<string, RateEntry>()
-const actionRates = new Map<string, RateEntry>()
+const analysisRates = new BoundedRateStore()
+const actionRates = new BoundedRateStore()
 const service = new SandboxWrapperService()
 
 export interface ProductionWrapperBackend {
@@ -139,21 +176,18 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
 }
 
 function consumeRateLimit(
-  store: Map<string, RateEntry>,
+  store: BoundedRateStore,
   key: string,
   max: number,
   windowMs: number,
 ): void {
-  const now = Date.now()
-  const previous = store.get(key)
-  const entry = !previous || previous.resetAt <= now
-    ? { count: 0, resetAt: now + windowMs }
-    : previous
-  if (entry.count >= max) {
+  const decision = store.consume(key, max, windowMs)
+  if (decision === 'limited') {
     throw new HttpError('The wrapper rate limit was reached. Try again after the current window.', 429, 'rate_limit')
   }
-  entry.count += 1
-  store.set(key, entry)
+  if (decision === 'capacity') {
+    throw new HttpError('The wrapper rate-limit capacity is temporarily unavailable.', 429, 'rate_limit')
+  }
 }
 
 function publicError(error: unknown): HttpError {

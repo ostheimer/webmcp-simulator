@@ -22,10 +22,14 @@ React wrapper page
      -> launch one ephemeral Chromium process with the hostname pinned
      -> allow only document/static-resource GET/HEAD to the exact validated
         origin (scheme, host, port); block XHR/fetch even during observation
+     -> reject a declared response above 4 MiB and continuously stop loading
+        when decoded/encoded CDP traffic exceeds 4 MiB per resource or 20 MiB
+        cumulatively across the short-lived session
      -> block frames, popups, downloads, WebSocket, EventSource, WebRTC,
         sendBeacon, service workers, uploads, and non-read HTTP methods
-     -> collect only DOM controls/links that intersect the fixed screenshot
-        viewport, plus CDP accessibility nodes and the viewport screenshot
+     -> collect only DOM controls/links with visible pixels inside the fixed
+        screenshot viewport after clip-path and ancestor-overflow clipping,
+        plus CDP accessibility nodes and the viewport screenshot
      -> put Chromium offline at the capture boundary, then require all
         already-started requests to terminate before exposing any tool
      -> infer fixed-metadata search preparation, filter, safe form preparation,
@@ -39,6 +43,7 @@ React wrapper page
      -> serialize mutations and propagate cancellation into the browser queue
      -> block every network request during and after preparation
      -> treat explicit same-origin navigation as a separate read-network policy
+        and inspect every main-document redirect hop before network continuation
   <- post-settle verified semantic state + current URL/evidence/tools + measured network result
 ```
 

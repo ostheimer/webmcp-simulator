@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ProductionWrapperBackend } from './productionApi.ts'
 import {
+  BoundedRateStore,
   handleActionRequest,
   handleAnalyzeRequest,
   handleCloseRequest,
@@ -88,6 +89,25 @@ function backend(overrides: Partial<ProductionWrapperBackend> = {}): ProductionW
 }
 
 describe('production wrapper API boundaries', () => {
+  it('prunes expired rate identities and rejects new identities at a hard capacity', () => {
+    let now = 1_000
+    const store = new BoundedRateStore(2, () => now)
+
+    expect(store.consume('source-a', 2, 100)).toBe('allowed')
+    expect(store.consume('source-b', 2, 1_000)).toBe('allowed')
+    expect(store.size).toBe(2)
+    expect(store.consume('source-c', 2, 1_000)).toBe('capacity')
+    expect(store.size).toBe(2)
+
+    expect(store.consume('source-a', 2, 100)).toBe('allowed')
+    expect(store.consume('source-a', 2, 100)).toBe('limited')
+    now = 1_101
+    expect(store.consume('source-c', 2, 1_000)).toBe('allowed')
+    expect(store.size).toBe(2)
+    expect(store.consume('source-b', 2, 1_000)).toBe('allowed')
+    expect(store.consume('source-d', 2, 1_000)).toBe('capacity')
+  })
+
   it('separates liveness from Sandbox readiness and reflects browser-source configuration', async () => {
     const unconfigured = handleHealthRequest({})
     expect(unconfigured.status).toBe(200)

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  analyzeWebsiteInWrapper,
   closeWrapperSession,
   executeWrapperAction,
 } from './wrapperApi'
@@ -10,6 +11,18 @@ afterEach(() => {
 })
 
 describe('closeWrapperSession', () => {
+  it('forwards analysis cancellation to the fetch request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true })))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+
+    await analyzeWebsiteInWrapper('https://public.example.at/', controller.signal)
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/wrapper/analyze', expect.objectContaining({
+      signal: controller.signal,
+    }))
+  })
+
   it('attaches rejection handling to the best-effort keepalive cleanup request', async () => {
     const cleanupRequest = Promise.reject(new Error('connection closed'))
     const catchSpy = vi.spyOn(cleanupRequest, 'catch')
