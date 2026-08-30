@@ -459,7 +459,13 @@ function captureIsolatedSafetyEvidence(
 ): {
   snapshot: string
   overflow: boolean
-  optionEntries: Array<{ optionIndex: number, labelAttribute: string, text: string, value: string }>
+  optionEntries: Array<{
+    optionIndex: number
+    labelAttribute: string
+    text: string
+    value: string
+    accessibleEvidence: string[]
+  }>
   labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControls: Array<{ kind: string, value: string, alt: string, accessibleValues: string[] }> }>
   ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
   ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
@@ -707,6 +713,7 @@ function captureIsolatedSafetyEvidence(
       nativeControlValue: { value: string, overflow: boolean }
       nativeControlAlt: { value: string, overflow: boolean }
       nativeControlAccessibleValues: string[]
+      found: boolean
       overflow: boolean
     }> = []
     for (const id of ids) {
@@ -734,6 +741,7 @@ function captureIsolatedSafetyEvidence(
         nativeControlValue: nativeControl.value,
         nativeControlAlt: nativeControl.alt,
         nativeControlAccessibleValues: nativeControl.accessibleValues,
+        found: node instanceof Element,
         overflow: text.overflow
           || imageAlts.overflow
           || ariaLabel.overflow
@@ -1026,6 +1034,7 @@ function captureIsolatedSafetyEvidence(
     labelAttribute: string
     text: string
     value: string
+    accessibleEvidence: string[]
   }> = []
   let optionOverflow = false
   if (element instanceof HTMLSelectElement) {
@@ -1065,13 +1074,46 @@ function captureIsolatedSafetyEvidence(
         }
         const text = boundedNodeText(option)
         const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
+        const ariaLabel = bounded(getAttribute.call(option, 'aria-label') ?? '')
+        const title = bounded(getAttribute.call(option, 'title') ?? '')
+        const ariaLabelled = referenced(option, 'aria-labelledby')
+        const imageAlts = boundedDescendantImageAlts(option)
+        const generatedContent = boundedGeneratedContent(option)
+        const accessibleEvidence = [
+          ariaLabel.value,
+          title.value,
+          ...imageAlts.values,
+          ...generatedContent.values,
+          ariaLabelled.raw,
+          ...ariaLabelled.ids,
+          ...ariaLabelled.entries.flatMap((entry) => [
+            entry.text.value,
+            ...entry.imageAlts,
+            entry.ariaLabel.value,
+            entry.title.value,
+            ...entry.generatedContent,
+            entry.nativeControlKind.value,
+            entry.nativeControlValue.value,
+            entry.nativeControlAlt.value,
+            ...entry.nativeControlAccessibleValues,
+          ]),
+        ]
         const value = nativeValue
-        optionOverflow ||= text.overflow || labelAttribute.overflow || value.overflow
+        optionOverflow ||= text.overflow
+          || labelAttribute.overflow
+          || ariaLabel.overflow
+          || title.overflow
+          || ariaLabelled.overflow
+          || ariaLabelled.entries.some((entry) => !entry.found)
+          || imageAlts.overflow
+          || generatedContent.overflow
+          || value.overflow
         optionEntries.push({
           optionIndex,
           labelAttribute: labelAttribute.value,
           text: text.value,
           value: value.value,
+          accessibleEvidence,
         })
       }
     }
@@ -1454,7 +1496,20 @@ function classifyDomInIsolatedWorld({
         && !element.target
         && !element.hasAttribute('download')
         && `${element.pathname}${element.search}` !== `${location.pathname}${location.search}`
-      const enabledOptions = element instanceof HTMLSelectElement
+      const optionSafetySources = safetyCapture.optionEntries
+        .flatMap(({ labelAttribute, text: optionText, value: optionValue, accessibleEvidence }) => [
+          labelAttribute,
+          optionText,
+          optionValue,
+          ...accessibleEvidence,
+        ])
+      const hasUnsafeOptionEvidence = optionSafetySources.some((value) => {
+        const tokenized = tokenizeEvidence(value)
+        return value.length > maxSafetyEvidenceLength
+          || tokenized === undefined
+          || unsafePattern.test(tokenized)
+      })
+      const enabledOptions = element instanceof HTMLSelectElement && !hasUnsafeOptionEvidence
         ? safetyCapture.optionEntries
         : undefined
       const optionValues = enabledOptions
@@ -1753,11 +1808,7 @@ function classifyDomInIsolatedWorld({
         ...safetyCapture.generatedContent,
         element instanceof HTMLAnchorElement ? element.title : '',
         decodedLinkPath,
-        ...safetyCapture.optionEntries.flatMap(({ labelAttribute, text: optionText, value: optionValue }) => [
-          labelAttribute,
-          optionText,
-          optionValue,
-        ]),
+        ...optionSafetySources,
         ...safetyCapture.ownerContextEvidence,
       ].map((value) => String(value ?? ''))
       const hasUnsafeEvidence = safetyEvidenceSources.some((value) => {
@@ -2463,11 +2514,16 @@ function writeIsolatedControlState(
   assertIsolatedTextValueAllowed(this, expectedType, value)
   if (expectedType === 'select-one') {
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.set
+    const selectedIndexGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.get
     const validityGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'validity')?.get
-    if (!setter || !validityGetter) throw new Error('The isolated select setter is unavailable.')
+    if (!setter || !selectedIndexGetter || !validityGetter) {
+      throw new Error('The isolated select setter is unavailable.')
+    }
     setter.call(this, Number(value))
     const validity = validityGetter.call(this) as ValidityState
-    if (!validity.valid) throw new Error('The isolated select did not retain a valid required value.')
+    if (Number(selectedIndexGetter.call(this)) !== Number(value) || validity.valueMissing) {
+      throw new Error('The isolated select did not retain its required mapped value.')
+    }
   } else if (expectedType === 'checkbox' || expectedType === 'radio') {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set
     if (!setter) throw new Error('The isolated checked setter is unavailable.')
@@ -2480,9 +2536,6 @@ function writeIsolatedControlState(
     if (!setter) throw new Error('The isolated value setter is unavailable.')
     setter.call(this, String(value))
   }
-  const dispatch = EventTarget.prototype.dispatchEvent
-  dispatch.call(this, new Event('input', { bubbles: true, composed: true }))
-  dispatch.call(this, new Event('change', { bubbles: true, composed: true }))
 }
 
 function writeIsolatedRadioGroupState(
@@ -2545,9 +2598,10 @@ function writeIsolatedRadioGroupState(
   }
 
   checkedSetter.call(this, true)
-  const dispatch = EventTarget.prototype.dispatchEvent
-  dispatch.call(this, new Event('input', { bubbles: true, composed: true }))
-  dispatch.call(this, new Event('change', { bubbles: true, composed: true }))
+  const after = members.map((member) => Boolean(checkedGetter.call(member)))
+  if (after.some((checked, index) => checked !== (index === selectedIndex))) {
+    throw new Error('The isolated radio group did not retain one exclusive choice.')
+  }
   return before
 }
 

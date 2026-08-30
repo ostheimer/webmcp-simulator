@@ -112,7 +112,7 @@ deletion, and similar controls are excluded.
   native minimum-length contract and exposing date-like controls only when
   Chromium can enumerate a complete finite min/max/step value set with an
   executable alternative to the analyzed value;
-- use native setters/events for React-compatible preparation;
+- use pristine native setters and isolated-world readback for visible preparation without dispatching page-authored `input` or `change` handlers;
 - never call `submit()`, `requestSubmit()`, or a submit button;
 - treat labels and choices as untrusted content.
 

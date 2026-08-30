@@ -349,6 +349,37 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/event-free-preparation') {
+      response.end(`<!doctype html><title>Event-free preparation</title>
+        <form id="safe-control-form">
+          <input id="safe-control" type="text" aria-label="Safe project reference">
+          <input type="text" aria-label="Safe project detail">
+          <input id="sensitive-card" type="text" aria-label="Credit card number" value="card-before">
+          <input id="sensitive-password" type="password" value="password-before">
+          <input id="hidden-consequential" type="hidden" value="checkout-before">
+        </form>
+        <form id="safe-radio-form">
+          <input id="event-radio-a" type="radio" name="event_mode" value="a" checked><label for="event-radio-a">Mode A</label>
+          <input id="event-radio-b" type="radio" name="event_mode" value="b"><label for="event-radio-b">Mode B</label>
+          <input type="text" aria-label="Safe radio detail">
+        </form>
+        <script>
+          window.preparationEvents = { control: 0, radio: 0 };
+          const mutateExcludedState = (kind) => {
+            window.preparationEvents[kind] += 1;
+            document.getElementById('sensitive-card').value = 'card-mutated';
+            document.getElementById('sensitive-password').value = 'password-mutated';
+            document.getElementById('hidden-consequential').value = 'checkout-mutated';
+            fetch('/collect?event=' + kind).catch(() => {});
+          };
+          for (const eventName of ['input', 'change']) {
+            document.getElementById('safe-control').addEventListener(eventName, () => mutateExcludedState('control'));
+            document.getElementById('event-radio-a').addEventListener(eventName, () => mutateExcludedState('radio'));
+            document.getElementById('event-radio-b').addEventListener(eventName, () => mutateExcludedState('radio'));
+          }
+        </script>`)
+      return
+    }
     if (requestUrl === '/single-select-form') {
       response.end(`<!doctype html><title>Single select form</title>
         <form>
@@ -410,6 +441,45 @@ async function startFixture(): Promise<Fixture> {
             flood.append(option);
           }
         </script>`)
+      return
+    }
+    if (requestUrl === '/select-option-accessible-safety') {
+      response.end(`<!doctype html><title>Select option accessible safety</title>
+        <span id="initial-option-reference" aria-label="Credit card number"></span>
+        <span id="late-option-reference">Neutral option context</span>
+        <select id="direct-sensitive-option" aria-label="Direct option filter">
+          <option value="one" aria-label="Credit card number" selected>Neutral one</option>
+          <option value="two">Neutral two</option>
+        </select>
+        <select id="referenced-sensitive-option" aria-label="Referenced option filter">
+          <option value="one" aria-labelledby="initial-option-reference" selected>Neutral one</option>
+          <option value="two">Neutral two</option>
+        </select>
+        <select id="neutral-option-filter" aria-label="Neutral option filter">
+          <option value="one" aria-label="Primary choice" selected>One</option>
+          <option value="two" title="Secondary choice">Two</option>
+        </select>
+        <select id="late-direct-option" aria-label="Late direct option filter">
+          <option value="one" selected>One</option>
+          <option id="late-direct-target" value="two" aria-label="Second choice">Two</option>
+        </select>
+        <select id="overflow-option-filter" aria-label="Overflow option filter">
+          <option value="one" aria-label="${'x'.repeat(4_200)}" selected>One</option>
+          <option value="two">Two</option>
+        </select>`)
+      return
+    }
+    if (requestUrl === '/select-option-reference-safety') {
+      response.end(`<!doctype html><title>Select option reference safety</title>
+        <span id="late-option-reference">Neutral option context</span>
+        <select id="late-reference-option" aria-label="Late reference option filter">
+          <option value="one" selected>One</option>
+          <option id="late-reference-target" value="two" aria-labelledby="late-option-reference">Two</option>
+        </select>
+        <select aria-label="Safe reference control">
+          <option value="one" selected>One</option>
+          <option value="two">Two</option>
+        </select>`)
       return
     }
     if (requestUrl === '/select-boundary-contracts') {
@@ -1097,7 +1167,18 @@ async function startFixture(): Promise<Fixture> {
             <option value="two">Two</option>
           </select>
           <input id="late-required-select-detail" type="text" aria-label="Late required detail">
-        </form>`)
+        </form>
+        <form id="custom-invalid-required-form">
+          <select id="custom-invalid-required" aria-label="Custom invalid required choice" required>
+            <option value="" selected>Choose custom option</option>
+            <option value="one">Custom one</option>
+            <option value="two">Custom two</option>
+          </select>
+          <input type="text" aria-label="Custom invalid detail">
+        </form>
+        <script>
+          document.getElementById('custom-invalid-required').setCustomValidity('Page-owned custom warning');
+        </script>`)
       return
     }
     if (requestUrl === '/preparation-url-state') {
@@ -1843,17 +1924,78 @@ describe('WrapperProofService security boundaries', () => {
       allowedNetworkRequests: 0,
       navigationOccurred: false,
     })
-    expect(result.structuredContent.blockedNetworkRequests).toBeGreaterThanOrEqual(1)
+    expect(result.structuredContent.blockedNetworkRequests).toBe(0)
     expect(filterResult.structuredContent).toMatchObject({
       actionKind: 'filter',
       targetStateVerified: true,
       networkPolicy: 'blocked-after-preparation',
       allowedNetworkRequests: 0,
     })
-    expect(filterResult.structuredContent.blockedNetworkRequests).toBeGreaterThanOrEqual(1)
-    expect(filterResult.analysis.title).toBe('one')
+    expect(filterResult.structuredContent.blockedNetworkRequests).toBe(0)
+    expect(filterResult.analysis.title).toBe('Hostile fixture')
     expect(result.analysis.capabilities.some(({ kind }) => kind === 'navigation')).toBe(false)
     expect(result.finalUrl).toBe(`${fixture.origin}/slow-page`)
+  })
+
+  it('prepares native control and radio state without invoking page-authored events or side effects', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/event-free-preparation`)
+    const page = internalSession(service, analysis.sessionId).page
+    const values = async () => page.locator('#sensitive-card, #sensitive-password, #hidden-consequential')
+      .evaluateAll((controls) => controls.map((control) => (control as HTMLInputElement).value))
+    const counters = async () => page.evaluate(() =>
+      (window as unknown as { preparationEvents: { control: number, radio: number } }).preparationEvents)
+    const capabilityFor = (snapshot: typeof analysis, label: string) => {
+      const evidenceId = snapshot.domEvidence.find((evidence) => evidence.label === label)!.id
+      return snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidenceId))!
+    }
+
+    const excludedBefore = await values()
+    const controlForm = capabilityFor(analysis, 'Safe project reference')
+    const controlResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      controlForm.name,
+      controlForm.sampleInput,
+      undefined,
+      controlForm.id,
+    )
+    expect(controlResult.structuredContent).toMatchObject({
+      isolatedStateChanged: true,
+      targetStateVerified: true,
+      allowedNetworkRequests: 0,
+      blockedNetworkRequests: 0,
+    })
+    expect(await page.locator('#safe-control').inputValue()).toBe(String(controlForm.sampleInput.field_1))
+    expect(await values()).toEqual(excludedBefore)
+    expect(await counters()).toEqual({ control: 0, radio: 0 })
+    expect(fixture.requests.some((url) => url.startsWith('/collect'))).toBe(false)
+
+    analysis = controlResult.analysis
+    const radioForm = capabilityFor(analysis, 'Mode A')
+    const radioResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      radioForm.name,
+      radioForm.sampleInput,
+      undefined,
+      radioForm.id,
+    )
+    expect(radioResult.structuredContent).toMatchObject({
+      isolatedStateChanged: true,
+      targetStateVerified: true,
+      allowedNetworkRequests: 0,
+      blockedNetworkRequests: 0,
+    })
+    expect(await page.locator('#event-radio-a, #event-radio-b').evaluateAll(
+      (radios) => radios.map((radio) => (radio as HTMLInputElement).checked),
+    )).toEqual([false, true])
+    expect(await values()).toEqual(excludedBefore)
+    expect(await counters()).toEqual({ control: 0, radio: 0 })
+    expect(fixture.requests.some((url) => url.startsWith('/collect'))).toBe(false)
   })
 
   it('executes radio groups as one exclusive indexed choice and keeps select samples in range', async () => {
@@ -1925,7 +2067,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       filter.id,
     )
-    expect(filterResult.analysis.title).toBe('enabled-filter-two')
+    expect(filterResult.analysis.title).toBe('Disabled optgroup selects')
     analysis = filterResult.analysis
 
     const firstEnabledFilter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
@@ -1937,7 +2079,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       firstEnabledFilter.id,
     )
-    expect(firstEnabledResult.analysis.title).toBe('enabled-filter-one')
+    expect(firstEnabledResult.analysis.title).toBe('Disabled optgroup selects')
     analysis = firstEnabledResult.analysis
 
     const form = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
@@ -2087,6 +2229,70 @@ describe('WrapperProofService security boundaries', () => {
     })
     await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+
+    const customService = createService()
+    services.push(customService)
+    const customAnalysis = await customService.analyze(`${fixture.origin}/required-select-contracts`)
+    const customEvidence = customAnalysis.domEvidence
+      .find(({ label }) => label === 'Custom invalid required choice')!
+    const customCapability = customAnalysis.capabilities
+      .find(({ evidenceIds }) => evidenceIds.includes(customEvidence.id))!
+    const customPage = internalSession(customService, customAnalysis.sessionId).page
+    let customEvents = 0
+    await customPage.exposeFunction('recordCustomSelectEvent', () => { customEvents += 1 })
+    await customPage.locator('#custom-invalid-required').evaluate((select) => {
+      for (const eventName of ['input', 'change', 'invalid']) {
+        select.addEventListener(eventName, () => {
+          void (window as unknown as { recordCustomSelectEvent(): Promise<void> })
+            .recordCustomSelectEvent()
+        })
+      }
+    })
+    expect(await customPage.locator('#custom-invalid-required').evaluate((select) => {
+      const control = select as HTMLSelectElement
+      return {
+        selectedIndex: control.selectedIndex,
+        customError: control.validity.customError,
+        valueMissing: control.validity.valueMissing,
+        valid: control.validity.valid,
+        validationMessage: control.validationMessage,
+      }
+    })).toEqual({
+      selectedIndex: 0,
+      customError: true,
+      valueMissing: true,
+      valid: false,
+      validationMessage: 'Page-owned custom warning',
+    })
+    const customResult = await customService.execute(
+      customAnalysis.sessionId,
+      customAnalysis.sessionToken,
+      customCapability.name,
+      customCapability.sampleInput,
+      undefined,
+      customCapability.id,
+    )
+    expect(customResult.structuredContent).toMatchObject({
+      isolatedStateChanged: true,
+      targetStateVerified: true,
+    })
+    expect(await customPage.locator('#custom-invalid-required').evaluate((select) => {
+      const control = select as HTMLSelectElement
+      return {
+        selectedIndex: control.selectedIndex,
+        customError: control.validity.customError,
+        valueMissing: control.validity.valueMissing,
+        valid: control.validity.valid,
+        validationMessage: control.validationMessage,
+      }
+    })).toEqual({
+      selectedIndex: 1,
+      customError: true,
+      valueMissing: false,
+      valid: false,
+      validationMessage: 'Page-owned custom warning',
+    })
+    expect(customEvents).toBe(0)
   })
 
   it('classifies every retained select label, text, and value and samples a different safe option', async () => {
@@ -2123,6 +2329,117 @@ describe('WrapperProofService security boundaries', () => {
     expect(await internalSession(service, analysis.sessionId).page.locator('#safe-filter').evaluate(
       (select) => (select as HTMLSelectElement).selectedIndex,
     )).toBe(1)
+  })
+
+  it('classifies bounded option accessible names privately and revalidates direct and referenced drift', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/select-option-accessible-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+    const evidence = analysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))
+    expect(evidence).toEqual([
+      { label: 'Direct option filter', sensitive: true },
+      { label: 'Referenced option filter', sensitive: true },
+      { label: 'Neutral option filter', sensitive: false },
+      { label: 'Late direct option filter', sensitive: false },
+      { label: 'Overflow option filter', sensitive: true },
+    ])
+    const publicAnalysis = JSON.stringify({
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+      capabilities: analysis.capabilities,
+    })
+    expect(publicAnalysis).not.toMatch(/Credit card number|initial-option-reference|late-option-reference/)
+    const capabilityFor = (snapshot: typeof analysis, label: string) => {
+      const evidenceId = snapshot.domEvidence.find((item) => item.label === label)!.id
+      return snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidenceId))!
+    }
+    const neutral = capabilityFor(analysis, 'Neutral option filter')
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutral.name,
+      neutral.sampleInput,
+      undefined,
+      neutral.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await page.locator('#neutral-option-filter').evaluate((select) =>
+      (select as HTMLSelectElement).selectedIndex)).toBe(1)
+
+    const preActionService = createService()
+    services.push(preActionService)
+    const preActionAnalysis = await preActionService.analyze(`${fixture.origin}/select-option-accessible-safety`)
+    const preActionPage = internalSession(preActionService, preActionAnalysis.sessionId).page
+    const direct = capabilityFor(preActionAnalysis, 'Late direct option filter')
+    await preActionPage.locator('#late-direct-target').evaluate((option) => {
+      option.setAttribute('aria-label', 'Credit card number')
+    })
+    await expect(preActionService.execute(
+      preActionAnalysis.sessionId,
+      preActionAnalysis.sessionToken,
+      direct.name,
+      direct.sampleInput,
+      undefined,
+      direct.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await preActionPage.locator('#late-direct-option').evaluate((select) =>
+      (select as HTMLSelectElement).selectedIndex)).toBe(0)
+    await preActionPage.locator('#late-direct-target').evaluate((option) => {
+      option.setAttribute('aria-label', 'Second choice')
+    })
+    const restoredDirectResult = await preActionService.execute(
+      preActionAnalysis.sessionId,
+      preActionAnalysis.sessionToken,
+      direct.name,
+      direct.sampleInput,
+      undefined,
+      direct.id,
+    )
+    expect(restoredDirectResult).toMatchObject({ structuredContent: { targetStateVerified: true } })
+    const referencePreService = createService()
+    services.push(referencePreService)
+    const referencePreAnalysis = await referencePreService
+      .analyze(`${fixture.origin}/select-option-reference-safety`)
+    const referencePrePage = internalSession(referencePreService, referencePreAnalysis.sessionId).page
+    const referencedPreAction = capabilityFor(referencePreAnalysis, 'Late reference option filter')
+    await referencePrePage.locator('#late-option-reference').evaluate((node) => {
+      node.setAttribute('aria-label', 'Password')
+    })
+    await expect(referencePreService.execute(
+      referencePreAnalysis.sessionId,
+      referencePreAnalysis.sessionToken,
+      referencedPreAction.name,
+      referencedPreAction.sampleInput,
+      undefined,
+      referencedPreAction.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await referencePrePage.locator('#late-reference-option').evaluate((select) =>
+      (select as HTMLSelectElement).selectedIndex)).toBe(0)
+    await referencePrePage.locator('#late-option-reference').evaluate((node) => {
+      node.removeAttribute('aria-label')
+    })
+
+    const raceService = createService({ actionStartDelayMs: 160 })
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/select-option-reference-safety`)
+    const racePage = internalSession(raceService, raceAnalysis.sessionId).page
+    const referenced = capabilityFor(raceAnalysis, 'Late reference option filter')
+    const pending = raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      referenced.name,
+      referenced.sampleInput,
+      undefined,
+      referenced.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    await racePage.locator('#late-option-reference').evaluate((node) => {
+      node.textContent = 'Password'
+    })
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('fails closed on incomplete enabled-option capture and initial multi-select state while keeping a safe control usable', async () => {
@@ -3225,19 +3542,21 @@ describe('WrapperProofService security boundaries', () => {
     expect(safeResult.structuredContent.targetStateVerified).toBe(true)
     analysis = safeResult.analysis
 
-    const raceService = createService()
-    services.push(raceService)
-    const raceAnalysis = await raceService.analyze(`${fixture.origin}/unicode-safety-normalization`)
-    const raceForm = raceAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
-    await expect(raceService.execute(
-      raceAnalysis.sessionId,
-      raceAnalysis.sessionToken,
-      raceForm.name,
-      raceForm.sampleInput,
+    const eventFreeService = createService()
+    services.push(eventFreeService)
+    const eventFreeAnalysis = await eventFreeService.analyze(`${fixture.origin}/unicode-safety-normalization`)
+    const eventFreeForm = eventFreeAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    await expect(eventFreeService.execute(
+      eventFreeAnalysis.sessionId,
+      eventFreeAnalysis.sessionToken,
+      eventFreeForm.name,
+      eventFreeForm.sampleInput,
       undefined,
-      raceForm.id,
-    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
-    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+      eventFreeForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await internalSession(eventFreeService, eventFreeAnalysis.sessionId).page
+      .locator('#unicode-race-input').getAttribute('aria-label')).toBe('ASCII reference')
+    expect(internalServiceState(eventFreeService)).toEqual({ sessions: 1, reservations: 0 })
   })
 
   it('classifies normalized bank-account evidence without matching neutral word substrings', async () => {
@@ -3328,7 +3647,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       filter.id,
     )
-    expect(filterResult.analysis.title).toBe('visible-two')
+    expect(filterResult.analysis.title).toBe('Visible select options')
     analysis = filterResult.analysis
     const currentForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
     const formResult = await service.execute(
@@ -3836,7 +4155,7 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
-  it('invalidates when safety evidence changes during the begun action', async () => {
+  it('does not invoke a page handler that would change safety evidence during preparation', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -3851,11 +4170,13 @@ describe('WrapperProofService security boundaries', () => {
       { query: 'agent value' },
       undefined,
       search.id,
-    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
-    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    const page = internalSession(service, analysis.sessionId).page
+    expect(await page.locator('#race-search').getAttribute('aria-label')).toBe('Race search')
+    expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
   })
 
-  it('invalidates when a selected option becomes effectively disabled before verification', async () => {
+  it('does not invoke a page handler that would disable the selected option', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -3876,8 +4197,10 @@ describe('WrapperProofService security boundaries', () => {
       filter.sampleInput,
       undefined,
       filter.id,
-    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
-    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await page.locator('#enabled-filter-group').evaluate((group) =>
+      (group as HTMLOptGroupElement).disabled)).toBe(false)
+    expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
   })
 
   it.each([
@@ -4431,7 +4754,7 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
-  it('revalidates checkbox indeterminate state before mutation and after begun page races', async () => {
+  it('revalidates checkbox indeterminate state without invoking page-authored input handlers', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -4485,19 +4808,13 @@ describe('WrapperProofService security boundaries', () => {
       form.sampleInput,
       undefined,
       form.id,
-    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
-    expect(internalServiceState(service).sessions).toBe(1)
-    await expect(service.execute(
-      analysis.sessionId,
-      analysis.sessionToken,
-      form.name,
-      form.sampleInput,
-      undefined,
-      form.id,
-    )).rejects.toMatchObject({ code: 'session_expired', sessionInvalidated: true })
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await page.locator('#late-checkbox').evaluate((checkbox) =>
+      (checkbox as HTMLInputElement).indeterminate)).toBe(false)
+    expect(internalServiceState(service).sessions).toBe(2)
   })
 
-  it('keeps follow-up actions usable when a marked control is hidden and replaced', async () => {
+  it('keeps follow-up actions bound when a page handler would shift the catalog', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -4510,10 +4827,7 @@ describe('WrapperProofService security boundaries', () => {
       filter.name,
       { optionIndex: 1 },
     )
-    expect(shifted.analysis.domEvidence.map(({ label }) => label)).toEqual([
-      'Replacement search',
-      'Category filter',
-    ])
+    expect(shifted.analysis.domEvidence.map(({ label }) => label)).toEqual(['Initial search', 'Category filter'])
     expect(JSON.stringify(shifted.analysis)).not.toContain('data-webmcp-proof-id')
 
     const replacementSearch = shifted.analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
@@ -4546,7 +4860,7 @@ describe('WrapperProofService security boundaries', () => {
     })
   })
 
-  it('fails closed when a visible control leaves the captured viewport before verification', async () => {
+  it('does not invoke a page handler that would move a visible control out of the viewport', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -4559,16 +4873,10 @@ describe('WrapperProofService security boundaries', () => {
       analysis.sessionToken,
       search.name,
       { query: 'move away' },
-    )).rejects.toMatchObject({
-      code: 'action_failed',
-      sessionInvalidated: true,
-    })
-    await expect(service.execute(
-      analysis.sessionId,
-      analysis.sessionToken,
-      search.name,
-      { query: 'stale' },
-    )).rejects.toMatchObject({ code: 'session_expired' })
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await internalSession(service, analysis.sessionId).page.locator('[type=search]').evaluate(
+      (input) => (input as HTMLElement).style.transform,
+    )).toBe('')
   })
 
   it('excludes fully clipped controls while retaining a genuinely visible clipped portion', async () => {
@@ -4592,7 +4900,7 @@ describe('WrapperProofService security boundaries', () => {
     })
   })
 
-  it('fails closed when a control becomes fully clipped before verification', async () => {
+  it('does not invoke a page handler that would fully clip a control', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -4607,15 +4915,10 @@ describe('WrapperProofService security boundaries', () => {
       { query: 'hide after write' },
       undefined,
       search.id,
-    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
-    await expect(service.execute(
-      analysis.sessionId,
-      analysis.sessionToken,
-      search.name,
-      { query: 'stale' },
-      undefined,
-      search.id,
-    )).rejects.toMatchObject({ code: 'session_expired' })
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await internalSession(service, analysis.sessionId).page.locator('[type=search]').evaluate(
+      (input) => (input as HTMLElement).style.clipPath,
+    )).toBe('')
   })
 
   it('excludes controls hidden by element or ancestor filters and masks', async () => {
@@ -4640,7 +4943,7 @@ describe('WrapperProofService security boundaries', () => {
     })
   })
 
-  it('fails closed when an ancestor filter hides a control during verification', async () => {
+  it('does not invoke a page handler that would hide a control through an ancestor filter', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -4655,15 +4958,10 @@ describe('WrapperProofService security boundaries', () => {
       { query: 'hide through filter' },
       undefined,
       search.id,
-    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
-    await expect(service.execute(
-      analysis.sessionId,
-      analysis.sessionToken,
-      search.name,
-      { query: 'stale' },
-      undefined,
-      search.id,
-    )).rejects.toMatchObject({ code: 'session_expired' })
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await internalSession(service, analysis.sessionId).page.locator('[type=search]').evaluate(
+      (input) => (input.parentElement as HTMLElement).style.filter,
+    )).toBe('')
   })
 
   it('uses CDP paint hit-testing to exclude and revalidate opaque pointer-events-none overlays', async () => {
@@ -4998,7 +5296,7 @@ describe('WrapperProofService security boundaries', () => {
     expect(await service.closeSession(analysis.sessionId, analysis.sessionToken)).toBe(true)
   })
 
-  it('rejects a preparation when the page changes the value before commit', async () => {
+  it('does not invoke a page handler that would reset the prepared value', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -5011,21 +5309,13 @@ describe('WrapperProofService security boundaries', () => {
       analysis.sessionToken,
       search!.name,
       { query: 'agent-value' },
-    )).rejects.toMatchObject({
-      code: 'invalid_action',
-      status: 409,
-      sessionInvalidated: true,
-      message: 'The page did not retain the prepared search value.',
-    })
-    await expect(service.execute(
-      analysis.sessionId,
-      analysis.sessionToken,
-      search!.name,
-      { query: 'second-value' },
-    )).rejects.toThrow('session expired')
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(await internalSession(service, analysis.sessionId).page.locator('[type=search]').inputValue())
+      .toBe('agent-value')
   })
 
-  it('verifies the original backend node when hostile DOM reordering inserts a decoy', async () => {
+  it('does not invoke hostile DOM reordering handlers and keeps the original backend node', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -5038,17 +5328,10 @@ describe('WrapperProofService security boundaries', () => {
       analysis.sessionToken,
       search.name,
       { query: 'agent-value' },
-    )).rejects.toMatchObject({
-      code: 'invalid_action',
-      sessionInvalidated: true,
-      message: 'The page did not retain the prepared search value.',
-    })
-    await expect(service.execute(
-      analysis.sessionId,
-      analysis.sessionToken,
-      search.name,
-      { query: 'second-value' },
-    )).rejects.toThrow('session expired')
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    const page = internalSession(service, analysis.sessionId).page
+    expect(await page.locator('input[type=search]').count()).toBe(1)
+    expect(await page.locator('input[type=search]').inputValue()).toBe('agent-value')
   })
 
   it('returns the current destination analysis and replaces stale tools after navigation', async () => {
@@ -5193,7 +5476,7 @@ describe('WrapperProofService security boundaries', () => {
     expect(internalServiceState(lateService)).toEqual({ sessions: 0, reservations: 0 })
   })
 
-  it('rejects consequential URL state after preparation actions and allows a neutral hash', async () => {
+  it('does not invoke page handlers that would change URL state during preparation', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
 
@@ -5208,8 +5491,11 @@ describe('WrapperProofService security boundaries', () => {
       { query: 'hostile-push' },
       undefined,
       pushStateSearch.id,
-    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
-    expect(internalServiceState(pushStateService)).toEqual({ sessions: 0, reservations: 0 })
+    )).resolves.toMatchObject({
+      finalUrl: `${fixture.origin}/preparation-url-state`,
+      structuredContent: { targetStateVerified: true, navigationOccurred: false },
+    })
+    expect(internalServiceState(pushStateService)).toEqual({ sessions: 1, reservations: 0 })
 
     const malformedService = createService()
     services.push(malformedService)
@@ -5222,8 +5508,11 @@ describe('WrapperProofService security boundaries', () => {
       { query: 'malformed-push' },
       undefined,
       malformedSearch.id,
-    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
-    expect(internalServiceState(malformedService)).toEqual({ sessions: 0, reservations: 0 })
+    )).resolves.toMatchObject({
+      finalUrl: `${fixture.origin}/preparation-url-state`,
+      structuredContent: { targetStateVerified: true, navigationOccurred: false },
+    })
+    expect(internalServiceState(malformedService)).toEqual({ sessions: 1, reservations: 0 })
 
     const hashService = createService()
     services.push(hashService)
@@ -5236,8 +5525,11 @@ describe('WrapperProofService security boundaries', () => {
       { optionIndex: 1 },
       undefined,
       hashFilter.id,
-    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
-    expect(internalServiceState(hashService)).toEqual({ sessions: 0, reservations: 0 })
+    )).resolves.toMatchObject({
+      finalUrl: `${fixture.origin}/preparation-url-state`,
+      structuredContent: { targetStateVerified: true, navigationOccurred: false },
+    })
+    expect(internalServiceState(hashService)).toEqual({ sessions: 1, reservations: 0 })
 
     const neutralService = createService()
     services.push(neutralService)
@@ -5251,7 +5543,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       neutralSearch.id,
     )).resolves.toMatchObject({
-      finalUrl: `${fixture.origin}/preparation-url-state#overview`,
+      finalUrl: `${fixture.origin}/preparation-url-state`,
       structuredContent: {
         navigationOccurred: false,
         targetStateVerified: true,
@@ -5497,7 +5789,7 @@ describe('WrapperProofService security boundaries', () => {
       status: 410,
       sessionInvalidated: true,
     })
-    expect(inputEvents).toBe(1)
+    expect(inputEvents).toBe(0)
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
