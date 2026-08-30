@@ -78,12 +78,15 @@ wrapper-owned keys; CDP backend-node references and remote identifiers remain
 server-only.
 Every accessible-name and description source is safety evidence: `aria-label`,
 `aria-description`, bounded `aria-labelledby` and `aria-describedby` references
-(including non-HTML elements), associated-label text/`aria-label`/`title` and
+(including non-HTML elements and private native textbox, selected-option, and
+range-value semantics), associated-label text/`aria-label`/`title` and
 descendant image alts, every bounded descendant image alt from a link,
 placeholder, name, ID, and autocomplete. Reference, label, image, traversal,
 and aggregate text budgets fail closed on overflow. Controls without a genuine
 bounded identifying source are excluded; public display labels remain bounded
-and do not determine whether a field is sensitive.
+and do not determine whether a field is sensitive. Direct
+`aria-disabled="true"` is excluded and revalidated atomically in the same CDP
+isolated-world boundary as native disabled/read-only state.
 Each control's exact private snapshot also includes its owning form and every
 bounded ancestor fieldset: their ARIA/name/ID/title evidence, referenced nodes,
 and bounded legends are classified and revalidated before every read, write, or

@@ -68,7 +68,7 @@ function rawRequest(
   } as RequestInit & { duplex: 'half' })
 }
 
-function pendingAnalyzeRequest(options: { clientId: string, sourceIp: string }) {
+function pendingAnalyzeRequest(options: { clientId: string, sourceIp: string, signal?: AbortSignal }) {
   const encoder = new TextEncoder()
   let finish!: () => void
   const body = new ReadableStream<Uint8Array>({
@@ -474,6 +474,93 @@ describe('production wrapper API boundaries', () => {
     expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
       url: 'https://public.example.at',
     }, { clientId: 'body_release_client_002', sourceIp: bodyLimitSource }), target)).status).toBe(200)
+  })
+
+  it('applies the absolute analysis deadline to streamed bodies and releases the source reservation', async () => {
+    const analyze = vi.fn(async () => ({ ok: true }))
+    const target = backend({ analyze })
+    const sourceIp = '198.51.100.96'
+    const slowBody = pendingAnalyzeRequest({
+      clientId: 'deadline_stream_client_01',
+      sourceIp,
+    })
+
+    const timedOut = await handleAnalyzeRequest(slowBody.request, target, { analysisTimeoutMs: 20 })
+    expect(timedOut.status).toBe(504)
+    expect(await timedOut.json()).toEqual({
+      error: 'The isolated browser analysis exceeded its fixed time limit.',
+      code: 'analysis_timeout',
+    })
+    expect(analyze).not.toHaveBeenCalled()
+
+    const retry = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'deadline_stream_client_02',
+      sourceIp,
+    }), target, { analysisTimeoutMs: 1_000 })
+    expect(retry.status).toBe(200)
+    expect(analyze).toHaveBeenCalledOnce()
+  })
+
+  it('distinguishes a client-aborted streamed body from the absolute analysis deadline', async () => {
+    const controller = new AbortController()
+    const analyze = vi.fn(async () => ({ ok: true }))
+    const target = backend({ analyze })
+    const sourceIp = '198.51.100.97'
+    const slowBody = pendingAnalyzeRequest({
+      clientId: 'cancel_stream_client_0001',
+      sourceIp,
+      signal: controller.signal,
+    })
+    const pending = handleAnalyzeRequest(slowBody.request, target, { analysisTimeoutMs: 1_000 })
+    controller.abort()
+
+    const cancelled = await pending
+    expect(cancelled.status).toBe(499)
+    expect(await cancelled.json()).toEqual({
+      error: 'The isolated browser operation was cancelled.',
+      code: 'cancelled',
+    })
+    expect(analyze).not.toHaveBeenCalled()
+
+    const retry = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'cancel_stream_client_0002',
+      sourceIp,
+    }), target, { analysisTimeoutMs: 1_000 })
+    expect(retry.status).toBe(200)
+    expect(analyze).toHaveBeenCalledOnce()
+  })
+
+  it('closes a late backend result after timeout without retaining the trusted-source slot', async () => {
+    let resolveLate!: (value: { sessionId: string, sessionToken: string }) => void
+    const analyze = vi.fn(async () => new Promise<{ sessionId: string, sessionToken: string }>((resolve) => {
+      resolveLate = resolve
+    }))
+    const closeSession = vi.fn(async () => true)
+    const target = backend({ analyze, closeSession })
+    const sourceIp = '198.51.100.98'
+    const first = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'late_result_client_00001',
+      sourceIp,
+    }), target, { analysisTimeoutMs: 20 })
+    expect(first.status).toBe(504)
+
+    const retryTarget = backend()
+    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'late_result_client_00002',
+      sourceIp,
+    }), retryTarget, { analysisTimeoutMs: 1_000 })).status).toBe(200)
+
+    resolveLate({ sessionId: 'late-session-id', sessionToken: 'late-session-token' })
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+    expect(closeSession).toHaveBeenCalledWith('late-session-id', 'late-session-token')
   })
 
   it('releases the source reservation after an aborted backend analysis', async () => {

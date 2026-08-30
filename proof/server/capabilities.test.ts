@@ -343,4 +343,45 @@ describe('inferSafeCapabilities', () => {
     ])[0]
     expect(unchecked.sampleInput).toEqual({ field_1: true, field_2: true })
   })
+
+  it('publishes only a valid changing state for required checkboxes', () => {
+    const requiredUnchecked = inferSafeCapabilities([
+      control({
+        id: 'required-unchecked',
+        fieldKey: 'confirmation',
+        formId: 'form-1',
+        type: 'checkbox',
+        checked: false,
+        required: true,
+      }),
+      control({ id: 'details', fieldKey: 'details', formId: 'form-1', type: 'text' }),
+    ])[0]
+    expect(requiredUnchecked.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'boolean', const: true },
+      },
+    })
+    expect(requiredUnchecked.sampleInput).toMatchObject({ field_1: true })
+    expect(requiredUnchecked.action.fields?.[0]).toMatchObject({
+      type: 'checkbox',
+      checked: false,
+      required: true,
+    })
+
+    const requiredChecked = inferSafeCapabilities([
+      control({
+        id: 'required-checked',
+        fieldKey: 'confirmation',
+        formId: 'form-2',
+        type: 'checkbox',
+        checked: true,
+        required: true,
+      }),
+      control({ id: 'first-safe', fieldKey: 'first', formId: 'form-2', type: 'text' }),
+      control({ id: 'second-safe', fieldKey: 'second', formId: 'form-2', type: 'text' }),
+    ])[0]
+    expect(requiredChecked.action.fields).toHaveLength(2)
+    expect(requiredChecked.action.fields?.every(({ type }) => type === 'text')).toBe(true)
+    expect(JSON.stringify(publicCapability(requiredChecked))).not.toContain('required-checked')
+  })
 })

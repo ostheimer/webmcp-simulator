@@ -3,6 +3,7 @@ import { isIP } from 'node:net'
 import { SandboxWrapperService } from './sandboxWrapperService.ts'
 import { WrapperServiceError } from './wrapperErrors.ts'
 import {
+  WRAPPER_ANALYSIS_TIMEOUT_MS,
   WRAPPER_MAX_REQUEST_BODY_BYTES,
   WRAPPER_MAX_RATE_IDENTITIES_PER_FUNCTION,
   WRAPPER_MAX_RESPONSE_BYTES,
@@ -74,6 +75,11 @@ export interface ProductionWrapperBackend {
     capabilityId?: string,
   ): Promise<unknown>
   closeSession(sessionId: string, sessionToken: string, signal?: AbortSignal): Promise<boolean>
+}
+
+export interface ProductionRequestOptions {
+  /** Test-only override; production uses the fixed absolute analysis deadline. */
+  analysisTimeoutMs?: number
 }
 
 class HttpError extends Error {
@@ -154,7 +160,42 @@ function assertRequestBoundary(request: Request): { clientId: string, sourceId: 
   return { clientId, sourceId: trustedSourceIdentity(request) }
 }
 
-async function readJson(request: Request): Promise<Record<string, unknown>> {
+function requestAbortError(): DOMException {
+  return new DOMException('The wrapper request was cancelled.', 'AbortError')
+}
+
+async function raceRequestOperation<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    void promise.catch(() => undefined)
+    throw requestAbortError()
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      void promise.catch(() => undefined)
+      reject(requestAbortError())
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        if (settled) return
+        settled = true
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
+}
+
+async function readJson(request: Request, signal: AbortSignal = request.signal): Promise<Record<string, unknown>> {
   if (Number(request.headers.get('content-length') ?? 0) > WRAPPER_MAX_REQUEST_BODY_BYTES) {
     throw new HttpError('Request body is too large.', 413, 'body_limit')
   }
@@ -162,15 +203,20 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
   const reader = request.body.getReader()
   const chunks: Uint8Array[] = []
   let size = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    size += value.byteLength
-    if (size > WRAPPER_MAX_REQUEST_BODY_BYTES) {
-      await reader.cancel()
-      throw new HttpError('Request body is too large.', 413, 'body_limit')
+  try {
+    while (true) {
+      const { done, value } = await raceRequestOperation(reader.read(), signal)
+      if (done) break
+      size += value.byteLength
+      if (size > WRAPPER_MAX_REQUEST_BODY_BYTES) {
+        await reader.cancel()
+        throw new HttpError('Request body is too large.', 413, 'body_limit')
+      }
+      chunks.push(value)
     }
-    chunks.push(value)
+  } catch (error) {
+    if (signal.aborted) void reader.cancel().catch(() => undefined)
+    throw error
   }
   const bytes = new Uint8Array(size)
   let offset = 0
@@ -241,22 +287,71 @@ async function handle(operation: () => Promise<unknown>): Promise<Response> {
 export function handleAnalyzeRequest(
   request: Request,
   backend: ProductionWrapperBackend = service,
+  options: ProductionRequestOptions = {},
 ): Promise<Response> {
+  const timeoutMs = options.analysisTimeoutMs ?? WRAPPER_ANALYSIS_TIMEOUT_MS
+  const deadlineAtMs = Date.now() + Math.max(0, timeoutMs)
+  let deadlineExpired = false
+  const operationController = new AbortController()
+  const onRequestAbort = () => operationController.abort()
+  request.signal.addEventListener('abort', onRequestAbort, { once: true })
+  if (request.signal.aborted) operationController.abort()
+  const deadlineTimer = setTimeout(() => {
+    deadlineExpired = true
+    operationController.abort()
+  }, Math.max(0, timeoutMs))
+  deadlineTimer.unref?.()
+  const deadlineReached = () => deadlineExpired || Date.now() >= deadlineAtMs
+  const analysisTimeoutError = () => new HttpError(
+    'The isolated browser analysis exceeded its fixed time limit.',
+    504,
+    'analysis_timeout',
+  )
+  const cleanupLateAnalysis = (value: unknown) => {
+    if (!value || typeof value !== 'object') return
+    const result = value as { sessionId?: unknown, sessionToken?: unknown }
+    if (typeof result.sessionId !== 'string' || typeof result.sessionToken !== 'string') return
+    void backend.closeSession(result.sessionId, result.sessionToken).catch(() => undefined)
+  }
   return handle(async () => {
-    assertRequestMethod(request, 'POST')
-    const { sourceId } = assertRequestBoundary(request)
-    consumeRateLimit(analysisRates, sourceId, MAX_ANALYSES_PER_WINDOW, ANALYSIS_RATE_WINDOW_MS)
-    if (activeAnalyses.has(sourceId)) {
-      throw new HttpError('Only one website analysis may run for this network source.', 409, 'analysis_in_progress')
-    }
-    activeAnalyses.add(sourceId)
     try {
-      const body = await readJson(request)
-      if (typeof body.url !== 'string') throw new HttpError('url must be a string.', 400, 'invalid_url')
-      return await backend.analyze(body.url, request.signal)
-    } finally {
-      activeAnalyses.delete(sourceId)
+      assertRequestMethod(request, 'POST')
+      const { sourceId } = assertRequestBoundary(request)
+      consumeRateLimit(analysisRates, sourceId, MAX_ANALYSES_PER_WINDOW, ANALYSIS_RATE_WINDOW_MS)
+      if (activeAnalyses.has(sourceId)) {
+        throw new HttpError('Only one website analysis may run for this network source.', 409, 'analysis_in_progress')
+      }
+      activeAnalyses.add(sourceId)
+      try {
+        const body = await readJson(request, operationController.signal)
+        if (typeof body.url !== 'string') throw new HttpError('url must be a string.', 400, 'invalid_url')
+        if (deadlineReached()) throw analysisTimeoutError()
+        const analysisPromise = backend.analyze(body.url, operationController.signal)
+        let result: unknown
+        try {
+          result = await raceRequestOperation(analysisPromise, operationController.signal)
+        } catch (error) {
+          if (operationController.signal.aborted) {
+            void analysisPromise.then(cleanupLateAnalysis).catch(() => undefined)
+          }
+          throw error
+        }
+        if (deadlineReached()) {
+          cleanupLateAnalysis(result)
+          throw analysisTimeoutError()
+        }
+        return result
+      } finally {
+        activeAnalyses.delete(sourceId)
+      }
+    } catch (error) {
+      if (deadlineReached()) throw analysisTimeoutError()
+      if (request.signal.aborted) throw requestAbortError()
+      throw error
     }
+  }).finally(() => {
+    clearTimeout(deadlineTimer)
+    request.signal.removeEventListener('abort', onRequestAbort)
   })
 }
 

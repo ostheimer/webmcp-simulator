@@ -724,6 +724,57 @@ async function startFixture(): Promise<Fixture> {
         <script>document.getElementById('overflow-image-alt').alt = 'x'.repeat(4097)</script>`)
       return
     }
+    if (requestUrl === '/aria-reference-embedded-control-safety') {
+      response.end(`<!doctype html><title>ARIA embedded control safety</title>
+        <style>.reference-source{position:absolute;left:-10000px;top:0}</style>
+        <input class="reference-source" id="sensitive-textbox-value" type="text" value="Credit card number">
+        <select class="reference-source" id="sensitive-select-value"><option selected>BIC</option><option>Reference</option></select>
+        <input class="reference-source" id="sensitive-range-value" type="range" value="25" aria-valuetext="Bank account">
+        <input class="reference-source" id="late-textbox-value" type="text" value="Reference note">
+        <select class="reference-source" id="late-select-value"><option selected>Reference option</option><option>Secondary option</option></select>
+        <input class="reference-source" id="late-range-value" type="range" value="25" aria-valuetext="Reference level">
+        <textarea class="reference-source" id="neutral-textbox-value">Reference overview</textarea>
+        <div class="reference-source" id="custom-textbox-value" role="textbox" contenteditable="true">Reference widget</div>
+        <input class="reference-source" id="overflow-textbox-value" type="text">
+        <form id="sensitive-textbox-form">
+          <input type="text" name="sensitive_textbox_reference" aria-labelledby="sensitive-textbox-value">
+          <input type="text" aria-label="Sensitive textbox detail">
+        </form>
+        <form id="sensitive-select-form">
+          <input type="text" aria-label="Sensitive select field" aria-describedby="sensitive-select-value">
+          <input type="text" aria-label="Sensitive select detail">
+        </form>
+        <form id="sensitive-range-form">
+          <input type="text" aria-label="Sensitive range field" aria-describedby="sensitive-range-value">
+          <input type="text" aria-label="Sensitive range detail">
+        </form>
+        <form id="late-textbox-form">
+          <input id="late-textbox-input" type="text" aria-label="Late textbox field" aria-describedby="late-textbox-value">
+          <input id="late-textbox-detail" type="text" aria-label="Late textbox detail">
+        </form>
+        <form id="late-select-form">
+          <input id="late-select-input" type="text" aria-label="Late select field" aria-describedby="late-select-value">
+          <input id="late-select-detail" type="text" aria-label="Late select detail">
+        </form>
+        <form id="late-range-form">
+          <input id="late-range-input" type="text" aria-label="Late range field" aria-describedby="late-range-value">
+          <input id="late-range-detail" type="text" aria-label="Late range detail">
+        </form>
+        <form id="neutral-embedded-form">
+          <input id="neutral-embedded-input" type="text" aria-label="Neutral embedded field" aria-describedby="neutral-textbox-value">
+          <input type="text" aria-label="Neutral embedded detail">
+        </form>
+        <form id="custom-embedded-form">
+          <input type="text" aria-label="Custom embedded field" aria-describedby="custom-textbox-value">
+          <input type="text" aria-label="Custom embedded detail">
+        </form>
+        <form id="overflow-embedded-form">
+          <input type="text" aria-label="Overflow embedded field" aria-describedby="overflow-textbox-value">
+          <input type="text" aria-label="Overflow embedded detail">
+        </form>
+        <script>document.getElementById('overflow-textbox-value').value = 'x'.repeat(4097)</script>`)
+      return
+    }
     if (requestUrl === '/aria-description-safety') {
       response.end(`<!doctype html><title>ARIA description safety</title>
         <form id="sensitive-description-form">
@@ -1024,6 +1075,11 @@ async function startFixture(): Promise<Fixture> {
         <form id="enabled-form">
           <input id="enabled-control" type="text" aria-label="Enabled value">
           <input type="text" aria-label="Enabled detail">
+        </form>
+        <input id="initial-aria-disabled" type="search" aria-label="Initially unavailable search" aria-disabled="true">
+        <form id="aria-false-form">
+          <input id="aria-false-control" type="text" aria-label="ARIA false value" aria-disabled="false">
+          <input type="text" aria-label="ARIA false detail">
         </form>`)
       return
     }
@@ -1079,6 +1135,19 @@ async function startFixture(): Promise<Fixture> {
         <form id="unchecked-form">
           <input id="unchecked-one" type="checkbox" aria-label="Unchecked one">
           <input id="unchecked-two" type="checkbox" aria-label="Unchecked two">
+        </form>
+        <form id="required-unchecked-form">
+          <input id="required-unchecked" type="checkbox" required aria-label="Required unchecked">
+          <input id="required-unchecked-detail" type="text" aria-label="Required unchecked detail">
+        </form>
+        <form id="required-checked-form">
+          <input id="required-checked" type="checkbox" required checked aria-label="Required checked">
+          <input id="required-checked-first" type="text" aria-label="Required checked first">
+          <input id="required-checked-second" type="text" aria-label="Required checked second">
+        </form>
+        <form id="late-required-checkbox-form">
+          <input id="late-required-checkbox" type="checkbox" aria-label="Late required checkbox">
+          <input id="late-required-checkbox-detail" type="text" aria-label="Late required checkbox detail">
         </form>`)
       return
     }
@@ -2354,6 +2423,85 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
+  it('keeps ARIA-referenced embedded-control values private and revalidates native state', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/aria-reference-embedded-control-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(await page.getByRole('textbox', { name: 'Credit card number' }).count()).toBe(1)
+    for (const label of [
+      'sensitive_textbox_reference',
+      'Sensitive select field',
+      'Sensitive range field',
+      'Custom embedded field',
+      'Overflow embedded field',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
+    }
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(4)
+    expect(JSON.stringify({
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+      capabilities: analysis.capabilities,
+    })).not.toMatch(/Credit card number|Bank account|BIC|Reference overview/)
+
+    const capabilityFor = (label: string) => {
+      const evidenceId = analysis.domEvidence.find((evidence) => evidence.label === label)!.id
+      return analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidenceId))!
+    }
+    const lateCases = [
+      {
+        label: 'Late textbox field',
+        reference: '#late-textbox-value',
+        mutate: (element: Element) => { (element as HTMLInputElement).value = 'User password' },
+        restore: (element: Element) => { (element as HTMLInputElement).value = 'Reference note' },
+        target: '#late-textbox-input, #late-textbox-detail',
+      },
+      {
+        label: 'Late select field',
+        reference: '#late-select-value option:first-child',
+        mutate: (element: Element) => { element.textContent = 'Credit card number' },
+        restore: (element: Element) => { element.textContent = 'Reference option' },
+        target: '#late-select-input, #late-select-detail',
+      },
+      {
+        label: 'Late range field',
+        reference: '#late-range-value',
+        mutate: (element: Element) => { element.setAttribute('aria-valuetext', 'Bank account') },
+        restore: (element: Element) => { element.setAttribute('aria-valuetext', 'Reference level') },
+        target: '#late-range-input, #late-range-detail',
+      },
+    ]
+    for (const testCase of lateCases) {
+      const capability = capabilityFor(testCase.label)
+      await page.locator(testCase.reference).evaluate(testCase.mutate)
+      await expect(service.execute(
+        analysis.sessionId,
+        analysis.sessionToken,
+        capability.name,
+        capability.sampleInput,
+        undefined,
+        capability.id,
+      )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+      expect(await page.locator(testCase.target).evaluateAll((controls) =>
+        controls.map((control) => (control as HTMLInputElement).value))).toEqual(['', ''])
+      await page.locator(testCase.reference).evaluate(testCase.restore)
+    }
+
+    const neutral = capabilityFor('Neutral embedded field')
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutral.name,
+      neutral.sampleInput,
+      undefined,
+      neutral.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
   it('classifies bounded aria-description evidence and revalidates late mutations', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -3478,6 +3626,69 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
+  it('excludes aria-disabled controls and revalidates late ARIA operability before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const initialDisabled = analysis.domEvidence.find(({ label }) => label === 'Initially unavailable search')!
+    expect(initialDisabled).toBeUndefined()
+    expect(JSON.stringify(analysis.capabilities)).not.toContain('Initially unavailable search')
+
+    const ariaFalse = analysis.domEvidence.find(({ label }) => label === 'ARIA false value')!
+    expect(analysis.capabilities.some(({ evidenceIds }) => evidenceIds.includes(ariaFalse.id))).toBe(true)
+    const enabledEvidence = analysis.domEvidence.find(({ label }) => label === 'Enabled value')!
+    const enabledForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(enabledEvidence.id))!
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#enabled-control').evaluate((control) => control.setAttribute('aria-disabled', 'true'))
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      enabledForm.name,
+      enabledForm.sampleInput,
+      undefined,
+      enabledForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409, sessionInvalidated: false })
+    expect(await page.locator('#enabled-control').inputValue()).toBe('')
+    expect(await page.locator('#enabled-form input').nth(1).inputValue()).toBe('')
+
+    await page.locator('#enabled-control').evaluate((control) => control.removeAttribute('aria-disabled'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      enabledForm.name,
+      enabledForm.sampleInput,
+      undefined,
+      enabledForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('invalidates the session when aria-disabled changes after action admission', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionStartDelayMs: 200 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const enabledEvidence = analysis.domEvidence.find(({ label }) => label === 'Enabled value')!
+    const enabledForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(enabledEvidence.id))!
+    const page = internalSession(service, analysis.sessionId).page
+    const pending = service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      enabledForm.name,
+      enabledForm.sampleInput,
+      undefined,
+      enabledForm.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await page.locator('#enabled-control').evaluate((control) => control.setAttribute('aria-disabled', 'true'))
+
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
   it('publishes only finite Chromium-native date-like value sets and validates them before mutation', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -3690,6 +3901,112 @@ describe('WrapperProofService security boundaries', () => {
     expect(await internalSession(service, analysis.sessionId).page.locator('#unchecked-one, #unchecked-two').evaluateAll(
       (controls) => controls.map((control) => (control as HTMLInputElement).checked),
     )).toEqual([true, true])
+  })
+
+  it('keeps required checkbox schema, samples, validation, and native state aligned', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/checkbox-samples`)
+    const requiredUncheckedEvidence = analysis.domEvidence.find(({ label }) => label === 'Required unchecked')!
+    const requiredUnchecked = analysis.capabilities.find(({ evidenceIds }) =>
+      evidenceIds.includes(requiredUncheckedEvidence.id))!
+
+    expect(requiredUnchecked.inputSchema).toMatchObject({
+      properties: { field_1: { type: 'boolean', const: true } },
+    })
+    expect(requiredUnchecked.sampleInput.field_1).toBe(true)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      requiredUnchecked.name,
+      { ...requiredUnchecked.sampleInput, field_1: false },
+      undefined,
+      requiredUnchecked.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
+    expect(await internalSession(service, analysis.sessionId).page.locator('#required-unchecked').isChecked()).toBe(false)
+
+    const prepared = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      requiredUnchecked.name,
+      requiredUnchecked.sampleInput,
+      undefined,
+      requiredUnchecked.id,
+    )
+    expect(prepared.structuredContent).toMatchObject({ isolatedStateChanged: true, targetStateVerified: true })
+    analysis = prepared.analysis
+    expect(await internalSession(service, analysis.sessionId).page.locator('#required-unchecked').isChecked()).toBe(true)
+
+    const requiredCheckedEvidence = analysis.domEvidence.find(({ label }) => label === 'Required checked')!
+    const requiredCheckedForm = analysis.capabilities.find(({ evidenceIds }) =>
+      evidenceIds.includes(requiredCheckedEvidence.id))
+    expect(requiredCheckedForm).toBeUndefined()
+    const requiredCheckedText = analysis.domEvidence.find(({ label }) => label === 'Required checked first')!
+    const textOnlyForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(requiredCheckedText.id))!
+    expect(Object.values(textOnlyForm.inputSchema.properties ?? {})).not.toContainEqual(
+      expect.objectContaining({ type: 'boolean' }),
+    )
+  })
+
+  it('revalidates a checkbox that becomes required before and after action admission', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/checkbox-samples`)
+    const lateEvidence = analysis.domEvidence.find(({ label }) => label === 'Late required checkbox')!
+    const capability = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidence.id))!
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#late-required-checkbox').evaluate((checkbox) => {
+      (checkbox as HTMLInputElement).required = true
+    })
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      capability.name,
+      capability.sampleInput,
+      undefined,
+      capability.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409, sessionInvalidated: false })
+    expect(await page.locator('#late-required-checkbox').isChecked()).toBe(false)
+    expect(await page.locator('#late-required-checkbox-detail').inputValue()).toBe('')
+
+    await page.locator('#late-required-checkbox').evaluate((checkbox) => {
+      (checkbox as HTMLInputElement).required = false
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      capability.name,
+      capability.sampleInput,
+      undefined,
+      capability.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const raceService = createService({ actionStartDelayMs: 200 })
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/checkbox-samples`)
+    const raceEvidence = raceAnalysis.domEvidence.find(({ label }) => label === 'Late required checkbox')!
+    const raceCapability = raceAnalysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(raceEvidence.id))!
+    const racePage = internalSession(raceService, raceAnalysis.sessionId).page
+    const pending = raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceCapability.name,
+      raceCapability.sampleInput,
+      undefined,
+      raceCapability.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await racePage.locator('#late-required-checkbox').evaluate((checkbox) => {
+      (checkbox as HTMLInputElement).required = true
+    })
+
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('excludes initially indeterminate checkboxes while preserving another safe control and state', async () => {

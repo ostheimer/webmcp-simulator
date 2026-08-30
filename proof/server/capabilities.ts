@@ -33,6 +33,7 @@ export interface DetectedControl extends WrapperDomEvidence {
   dateLikeValues?: string[]
   dateLikeSample?: string
   checked?: boolean
+  required?: boolean
   textMinLength?: number
   textMaxLength?: number
   textSample?: string
@@ -58,6 +59,7 @@ export interface ActionField {
   dateLikeValues?: string[]
   dateLikeSample?: string
   checked?: boolean
+  required?: boolean
   textMinLength?: number
   textMaxLength?: number
   textSample?: string
@@ -125,7 +127,11 @@ function schemaForField(control: DetectedControl): Record<string, unknown> {
     }
   }
   if (['checkbox', 'radio'].includes(control.type)) {
-    return { type: 'boolean', description: 'Checked state for the visible control.' }
+    return {
+      type: 'boolean',
+      ...(control.type === 'checkbox' && control.required ? { const: true } : {}),
+      description: 'Checked state for the visible control.',
+    }
   }
   const dateLikeSpec = DATE_LIKE_FIELD_SPECS[control.type as keyof typeof DATE_LIKE_FIELD_SPECS]
   if (dateLikeSpec) {
@@ -169,7 +175,7 @@ function sampleForActionField(field: ActionField): unknown {
   if (field.type === 'number' || field.type === 'range') {
     return field.numericSample ?? 1
   }
-  if (field.type === 'checkbox') return !field.checked
+  if (field.type === 'checkbox') return field.required ? true : !field.checked
   if (field.type === 'radio') return true
   if (Object.hasOwn(DATE_LIKE_FIELD_SPECS, field.type)) return field.dateLikeSample
   return field.textSample
@@ -296,6 +302,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       !control.sensitive
       && !control.numericUnsupported
       && !control.textUnsupported
+      && !(control.type === 'checkbox' && control.required && control.checked)
       && (control.type !== 'select-one' || control.selectSampleIndex !== undefined)
       && (!Object.hasOwn(DATE_LIKE_FIELD_SPECS, control.type)
         || (Boolean(control.dateLikeValues?.length) && control.dateLikeSample !== undefined))
@@ -360,6 +367,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         dateLikeValues: control.dateLikeValues,
         dateLikeSample: control.dateLikeSample,
         checked: control.checked,
+        required: control.required,
         textMinLength: control.textMinLength,
         textMaxLength: control.textMaxLength,
         textSample: control.textSample,

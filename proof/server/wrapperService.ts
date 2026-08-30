@@ -461,8 +461,8 @@ function captureIsolatedSafetyEvidence(
   overflow: boolean
   optionEntries: Array<{ optionIndex: number, labelAttribute: string, text: string, value: string }>
   labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[] }>
-  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string }>
-  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string }>
+  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
+  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
   anchorImageAlts: string[]
   generatedContent: string[]
   ownerContextEvidence: string[]
@@ -597,6 +597,7 @@ function captureIsolatedSafetyEvidence(
       nativeControlKind: { value: string, overflow: boolean }
       nativeControlValue: { value: string, overflow: boolean }
       nativeControlAlt: { value: string, overflow: boolean }
+      nativeControlAccessibleValues: string[]
       overflow: boolean
     }> = []
     for (const id of ids) {
@@ -614,6 +615,23 @@ function captureIsolatedSafetyEvidence(
       let nativeControlKind = bounded('')
       let nativeControlValue = bounded('')
       let nativeControlAlt = bounded('')
+      const nativeControlAccessibleValues: string[] = []
+      let nativeControlAccessibleOverflow = false
+      const retainNativeControlAccessibleValue = (value: unknown) => {
+        if (nativeControlAccessibleValues.length >= 16) {
+          nativeControlAccessibleOverflow = true
+          return
+        }
+        const captured = bounded(value)
+        nativeControlAccessibleValues.push(captured.value)
+        nativeControlAccessibleOverflow ||= captured.overflow
+      }
+      if (node instanceof Element) {
+        for (const attribute of ['aria-valuetext', 'aria-valuenow']) {
+          const value = getAttribute.call(node, attribute)
+          if (value !== null) retainNativeControlAccessibleValue(value)
+        }
+      }
       if (node instanceof HTMLInputElement) {
         const typeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
         if (!typeGetter) {
@@ -632,7 +650,55 @@ function captureIsolatedSafetyEvidence(
             nativeControlAlt = altGetter
               ? bounded(altGetter.call(node))
               : bounded('', true)
+          } else if (['text', 'search', 'url', 'tel', 'email', 'password', 'number', 'date', 'month', 'time', 'week', 'range'].includes(nativeType.value)) {
+            nativeControlKind = nativeType
+            const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+            if (valueGetter) retainNativeControlAccessibleValue(valueGetter.call(node))
+            else nativeControlAccessibleOverflow = true
+          } else {
+            nativeControlKind = nativeType
+            nativeControlAccessibleOverflow = true
           }
+        }
+      } else if (node instanceof HTMLTextAreaElement) {
+        nativeControlKind = bounded('textarea')
+        const valueGetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
+        if (valueGetter) retainNativeControlAccessibleValue(valueGetter.call(node))
+        else nativeControlAccessibleOverflow = true
+      } else if (node instanceof HTMLSelectElement) {
+        const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
+        const multipleGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple')?.get
+        const selectedGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected')?.get
+        const options = optionsGetter?.call(node) as HTMLOptionsCollection | undefined
+        if (!options || !multipleGetter || !selectedGetter || options.length > maxSelectOptionsInspected) {
+          nativeControlAccessibleOverflow = true
+        } else {
+          nativeControlKind = bounded(multipleGetter.call(node) ? 'select-multiple' : 'select-one')
+          let selectedCount = 0
+          for (let optionIndex = 0; optionIndex < options.length; optionIndex += 1) {
+            const option = options.item(optionIndex)
+            if (!(option instanceof HTMLOptionElement) || !selectedGetter.call(option)) continue
+            selectedCount += 1
+            if (selectedCount > 16) {
+              nativeControlAccessibleOverflow = true
+              break
+            }
+            const text = boundedNodeText(option)
+            const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
+            const valueAttribute = getAttribute.call(option, 'value')
+            const value = bounded(valueAttribute === null ? text.value : valueAttribute)
+            nativeControlAccessibleValues.push(labelAttribute.value, text.value, value.value)
+            nativeControlAccessibleOverflow ||= text.overflow || labelAttribute.overflow || value.overflow
+          }
+        }
+      } else if (node instanceof Element) {
+        const rawRole = bounded(getAttribute.call(node, 'role') ?? '')
+        const role = rawRole.overflow ? rawRole : bounded(rawRole.value.trim().toLowerCase())
+        if (['combobox', 'listbox', 'slider', 'spinbutton', 'textbox'].includes(role.value)) {
+          nativeControlKind = role
+          // Custom ARIA widgets can compute their value from page-authored descendant state.
+          // Exclude them rather than publish a partial accessible-name safety proof.
+          nativeControlAccessibleOverflow = true
         }
       }
       entries.push({
@@ -644,6 +710,7 @@ function captureIsolatedSafetyEvidence(
         nativeControlKind,
         nativeControlValue,
         nativeControlAlt,
+        nativeControlAccessibleValues,
         overflow: text.overflow
           || imageAlts.overflow
           || ariaLabel.overflow
@@ -651,7 +718,8 @@ function captureIsolatedSafetyEvidence(
           || generatedContent.overflow
           || nativeControlKind.overflow
           || nativeControlValue.overflow
-          || nativeControlAlt.overflow,
+          || nativeControlAlt.overflow
+          || nativeControlAccessibleOverflow,
       })
     }
     return {
@@ -702,6 +770,8 @@ function captureIsolatedSafetyEvidence(
         retainExisting(`${attribute}:native-kind:${index}`, entry.nativeControlKind.value)
         retainExisting(`${attribute}:native-value:${index}`, entry.nativeControlValue.value)
         retainExisting(`${attribute}:native-alt:${index}`, entry.nativeControlAlt.value)
+        entry.nativeControlAccessibleValues.forEach((value, valueIndex) =>
+          retainExisting(`${attribute}:native-accessible:${index}:${valueIndex}`, value))
         entry.generatedContent.forEach((content, contentIndex) =>
           retainExisting(`${attribute}:generated:${index}:${contentIndex}`, content))
       })
@@ -795,6 +865,7 @@ function captureIsolatedSafetyEvidence(
     'aria-labelledby',
     'aria-describedby',
     'aria-description',
+    'aria-disabled',
     'autocomplete',
     'placeholder',
     'name',
@@ -956,7 +1027,7 @@ function captureIsolatedSafetyEvidence(
     generatedContent,
   }))
   const ariaLabelledEntries = ariaLabelled.entries
-    .map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt }) => ({
+    .map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
@@ -965,9 +1036,10 @@ function captureIsolatedSafetyEvidence(
       nativeControlKind: nativeControlKind.value,
       nativeControlValue: nativeControlValue.value,
       nativeControlAlt: nativeControlAlt.value,
+      nativeControlAccessibleValues,
     }))
   const ariaDescribedEntries = ariaDescribed.entries
-    .map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt }) => ({
+    .map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
@@ -976,6 +1048,7 @@ function captureIsolatedSafetyEvidence(
       nativeControlKind: nativeControlKind.value,
       nativeControlValue: nativeControlValue.value,
       nativeControlAlt: nativeControlAlt.value,
+      nativeControlAccessibleValues,
     }))
   const snapshot = JSON.stringify({
       attributes: attributes.map(({ name, value }) => [name, value]),
@@ -1014,6 +1087,12 @@ function captureIsolatedSafetyEvidence(
     generatedContent: generatedContent.values,
     ownerContextEvidence,
   }
+}
+
+function isExplicitlyAriaDisabled(element: Element, maxSafetyEvidenceLength: number): boolean {
+  const source = Element.prototype.getAttribute.call(element, 'aria-disabled') ?? ''
+  return source.length > maxSafetyEvidenceLength
+    || source.trim().toLowerCase() === 'true'
 }
 
 function classifyDomInIsolatedWorld({
@@ -1145,6 +1224,7 @@ function classifyDomInIsolatedWorld({
         &&
         isElementScreenshotVisible(node, viewportWidth, viewportHeight)
         && !matches.call(node, ':disabled')
+        && !isExplicitlyAriaDisabled(node, maxSafetyEvidenceLength)
         && !isReadOnlyControl(node)
       ) controls.push(node)
     }
@@ -1437,6 +1517,12 @@ function classifyDomInIsolatedWorld({
             return !getter || Boolean(getter.call(element))
           })()
         : false
+      const checkboxRequired = element instanceof HTMLInputElement && type === 'checkbox'
+        ? (() => {
+            const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'required')?.get
+            return getter ? Boolean(getter.call(element)) : undefined
+          })()
+        : undefined
       const textControl = (element instanceof HTMLInputElement && ['search', 'text'].includes(type))
         || element instanceof HTMLTextAreaElement
       let textMinLength: number | undefined
@@ -1493,23 +1579,27 @@ function classifyDomInIsolatedWorld({
         ariaLabelled.raw,
         ...ariaLabelled.ids,
         ...ariaLabelled.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent, nativeControlValue, nativeControlAlt }) => [
+        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => [
           ...imageAlts,
           ariaLabel,
           title,
+          nativeControlKind,
           nativeControlValue,
           nativeControlAlt,
+          ...nativeControlAccessibleValues,
           ...generatedContent,
         ]),
         ariaDescribed.raw,
         ...ariaDescribed.ids,
         ...ariaDescribed.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent, nativeControlValue, nativeControlAlt }) => [
+        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => [
           ...imageAlts,
           ariaLabel,
           title,
+          nativeControlKind,
           nativeControlValue,
           nativeControlAlt,
+          ...nativeControlAccessibleValues,
           ...generatedContent,
         ]),
         ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title, generatedContent }) => [
@@ -1556,6 +1646,7 @@ function classifyDomInIsolatedWorld({
       const sensitive = ['email', 'file', 'password', 'tel'].includes(type)
         || selectMultiple
         || checkboxIndeterminate
+        || (type === 'checkbox' && checkboxRequired === undefined)
         || autocompleteSource.length > maxSafetyEvidenceLength
         || numericAttributeOverflow
         || (dateLikeInput && !dateLikeValues)
@@ -1603,6 +1694,7 @@ function classifyDomInIsolatedWorld({
         dateLikeValues,
         dateLikeSample,
         checked,
+        required: checkboxRequired,
         textMinLength,
         textMaxLength,
         textSample,
@@ -1711,7 +1803,7 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
     }
     const classification = await cdp.send('Runtime.evaluate', {
-      expression: `(() => { const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
+      expression: `(() => { const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const isExplicitlyAriaDisabled = (${isExplicitlyAriaDisabled.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
       contextId: executionContextId,
       objectGroup,
       returnByValue: true,
@@ -1968,10 +2060,15 @@ function assertIsolatedControlOperable(
   element: Element,
   expectedType: string,
   expectedOptionIndex: number,
+  maxSafetyEvidenceLength: number,
+  expectedValue?: IsolatedControlState,
 ): void {
   const matches = Element.prototype.matches
   if (matches.call(element, ':disabled')) {
     throw new Error('The isolated control is disabled.')
+  }
+  if (isExplicitlyAriaDisabled(element, maxSafetyEvidenceLength)) {
+    throw new Error('The isolated control is aria-disabled.')
   }
   if (element instanceof HTMLInputElement) {
     const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'readOnly')?.get
@@ -1992,6 +2089,10 @@ function assertIsolatedControlOperable(
     const indeterminateGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'indeterminate')?.get
     if (!indeterminateGetter || indeterminateGetter.call(element)) {
       throw new Error('The isolated checkbox became indeterminate.')
+    }
+    const requiredGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'required')?.get
+    if (!requiredGetter || (expectedValue === false && requiredGetter.call(element))) {
+      throw new Error('The isolated checkbox value violates its native required contract.')
     }
   }
   if (expectedOptionIndex >= 0) {
@@ -2139,7 +2240,7 @@ function readIsolatedControlState(
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
   )
-  assertIsolatedControlOperable(this, expectedType, expectedOptionIndex)
+  assertIsolatedControlOperable(this, expectedType, expectedOptionIndex, maxSafetyEvidenceLength)
   assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType)
   if (expectedType === 'select-one') {
@@ -2192,7 +2293,7 @@ function writeIsolatedControlState(
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
   )
-  assertIsolatedControlOperable(this, expectedType, expectedOptionIndex)
+  assertIsolatedControlOperable(this, expectedType, expectedOptionIndex, maxSafetyEvidenceLength, value)
   assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType, value)
   assertIsolatedTextValueAllowed(this, expectedType, value)
@@ -2265,7 +2366,7 @@ function writeIsolatedRadioGroupState(
       maxTotalSafetyEvidenceLength,
       maxSelectOptionsInspected,
     )
-    assertIsolatedControlOperable(member, 'radio', -1)
+    assertIsolatedControlOperable(member, 'radio', -1, maxSafetyEvidenceLength)
     assertIsolatedRadioGroupBound(member, expectedGroupSize, maxElementsInspected)
     before.push(Boolean(checkedGetter.call(member)))
   }
@@ -2290,6 +2391,7 @@ function readIsolatedLinkTarget(
   if (
     !(this instanceof HTMLAnchorElement)
     || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)
+    || isExplicitlyAriaDisabled(this, maxSafetyEvidenceLength)
     || this.href !== expectedUrl
   ) {
     throw new Error('The isolated visible link is no longer available.')
@@ -2326,7 +2428,7 @@ async function callOnIsolatedNode<T>(
       throw new Error('The isolated browser control is not visibly painted.')
     }
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const isExplicitlyAriaDisabled = (${isExplicitlyAriaDisabled.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
       arguments: args.map((value) => ({ value })),
       objectGroup,
@@ -2435,7 +2537,7 @@ async function writeRadioGroupState(
     }))
     const selectedObjectId = resolved[selectedIndex]
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); return (${writeIsolatedRadioGroupState.toString()}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const isExplicitlyAriaDisabled = (${isExplicitlyAriaDisabled.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); return (${writeIsolatedRadioGroupState.toString()}).apply(this, args); }`,
       objectId: selectedObjectId,
       arguments: [
         { value: selectedIndex },
@@ -2618,6 +2720,9 @@ function validateActionInput(
       }
     } else if (field.type === 'checkbox' || field.type === 'radio') {
       if (typeof value !== 'boolean') throw preActionError('invalid_action', `${key} must be a boolean.`, 400)
+      if (field.type === 'checkbox' && field.required && value !== true) {
+        throw preActionError('invalid_action', `${key} must remain checked because the visible control is required.`, 400)
+      }
     } else if (field.type === 'number' || field.type === 'range') {
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         throw preActionError('invalid_action', `${key} must be a finite number.`, 400)
