@@ -2,7 +2,9 @@ import { once } from 'node:events'
 import { createServer as createHttpServer } from 'node:http'
 import { createServer as createViteServer } from 'vite'
 import { describe, expect, it, vi } from 'vitest'
+import type { WrapperAnalysis } from '../../src/features/wrapper/types.ts'
 import type { PublicTarget } from './publicTarget.ts'
+import { WRAPPER_MAX_REQUEST_BODY_BYTES } from './wrapperLimits.ts'
 import { WrapperServiceError } from './wrapperErrors.ts'
 import { WrapperProofService } from './wrapperService.ts'
 import { localPublicError, wrapperProofPlugin } from './viteWrapperProofPlugin.ts'
@@ -135,8 +137,80 @@ describe('local wrapper API error boundary', () => {
         body: JSON.stringify({ url: `${targetOrigin}/` }),
       })
       expect(normalResponse.status).toBe(200)
-      const analysis = await normalResponse.json() as { sessionId: string, sessionToken: string, title: string }
+      const analysis = await normalResponse.json() as WrapperAnalysis
       expect(analysis.title).toBe('Normal analysis')
+      expect(activeSessionCount(service)).toBe(1)
+
+      const actionUrl = `${apiOrigin}/api/wrapper/action`
+      const validActionBody = JSON.stringify({
+        sessionId: analysis.sessionId,
+        sessionToken: analysis.sessionToken,
+        capabilityId: analysis.capabilities[0]?.id,
+        toolName: analysis.capabilities[0]?.name,
+        input: analysis.capabilities[0]?.sampleInput,
+      })
+      const expectBoundaryError = async (
+        requestHeaders: Record<string, string>,
+        body: string,
+        expectedStatus: number,
+        expectedCode: string,
+      ) => {
+        const boundaryResponse = await fetch(actionUrl, {
+          method: 'POST',
+          headers: requestHeaders,
+          body,
+        })
+        expect(boundaryResponse.status).toBe(expectedStatus)
+        expect(await boundaryResponse.json()).toEqual({
+          error: expect.any(String),
+          code: expectedCode,
+          sessionInvalidated: false,
+        })
+        expect(activeSessionCount(service)).toBe(1)
+      }
+
+      await expectBoundaryError(headers, '{', 400, 'invalid_action')
+      await expectBoundaryError(
+        headers,
+        JSON.stringify({ padding: 'x'.repeat(WRAPPER_MAX_REQUEST_BODY_BYTES) }),
+        413,
+        'body_limit',
+      )
+      await expectBoundaryError(
+        { ...headers, 'Content-Type': 'text/plain' },
+        validActionBody,
+        415,
+        'invalid_action',
+      )
+      await expectBoundaryError(
+        { ...headers, 'Sec-Fetch-Site': 'cross-site' },
+        validActionBody,
+        403,
+        'invalid_action',
+      )
+      await expectBoundaryError(
+        { ...headers, Origin: 'https://hostile.example' },
+        validActionBody,
+        403,
+        'invalid_action',
+      )
+      await expectBoundaryError(
+        { ...headers, 'X-WebMCP-Client': 'short' },
+        validActionBody,
+        400,
+        'invalid_action',
+      )
+      await expectBoundaryError(headers, JSON.stringify({ sessionId: analysis.sessionId }), 400, 'invalid_action')
+
+      const validActionResponse = await fetch(actionUrl, {
+        method: 'POST',
+        headers,
+        body: validActionBody,
+      })
+      expect(validActionResponse.status).toBe(200)
+      expect(await validActionResponse.json()).toMatchObject({
+        structuredContent: { targetStateVerified: true },
+      })
       expect(activeSessionCount(service)).toBe(1)
 
       const closeResponse = await fetch(`${apiOrigin}/api/wrapper/session`, {

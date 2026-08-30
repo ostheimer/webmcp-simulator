@@ -28,7 +28,8 @@ React wrapper page
      -> block frames, popups, downloads, WebSocket, EventSource, WebRTC,
         sendBeacon, service workers, uploads, and non-read HTTP methods
      -> collect only DOM controls/links with visible pixels inside the fixed
-        screenshot viewport after clip-path and ancestor-overflow clipping,
+        screenshot viewport after clip-path and ancestor-overflow clipping;
+        conservatively exclude element/ancestor CSS filters and masks,
         plus CDP accessibility nodes and the viewport screenshot
      -> put Chromium offline at the capture boundary, then require all
         already-started requests to terminate before exposing any tool
@@ -45,7 +46,8 @@ React wrapper page
         navigation, capture, and immediate session teardown
      -> block every network request during and after preparation
      -> treat explicit same-origin navigation as a separate read-network policy
-        and inspect every main-document redirect hop before network continuation
+        and inspect every server-identified main-document redirect hop before
+        network continuation without treating blocked subframes as navigation
   <- post-settle verified semantic state + current URL/evidence/tools + measured network result
 ```
 

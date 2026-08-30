@@ -80,6 +80,7 @@ class FakeSandbox {
   forceStatus?: number
   forceError?: { status: number, code: string, error: string, sessionInvalidated?: boolean }
   delayAction = false
+  afterAnalyzeResult?: () => void
   commandError?: Error
   totalDurationMs: number | undefined = 1_000
   workerRuntimeMs = 20
@@ -129,6 +130,7 @@ class FakeSandbox {
       : status === 410
         ? { error: 'The isolated browser session expired.', code: 'session_expired' }
         : { error: 'Invalid session capability.', code: 'invalid_capability', sessionInvalidated: false }
+    if (status === 200 && operation === 'analyze') this.afterAnalyzeResult?.()
     return commandResult(0, JSON.stringify({ status, body: JSON.stringify(body) }))
   }
 
@@ -447,6 +449,20 @@ describe('SandboxWrapperService session boundaries', () => {
     )
     setTimeout(() => controller.abort(), 10)
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(harness.sandbox.deleted).toBe(1)
+  })
+
+  it('deletes the sandbox when analysis is aborted after the worker result', async () => {
+    const harness = createHarness()
+    const controller = new AbortController()
+    harness.sandbox.afterAnalyzeResult = () => controller.abort()
+
+    await expect(harness.service.analyze(
+      'https://public.example.at',
+      controller.signal,
+    )).rejects.toMatchObject({ name: 'AbortError' })
+
+    expect(harness.counts()).toEqual({ createCalls: 1, getCalls: 0 })
     expect(harness.sandbox.deleted).toBe(1)
   })
 

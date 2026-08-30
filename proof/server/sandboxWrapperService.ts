@@ -370,6 +370,7 @@ export class SandboxWrapperService {
       }
       if (!ready) throw new Error('The isolated Chromium worker did not become ready.')
       const analysis = await this.callWorker<WrapperAnalysis>(sandbox, sessionToken, 'analyze', {}, signal)
+      if (signal?.aborted) throw new DOMException('The isolated analysis was cancelled.', 'AbortError')
       return decorateAnalysis(analysis, sandbox, sessionId, sessionToken, expiresAtMs, startedAtMs, this.now)
     } catch (error) {
       await sandbox?.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)

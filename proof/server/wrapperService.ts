@@ -115,6 +115,7 @@ interface ProofSession {
   targetTrafficFailure: Promise<WrapperServiceError>
   resolveTargetTrafficFailure: (error: WrapperServiceError) => void
   navigationPolicyError: WrapperServiceError | null
+  mainFrameId: string
 }
 
 interface AxNode {
@@ -307,11 +308,18 @@ function isElementScreenshotVisible(
     let clippedOut = false
     while (current) {
       const style = getComputedStyle(current)
+      const hasFilter = style.filter.trim() !== '' && style.filter !== 'none'
+      const hasMask = [
+        style.getPropertyValue('mask-image'),
+        style.getPropertyValue('-webkit-mask-image'),
+      ].some((value) => value.trim() !== '' && value.trim() !== 'none')
       if (
         current.hidden
         || style.display === 'none'
         || style.visibility === 'hidden'
         || Number.parseFloat(style.opacity || '1') <= 0
+        || hasFilter
+        || hasMask
       ) {
         clippedOut = true
         break
@@ -1234,12 +1242,14 @@ export class WrapperProofService {
       const event = rawEvent as {
         requestId?: string
         resourceType?: string
+        frameId?: string
         request?: { url?: string }
       }
       if (!event.requestId) return
       const url = event.request?.url ?? ''
       const consequential = session.networkMode === 'navigation'
         && event.resourceType === 'Document'
+        && event.frameId === session.mainFrameId
         && isConsequentialNavigationUrl(url)
       if (consequential) {
         session.blockedRequests += 1
@@ -1420,6 +1430,11 @@ export class WrapperProofService {
       const cdp = await raceWithSignal(context.newCDPSession(page), signal)
       await raceWithSignal(cdp.send('Page.enable'), signal)
       await raceWithSignal(cdp.send('Network.enable'), signal)
+      const frameTree = await raceWithSignal(cdp.send('Page.getFrameTree'), signal) as {
+        frameTree?: { frame?: { id?: string } }
+      }
+      const mainFrameId = frameTree.frameTree?.frame?.id
+      if (!mainFrameId) throw new Error('The isolated browser did not expose a main frame identity.')
       const id = randomUUID()
       const token = createSessionCapability()
       const createdAtMs = Date.now()
@@ -1453,11 +1468,16 @@ export class WrapperProofService {
         targetTrafficFailure,
         resolveTargetTrafficFailure,
         navigationPolicyError: null,
+        mainFrameId,
       }
       this.sessions.set(id, session)
       createdSessionId = id
       this.installTargetTrafficMonitor(session)
       this.installNavigationDocumentGuard(session)
+      cdp.on('Page.frameNavigated', (rawEvent: unknown) => {
+        const event = rawEvent as { frame?: { id?: string, parentId?: string } }
+        if (event.frame?.id && !event.frame.parentId) session.mainFrameId = event.frame.id
+      })
       await raceWithSignal(cdp.send('Fetch.enable', {
         patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Request' }],
       }), signal)

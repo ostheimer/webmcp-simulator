@@ -104,10 +104,46 @@ async function startFixture(): Promise<Fixture> {
           oninput="this.style.clipPath='inset(100%)'">`)
       return
     }
+    if (requestUrl === '/filtered-visibility') {
+      response.end(`<!doctype html><title>Filtered visibility fixture</title>
+        <input type="search" aria-label="Visible effect control" style="position:absolute;left:20px;top:20px;width:160px;height:32px">
+        <input type="search" aria-label="Element filter hidden" style="position:absolute;left:20px;top:70px;width:160px;height:32px;filter:opacity(0)">
+        <div style="position:absolute;left:20px;top:120px;filter:opacity(0)">
+          <input type="search" aria-label="Ancestor filter hidden" style="width:160px;height:32px">
+        </div>
+        <input type="search" aria-label="Element mask hidden" style="position:absolute;left:20px;top:170px;width:160px;height:32px;mask-image:linear-gradient(transparent,transparent);-webkit-mask-image:linear-gradient(transparent,transparent)">
+        <div style="position:absolute;left:20px;top:220px;mask-image:linear-gradient(transparent,transparent);-webkit-mask-image:linear-gradient(transparent,transparent)">
+          <input type="search" aria-label="Ancestor mask hidden" style="width:160px;height:32px">
+        </div>`)
+      return
+    }
+    if (requestUrl === '/filtered-action') {
+      response.end(`<!doctype html><title>Filtered action fixture</title>
+        <div style="position:absolute;left:20px;top:40px">
+          <input type="search" aria-label="Filtering search" style="width:160px;height:32px"
+            oninput="this.parentElement.style.filter='opacity(0)'">
+        </div>`)
+      return
+    }
     if (requestUrl === '/redirect-source') {
       response.end(`<!doctype html><title>Redirect source</title>
         <a href="/about-risk">Neutral risky redirect</a>
         <a href="/about-safe">Neutral safe redirect</a>`)
+      return
+    }
+    if (requestUrl === '/iframe-navigation-source') {
+      response.end(`<!doctype html><title>Iframe navigation source</title>
+        <a href="/iframe-destination">Open safe destination</a>`)
+      return
+    }
+    if (requestUrl === '/iframe-destination') {
+      response.end(`<!doctype html><title>Iframe destination</title>
+        <input type="search" aria-label="Destination search">
+        <iframe src="/booking-widget"></iframe>`)
+      return
+    }
+    if (requestUrl === '/booking-widget') {
+      response.end('<!doctype html><title>Blocked booking widget</title>')
       return
     }
     if (requestUrl === '/about-risk') {
@@ -839,6 +875,54 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
+  it('excludes controls hidden by element or ancestor filters and masks', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/filtered-visibility`)
+
+    expect(analysis.domEvidence.map(({ label }) => label)).toEqual(['Visible effect control'])
+    expect(analysis.capabilities.map(({ name }) => name)).toEqual(['prepare_page_search'])
+    const search = analysis.capabilities[0]
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'visible effect state' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
+  })
+
+  it('fails closed when an ancestor filter hides a control during verification', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/filtered-action`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'hide through filter' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'stale' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'session_expired' })
+  })
+
   it('excludes transparent and zero-geometry controls from visible evidence and capabilities', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -1158,6 +1242,41 @@ describe('WrapperProofService security boundaries', () => {
     })
     expect(fixture.requests).toContain('/about-safe')
     expect(fixture.requests).toContain('/next')
+  })
+
+  it('blocks consequential subframes without invalidating a safe main-frame navigation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/iframe-navigation-source`)
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+
+    const result = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      { linkIndex: 0 },
+      undefined,
+      navigation.id,
+    )
+
+    expect(result).toMatchObject({
+      finalUrl: `${fixture.origin}/iframe-destination`,
+      structuredContent: { navigationOccurred: true, targetStateVerified: true },
+    })
+    expect(result.structuredContent.blockedNetworkRequests).toBeGreaterThanOrEqual(1)
+    expect(fixture.requests).toContain('/iframe-destination')
+    expect(fixture.requests).not.toContain('/booking-widget')
+    const search = result.analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(service.execute(
+      result.analysis.sessionId,
+      result.analysis.sessionToken,
+      search.name,
+      { query: 'session remains usable' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
   it('rejects oversized target documents from headers and live chunk measurement', async () => {
