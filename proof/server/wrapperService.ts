@@ -38,6 +38,7 @@ const ACTION_SETTLE_MS = 300
 const CAPTURE_VIEWPORT_WIDTH = 1365
 const CAPTURE_VIEWPORT_HEIGHT = 900
 const MAX_SAFETY_EVIDENCE_LENGTH = 4_096
+const MAX_TOTAL_SAFETY_EVIDENCE_LENGTH = 24 * 1_024
 const UNSAFE_FIELD_HINT = /\b(address|book|buy|card|checkout|comment|contact|credential|delete|email|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|order|ordering|purchase|purchasing|reservation|reserve|subscribe|termin|bestellen|bestellung|buchen|buchung|kaufen|kasse|reservieren|reservierung|warenkorb)\b/i
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
@@ -346,6 +347,208 @@ function isElementScreenshotVisible(
   return false
 }
 
+function captureIsolatedSafetyEvidence(
+  element: Element,
+  maxSafetyEvidenceLength: number,
+  maxTotalSafetyEvidenceLength: number,
+  maxSelectOptionsInspected: number,
+): {
+  snapshot: string
+  overflow: boolean
+  optionEntries: Array<{ optionIndex: number, labelAttribute: string, text: string, value: string }>
+} {
+  const getAttribute = Element.prototype.getAttribute
+  const matches = Element.prototype.matches
+  const createTreeWalker = Document.prototype.createTreeWalker
+  const nextNode = TreeWalker.prototype.nextNode
+  let retainedEvidenceLength = 0
+  let aggregateOverflow = false
+  const bounded = (value: unknown, sourceOverflow = false) => {
+    if (aggregateOverflow) return { value: '', overflow: true }
+    const raw = String(value ?? '')
+    const retained = raw.slice(0, maxSafetyEvidenceLength + 1)
+    const serializedLength = JSON.stringify(retained).length + 8
+    if (retainedEvidenceLength + serializedLength > maxTotalSafetyEvidenceLength) {
+      aggregateOverflow = true
+      return { value: '', overflow: true }
+    }
+    retainedEvidenceLength += serializedLength
+    return {
+      value: retained,
+      overflow: sourceOverflow || raw.length > maxSafetyEvidenceLength,
+    }
+  }
+  const boundedNodeText = (root: Element) => {
+    if (aggregateOverflow) return { value: '', overflow: true }
+    const walker = createTreeWalker.call(document, root, NodeFilter.SHOW_ALL)
+    let value = ''
+    let nodesInspected = 0
+    while (nodesInspected < 256 && value.length <= maxSafetyEvidenceLength) {
+      const node = nextNode.call(walker)
+      if (!node) return bounded(value)
+      nodesInspected += 1
+      if (node.nodeType === Node.TEXT_NODE) {
+        value += String(node.nodeValue ?? '').slice(0, maxSafetyEvidenceLength + 1 - value.length)
+      }
+    }
+    return bounded(value, value.length > maxSafetyEvidenceLength || Boolean(nextNode.call(walker)))
+  }
+  const referenced = (attribute: string) => {
+    const rawSource = getAttribute.call(element, attribute) ?? ''
+    const raw = bounded(rawSource)
+    const ids: string[] = []
+    let cursor = 0
+    while (!aggregateOverflow && cursor < raw.value.length && ids.length < 17) {
+      while (cursor < raw.value.length && /\s/.test(raw.value[cursor])) cursor += 1
+      const start = cursor
+      while (cursor < raw.value.length && !/\s/.test(raw.value[cursor])) cursor += 1
+      if (cursor > start) {
+        const id = bounded(raw.value.slice(start, cursor))
+        if (!id.overflow) ids.push(id.value)
+      }
+    }
+    const overflow = raw.overflow || ids.length > 16
+    if (ids.length > 16) ids.length = 16
+    const texts: Array<{ value: string, overflow: boolean }> = []
+    for (const id of ids) {
+      if (aggregateOverflow) break
+      const node = document.getElementById(id)
+      texts.push(node instanceof Element ? boundedNodeText(node) : bounded(''))
+    }
+    return {
+      raw: raw.value,
+      ids,
+      texts,
+      overflow: aggregateOverflow || overflow || texts.some((text) => text.overflow),
+    }
+  }
+  const attributeNames = [
+    'aria-label',
+    'aria-labelledby',
+    'aria-describedby',
+    'autocomplete',
+    'placeholder',
+    'name',
+    'id',
+    'role',
+    'title',
+    'href',
+    'download',
+    'target',
+    'min',
+    'max',
+    'step',
+    'value',
+    'type',
+    'minlength',
+    'maxlength',
+    'pattern',
+    'multiple',
+  ]
+  const attributes: Array<{ name: string, value: string, overflow: boolean }> = []
+  for (const name of attributeNames) {
+    if (aggregateOverflow) break
+    attributes.push({ name, ...bounded(getAttribute.call(element, name) ?? '') })
+  }
+  const ariaLabelled = referenced('aria-labelledby')
+  const ariaDescribed = referenced('aria-describedby')
+  const labels: Array<{ value: string, overflow: boolean }> = []
+  let labelsOverflow = false
+  const labelCollection = element instanceof HTMLInputElement
+    || element instanceof HTMLSelectElement
+    || element instanceof HTMLTextAreaElement
+    ? element.labels
+    : null
+  if (labelCollection) {
+    labelsOverflow = labelCollection.length > 16
+    for (
+      let index = 0;
+      !aggregateOverflow && index < labelCollection.length && index < 16;
+      index += 1
+    ) {
+      const label = labelCollection.item(index)
+      if (label) labels.push(boundedNodeText(label))
+    }
+  }
+  const anchorText = element instanceof HTMLAnchorElement
+    ? boundedNodeText(element)
+    : { value: '', overflow: false }
+  let imageAlt = { value: '', overflow: false }
+  if (element instanceof HTMLAnchorElement) {
+    const walker = createTreeWalker.call(document, element, NodeFilter.SHOW_ELEMENT)
+    let nodesInspected = 0
+    while (!aggregateOverflow && nodesInspected < 256) {
+      const node = nextNode.call(walker)
+      if (!node) break
+      nodesInspected += 1
+      if (node instanceof HTMLImageElement) {
+        imageAlt = bounded(getAttribute.call(node, 'alt') ?? '')
+        break
+      }
+    }
+    if (nodesInspected === 256 && nextNode.call(walker)) imageAlt.overflow = true
+  }
+  const optionEntries: Array<{
+    optionIndex: number
+    labelAttribute: string
+    text: string
+    value: string
+  }> = []
+  let optionOverflow = false
+  if (element instanceof HTMLSelectElement) {
+    const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
+    const options = optionsGetter?.call(element) as HTMLOptionsCollection | undefined
+    if (!options) optionOverflow = true
+    for (
+      let optionIndex = 0;
+      options
+        && !aggregateOverflow
+        && optionIndex < options.length
+        && optionIndex < maxSelectOptionsInspected
+        && optionEntries.length < 30;
+      optionIndex += 1
+    ) {
+      const option = options.item(optionIndex)
+      if (!(option instanceof HTMLOptionElement) || matches.call(option, ':disabled')) continue
+      const text = boundedNodeText(option)
+      const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
+      const valueAttribute = getAttribute.call(option, 'value')
+      const value = bounded(valueAttribute === null ? text.value : valueAttribute)
+      optionOverflow ||= text.overflow || labelAttribute.overflow || value.overflow
+      optionEntries.push({
+        optionIndex,
+        labelAttribute: labelAttribute.value,
+        text: text.value,
+        value: value.value,
+      })
+    }
+  }
+  const overflow = aggregateOverflow
+    || attributes.some((attribute) => attribute.overflow)
+    || ariaLabelled.overflow
+    || ariaDescribed.overflow
+    || labelsOverflow
+    || labels.some((label) => label.overflow)
+    || anchorText.overflow
+    || imageAlt.overflow
+    || optionOverflow
+  if (overflow) return { snapshot: '', overflow: true, optionEntries: [] }
+  const snapshot = JSON.stringify({
+      attributes: attributes.map(({ name, value }) => [name, value]),
+      ariaLabelled,
+      ariaDescribed,
+      labels: labels.map(({ value }) => value),
+      anchorText: anchorText.value,
+      imageAlt: imageAlt.value,
+      optionEntries,
+      overflow,
+    })
+  if (snapshot.length > maxTotalSafetyEvidenceLength) {
+    return { snapshot: '', overflow: true, optionEntries: [] }
+  }
+  return { snapshot, overflow: false, optionEntries }
+}
+
 function classifyDomInIsolatedWorld({
   unsafePatternSource,
   unsafeNavigationPatternSource,
@@ -354,6 +557,7 @@ function classifyDomInIsolatedWorld({
   maxElementsInspected,
   maxDateLikeValues,
   maxSelectOptionsInspected,
+  maxTotalSafetyEvidenceLength,
   viewportWidth,
   viewportHeight,
   maxSafetyEvidenceLength,
@@ -365,6 +569,7 @@ function classifyDomInIsolatedWorld({
   maxElementsInspected: number
   maxDateLikeValues: number
   maxSelectOptionsInspected: number
+  maxTotalSafetyEvidenceLength: number
   viewportWidth: number
   viewportHeight: number
   maxSafetyEvidenceLength: number
@@ -465,6 +670,12 @@ function classifyDomInIsolatedWorld({
           forms.set(form, formId)
         }
       }
+      const safetyCapture = captureIsolatedSafetyEvidence(
+        element,
+        maxSafetyEvidenceLength,
+        maxTotalSafetyEvidenceLength,
+        maxSelectOptionsInspected,
+      )
       const referencedElements = (attribute: string) => {
         const source = element.getAttribute(attribute) ?? ''
         const raw = source.slice(0, maxSafetyEvidenceLength + 1)
@@ -542,27 +753,24 @@ function classifyDomInIsolatedWorld({
         && !element.hasAttribute('download')
         && `${element.pathname}${element.search}` !== `${location.pathname}${location.search}`
       const enabledOptions = element instanceof HTMLSelectElement
-        ? (() => {
-            const result: Array<{ option: HTMLOptionElement, optionIndex: number }> = []
-            for (
-              let optionIndex = 0;
-              optionIndex < element.options.length
-                && optionIndex < maxSelectOptionsInspected
-                && result.length < 30;
-              optionIndex += 1
-            ) {
-              const option = element.options.item(optionIndex)
-              if (option && !matches.call(option, ':disabled')) result.push({ option, optionIndex })
-            }
-            return result
-          })()
+        ? safetyCapture.optionEntries
         : undefined
       const optionValues = enabledOptions
-        ? enabledOptions.map(({ option }) => option.value.slice(0, maxSafetyEvidenceLength + 1))
+        ? enabledOptions.map(({ value }) => value)
         : sameOriginLink
           ? [absoluteLink]
           : undefined
       const optionIndices = enabledOptions?.map(({ optionIndex }) => optionIndex)
+      const selectSampleIndex = element instanceof HTMLSelectElement && optionIndices
+        ? (() => {
+            const getter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.get
+            if (!getter) return undefined
+            const currentDomIndex = Number(getter.call(element))
+            const currentPublicIndex = optionIndices.indexOf(currentDomIndex)
+            const alternative = optionIndices.findIndex((_domIndex, publicIndex) => publicIndex !== currentPublicIndex)
+            return alternative >= 0 ? alternative : undefined
+          })()
+        : undefined
       const numericInput = element instanceof HTMLInputElement && ['number', 'range'].includes(type)
       const numericMinimumSource = numericInput ? element.getAttribute('min') ?? '' : ''
       const numericMaximumSource = numericInput ? element.getAttribute('max') ?? '' : ''
@@ -707,6 +915,45 @@ function classifyDomInIsolatedWorld({
             return getter ? Boolean(getter.call(element)) : undefined
           })()
         : undefined
+      const textControl = (element instanceof HTMLInputElement && ['search', 'text'].includes(type))
+        || element instanceof HTMLTextAreaElement
+      let textMinLength: number | undefined
+      let textMaxLength: number | undefined
+      let textSample: string | undefined
+      let textUnsupported = false
+      if (textControl) {
+        const prototype = element instanceof HTMLTextAreaElement
+          ? HTMLTextAreaElement.prototype
+          : HTMLInputElement.prototype
+        const minLengthGetter = Object.getOwnPropertyDescriptor(prototype, 'minLength')?.get
+        const maxLengthGetter = Object.getOwnPropertyDescriptor(prototype, 'maxLength')?.get
+        const valueGetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.get
+        const patternSource = Element.prototype.getAttribute.call(element, 'pattern') ?? ''
+        if (patternSource.length > maxSafetyEvidenceLength || patternSource.trim()) {
+          textUnsupported = true
+        } else if (!minLengthGetter || !maxLengthGetter || !valueGetter) {
+          textUnsupported = true
+        } else {
+          const nativeMinimum = Number(minLengthGetter.call(element))
+          const nativeMaximum = Number(maxLengthGetter.call(element))
+          textMinLength = Number.isInteger(nativeMinimum) && nativeMinimum > 0 ? nativeMinimum : undefined
+          // JSON Schema counts Unicode code points while HTML maxlength counts
+          // UTF-16 code units. Halving is conservative for every code point.
+          textMaxLength = Number.isInteger(nativeMaximum) && nativeMaximum >= 0
+            ? Math.floor(nativeMaximum / 2)
+            : undefined
+          const contractMaximum = Math.min(type === 'search' ? 80 : 200, textMaxLength ?? 200)
+          const sampleLength = Math.max(1, textMinLength ?? 0)
+          if (sampleLength > contractMaximum) {
+            textUnsupported = true
+          } else {
+            const currentValue = String(valueGetter.call(element))
+            const primary = 'A'.repeat(sampleLength)
+            const alternate = 'B'.repeat(sampleLength)
+            textSample = currentValue === primary ? alternate : primary
+          }
+        }
+      }
       let decodedLinkPath = encodedLinkPath
       try {
         decodedLinkPath = decodeURIComponent(encodedLinkPath)
@@ -729,6 +976,11 @@ function classifyDomInIsolatedWorld({
         element instanceof HTMLAnchorElement ? boundedImageAlt(element) : '',
         element instanceof HTMLAnchorElement ? element.title : '',
         decodedLinkPath,
+        ...safetyCapture.optionEntries.flatMap(({ labelAttribute, text: optionText, value: optionValue }) => [
+          labelAttribute,
+          optionText,
+          optionValue,
+        ]),
       ].map((value) => String(value ?? ''))
       const hasUnsafeEvidence = safetyEvidenceSources.some((value) =>
         value.length > maxSafetyEvidenceLength || unsafePattern.test(tokenizeEvidence(value)))
@@ -749,6 +1001,7 @@ function classifyDomInIsolatedWorld({
         || ariaLabelled.overflow
         || ariaDescribed.overflow
         || associatedLabelsOverflow
+        || safetyCapture.overflow
         || hasSensitiveAutocomplete
         || hasUnsafeEvidence
         || hasUnsafeNavigationEvidence
@@ -765,6 +1018,7 @@ function classifyDomInIsolatedWorld({
         optionCount: optionValues?.length,
         optionValues,
         optionIndices,
+        selectSampleIndex,
         minimum,
         maximum,
         numericStep,
@@ -775,6 +1029,11 @@ function classifyDomInIsolatedWorld({
         dateLikeValues,
         dateLikeSample,
         checked,
+        textMinLength,
+        textMaxLength,
+        textSample,
+        textUnsupported,
+        safetySnapshot: safetyCapture.snapshot,
         sensitive,
       }
     })
@@ -809,12 +1068,13 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       maxElementsInspected: WRAPPER_MAX_DOM_ELEMENTS_INSPECTED,
       maxDateLikeValues: WRAPPER_MAX_DATE_LIKE_VALUES,
       maxSelectOptionsInspected: WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
+      maxTotalSafetyEvidenceLength: MAX_TOTAL_SAFETY_EVIDENCE_LENGTH,
       viewportWidth: CAPTURE_VIEWPORT_WIDTH,
       viewportHeight: CAPTURE_VIEWPORT_HEIGHT,
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
     }
     const classification = await cdp.send('Runtime.evaluate', {
-      expression: `(() => { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
+      expression: `(() => { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
       contextId: executionContextId,
       objectGroup,
       returnByValue: true,
@@ -863,6 +1123,24 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
 
 type IsolatedControlState = string | number | boolean
 
+function assertIsolatedSafetySnapshot(
+  element: Element,
+  expectedSnapshot: string,
+  maxSafetyEvidenceLength: number,
+  maxTotalSafetyEvidenceLength: number,
+  maxSelectOptionsInspected: number,
+): void {
+  const current = captureIsolatedSafetyEvidence(
+    element,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+    maxSelectOptionsInspected,
+  )
+  if (!expectedSnapshot || current.overflow || current.snapshot !== expectedSnapshot) {
+    throw new Error('The isolated control safety evidence changed.')
+  }
+}
+
 function assertIsolatedControlOperable(
   element: Element,
   expectedOptionIndex: number,
@@ -909,6 +1187,40 @@ function assertIsolatedDateLikeValueAllowed(
   if (!retained || !validity.valid) throw new Error('The isolated date-like value is no longer allowed.')
 }
 
+function assertIsolatedTextValueAllowed(
+  element: Element,
+  expectedType: string,
+  expectedValue: IsolatedControlState,
+): void {
+  if (!['search', 'text', 'textarea'].includes(expectedType)) return
+  const prototype = expectedType === 'textarea'
+    ? HTMLTextAreaElement.prototype
+    : HTMLInputElement.prototype
+  if (
+    (expectedType === 'textarea' && !(element instanceof HTMLTextAreaElement))
+    || (expectedType !== 'textarea' && !(element instanceof HTMLInputElement))
+  ) throw new Error('The isolated text control type changed.')
+  const minLengthGetter = Object.getOwnPropertyDescriptor(prototype, 'minLength')?.get
+  const maxLengthGetter = Object.getOwnPropertyDescriptor(prototype, 'maxLength')?.get
+  const valueGetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.get
+  const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
+  const validityGetter = Object.getOwnPropertyDescriptor(prototype, 'validity')?.get
+  if (!minLengthGetter || !maxLengthGetter || !valueGetter || !valueSetter || !validityGetter) {
+    throw new Error('The isolated text length contract is unavailable.')
+  }
+  const value = String(expectedValue)
+  const minimum = Number(minLengthGetter.call(element))
+  const maximum = Number(maxLengthGetter.call(element))
+  if ((minimum > 0 && value.length < minimum) || (maximum >= 0 && value.length > maximum)) {
+    throw new Error('The isolated text value violates its native length contract.')
+  }
+  const probe = Node.prototype.cloneNode.call(element, false) as HTMLInputElement | HTMLTextAreaElement
+  valueSetter.call(probe, value)
+  const retained = String(valueGetter.call(probe)) === value
+  const validity = validityGetter.call(probe) as ValidityState
+  if (!retained || !validity.valid) throw new Error('The isolated text value is no longer allowed.')
+}
+
 function readIsolatedControlState(
   this: Element,
   expectedType: string,
@@ -916,6 +1228,10 @@ function readIsolatedControlState(
   viewportWidth: number,
   viewportHeight: number,
   expectedOptionIndex: number,
+  expectedSafetySnapshot: string,
+  maxSafetyEvidenceLength: number,
+  maxTotalSafetyEvidenceLength: number,
+  maxSelectOptionsInspected: number,
 ): IsolatedControlState {
   if (
     !(this instanceof HTMLElement)
@@ -924,6 +1240,13 @@ function readIsolatedControlState(
   ) {
     throw new Error('The isolated control is no longer available.')
   }
+  assertIsolatedSafetySnapshot(
+    this,
+    expectedSafetySnapshot,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+    maxSelectOptionsInspected,
+  )
   assertIsolatedControlOperable(this, expectedOptionIndex)
   assertIsolatedDateLikeValueAllowed(this, expectedType)
   if (expectedType === 'select-one') {
@@ -947,6 +1270,10 @@ function writeIsolatedControlState(
   viewportWidth: number,
   viewportHeight: number,
   expectedOptionIndex: number,
+  expectedSafetySnapshot: string,
+  maxSafetyEvidenceLength: number,
+  maxTotalSafetyEvidenceLength: number,
+  maxSelectOptionsInspected: number,
 ): void {
   if (!(this instanceof HTMLElement) || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)) {
     throw new Error('The isolated control is no longer available.')
@@ -963,8 +1290,16 @@ function writeIsolatedControlState(
   ) {
     throw new Error('The isolated control type changed.')
   }
+  assertIsolatedSafetySnapshot(
+    this,
+    expectedSafetySnapshot,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+    maxSelectOptionsInspected,
+  )
   assertIsolatedControlOperable(this, expectedOptionIndex)
   assertIsolatedDateLikeValueAllowed(this, expectedType, value)
+  assertIsolatedTextValueAllowed(this, expectedType, value)
   if (expectedType === 'select-one') {
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.set
     if (!setter) throw new Error('The isolated select setter is unavailable.')
@@ -991,6 +1326,10 @@ function readIsolatedLinkTarget(
   expectedUrl: string,
   viewportWidth: number,
   viewportHeight: number,
+  expectedSafetySnapshot: string,
+  maxSafetyEvidenceLength: number,
+  maxTotalSafetyEvidenceLength: number,
+  maxSelectOptionsInspected: number,
 ): string {
   if (
     !(this instanceof HTMLAnchorElement)
@@ -999,6 +1338,13 @@ function readIsolatedLinkTarget(
   ) {
     throw new Error('The isolated visible link is no longer available.')
   }
+  assertIsolatedSafetySnapshot(
+    this,
+    expectedSafetySnapshot,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+    maxSelectOptionsInspected,
+  )
   return this.href
 }
 
@@ -1021,7 +1367,7 @@ async function callOnIsolatedNode<T>(
     const objectId = resolved.object?.objectId
     if (!objectId) throw new Error('The isolated browser element identity expired.')
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
       arguments: args.map((value) => ({ value })),
       objectGroup,
@@ -1042,6 +1388,7 @@ function readControlState(
   backendNodeId: number,
   expectedType: string,
   requireVisible: boolean,
+  expectedSafetySnapshot: string,
   expectedOptionIndex = -1,
 ): Promise<IsolatedControlState> {
   return callOnIsolatedNode<IsolatedControlState>(
@@ -1049,7 +1396,17 @@ function readControlState(
     page,
     backendNodeId,
     readIsolatedControlState.toString(),
-    [expectedType, requireVisible, CAPTURE_VIEWPORT_WIDTH, CAPTURE_VIEWPORT_HEIGHT, expectedOptionIndex],
+    [
+      expectedType,
+      requireVisible,
+      CAPTURE_VIEWPORT_WIDTH,
+      CAPTURE_VIEWPORT_HEIGHT,
+      expectedOptionIndex,
+      expectedSafetySnapshot,
+      MAX_SAFETY_EVIDENCE_LENGTH,
+      MAX_TOTAL_SAFETY_EVIDENCE_LENGTH,
+      WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
+    ],
   )
 }
 
@@ -1059,6 +1416,7 @@ function writeControlState(
   backendNodeId: number,
   expectedType: string,
   value: IsolatedControlState,
+  expectedSafetySnapshot: string,
   expectedOptionIndex = -1,
 ): Promise<void> {
   return callOnIsolatedNode<void>(
@@ -1066,7 +1424,17 @@ function writeControlState(
     page,
     backendNodeId,
     writeIsolatedControlState.toString(),
-    [expectedType, value, CAPTURE_VIEWPORT_WIDTH, CAPTURE_VIEWPORT_HEIGHT, expectedOptionIndex],
+    [
+      expectedType,
+      value,
+      CAPTURE_VIEWPORT_WIDTH,
+      CAPTURE_VIEWPORT_HEIGHT,
+      expectedOptionIndex,
+      expectedSafetySnapshot,
+      MAX_SAFETY_EVIDENCE_LENGTH,
+      MAX_TOTAL_SAFETY_EVIDENCE_LENGTH,
+      WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
+    ],
   )
 }
 
@@ -1075,13 +1443,22 @@ function readLinkTarget(
   page: Page,
   backendNodeId: number,
   expectedUrl: string,
+  expectedSafetySnapshot: string,
 ): Promise<string> {
   return callOnIsolatedNode<string>(
     context,
     page,
     backendNodeId,
     readIsolatedLinkTarget.toString(),
-    [expectedUrl, CAPTURE_VIEWPORT_WIDTH, CAPTURE_VIEWPORT_HEIGHT],
+    [
+      expectedUrl,
+      CAPTURE_VIEWPORT_WIDTH,
+      CAPTURE_VIEWPORT_HEIGHT,
+      expectedSafetySnapshot,
+      MAX_SAFETY_EVIDENCE_LENGTH,
+      MAX_TOTAL_SAFETY_EVIDENCE_LENGTH,
+      WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
+    ],
   )
 }
 
@@ -1131,8 +1508,15 @@ function validateActionInput(
 ): void {
   if (capability.kind === 'prepare_search') {
     const query = input.query
-    if (typeof query !== 'string' || !query.trim() || Array.from(query).length > 80) {
-      throw preActionError('invalid_action', 'query must be a non-empty string of at most 80 characters.', 400)
+    const length = typeof query === 'string' ? Array.from(query).length : 0
+    const minimum = capability.action.textMinLength ?? 1
+    const maximum = capability.action.textMaxLength ?? 80
+    if (typeof query !== 'string' || !query.trim() || length < minimum || length > maximum) {
+      throw preActionError(
+        'invalid_action',
+        `query must be a non-empty string of ${minimum} to ${maximum} characters.`,
+        400,
+      )
     }
     return
   }
@@ -1203,8 +1587,17 @@ function validateActionInput(
       if (typeof value !== 'string' || !field.dateLikeValues?.includes(value)) {
         throw preActionError('invalid_action', `${key} must be one of the visible ${field.type} values.`, 400)
       }
-    } else if (typeof value !== 'string' || Array.from(value).length > 200) {
-      throw preActionError('invalid_action', `${key} must be a string of at most 200 characters.`, 400)
+    } else {
+      const length = typeof value === 'string' ? Array.from(value).length : -1
+      const minimum = field.textMinLength ?? 0
+      const maximum = Math.min(200, field.textMaxLength ?? 200)
+      if (typeof value !== 'string' || length < minimum || length > maximum) {
+        throw preActionError(
+          'invalid_action',
+          `${key} must be a string of ${minimum} to ${maximum} characters.`,
+          400,
+        )
+      }
     }
   }
 }
@@ -1217,14 +1610,36 @@ async function applyAction(
 ): Promise<PendingActionEvidence> {
   if (action.kind === 'prepare_search' && action.backendNodeId && action.controlType) {
     const value = String(input.query)
-    const before = await readControlState(context, page, action.backendNodeId, action.controlType, true)
-    await writeControlState(context, page, action.backendNodeId, action.controlType, value)
+    const safetySnapshot = action.safetySnapshot as string
+    const before = await readControlState(
+      context,
+      page,
+      action.backendNodeId,
+      action.controlType,
+      true,
+      safetySnapshot,
+    )
+    await writeControlState(context, page, action.backendNodeId, action.controlType, value, safetySnapshot)
     return {
       navigationOccurred: false,
       stateChanged: async () =>
-        await readControlState(context, page, action.backendNodeId as number, action.controlType as string, true) !== before,
+        await readControlState(
+          context,
+          page,
+          action.backendNodeId as number,
+          action.controlType as string,
+          true,
+          safetySnapshot,
+        ) !== before,
       verify: async () => {
-        if (await readControlState(context, page, action.backendNodeId as number, action.controlType as string, true) !== value) {
+        if (await readControlState(
+          context,
+          page,
+          action.backendNodeId as number,
+          action.controlType as string,
+          true,
+          safetySnapshot,
+        ) !== value) {
           throw actionVerificationError('The page did not retain the prepared search value.')
         }
       },
@@ -1233,12 +1648,37 @@ async function applyAction(
   if (action.kind === 'filter' && action.backendNodeId) {
     const optionIndex = action.optionIndices?.[Number(input.optionIndex)]
     if (optionIndex === undefined) throw new Error('The requested filter option is no longer available.')
-    const before = await readControlState(context, page, action.backendNodeId, 'select-one', true, optionIndex)
-    await writeControlState(context, page, action.backendNodeId, 'select-one', optionIndex, optionIndex)
+    const safetySnapshot = action.safetySnapshot as string
+    const before = await readControlState(
+      context,
+      page,
+      action.backendNodeId,
+      'select-one',
+      true,
+      safetySnapshot,
+      optionIndex,
+    )
+    await writeControlState(
+      context,
+      page,
+      action.backendNodeId,
+      'select-one',
+      optionIndex,
+      safetySnapshot,
+      optionIndex,
+    )
     return {
       navigationOccurred: false,
       stateChanged: async () =>
-        await readControlState(context, page, action.backendNodeId as number, 'select-one', true, optionIndex) !== before,
+        await readControlState(
+          context,
+          page,
+          action.backendNodeId as number,
+          'select-one',
+          true,
+          safetySnapshot,
+          optionIndex,
+        ) !== before,
       verify: async () => {
         const selectedIndex = await readControlState(
           context,
@@ -1246,6 +1686,7 @@ async function applyAction(
           action.backendNodeId as number,
           'select-one',
           true,
+          safetySnapshot,
           optionIndex,
         )
         if (selectedIndex !== optionIndex) throw actionVerificationError('The page did not retain the selected filter option.')
@@ -1256,7 +1697,8 @@ async function applyAction(
     const url = action.urls?.[Number(input.linkIndex)]
     const backendNodeId = action.backendNodeIds?.[Number(input.linkIndex)]
     if (!url || !backendNodeId) throw new Error('The requested link is no longer available.')
-    await readLinkTarget(context, page, backendNodeId, url)
+    const safetySnapshot = action.safetySnapshots?.[Number(input.linkIndex)] as string
+    await readLinkTarget(context, page, backendNodeId, url, safetySnapshot)
     const before = page.url()
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
     return {
@@ -1276,10 +1718,34 @@ async function applyAction(
     if (field.type === 'select-one') {
       const optionIndex = field.optionIndices?.[Number(value)]
       if (optionIndex === undefined) throw new Error(`${field.key} no longer references a visible option.`)
-      const before = await readControlState(context, page, field.backendNodeId, field.type, true, optionIndex)
-      await writeControlState(context, page, field.backendNodeId, field.type, optionIndex, optionIndex)
+      const before = await readControlState(
+        context,
+        page,
+        field.backendNodeId,
+        field.type,
+        true,
+        field.safetySnapshot,
+        optionIndex,
+      )
+      await writeControlState(
+        context,
+        page,
+        field.backendNodeId,
+        field.type,
+        optionIndex,
+        field.safetySnapshot,
+        optionIndex,
+      )
       changeChecks.push(async () =>
-        await readControlState(context, page, field.backendNodeId, field.type, true, optionIndex) !== before)
+        await readControlState(
+          context,
+          page,
+          field.backendNodeId,
+          field.type,
+          true,
+          field.safetySnapshot,
+          optionIndex,
+        ) !== before)
       verifications.push(async () => {
         const selectedIndex = await readControlState(
           context,
@@ -1287,6 +1753,7 @@ async function applyAction(
           field.backendNodeId,
           field.type,
           true,
+          field.safetySnapshot,
           optionIndex,
         )
         if (selectedIndex !== optionIndex) throw actionVerificationError(`${field.key} did not retain the selected option.`)
@@ -1296,39 +1763,103 @@ async function applyAction(
       const selectedIndex = Number(value)
       const selectedBackendNodeId = backendNodeIds[selectedIndex]
       if (!selectedBackendNodeId) throw new Error(`${field.key} no longer references a visible radio choice.`)
-      const before = await Promise.all(backendNodeIds.map((backendNodeId) =>
-        readControlState(context, page, backendNodeId, 'radio', true)))
-      await writeControlState(context, page, selectedBackendNodeId, 'radio', true)
+      const safetySnapshots = field.safetySnapshots ?? []
+      const before = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
+        readControlState(context, page, backendNodeId, 'radio', true, safetySnapshots[index])))
+      await writeControlState(
+        context,
+        page,
+        selectedBackendNodeId,
+        'radio',
+        true,
+        safetySnapshots[selectedIndex],
+      )
       changeChecks.push(async () => {
-        const after = await Promise.all(backendNodeIds.map((backendNodeId) =>
-          readControlState(context, page, backendNodeId, 'radio', true)))
+        const after = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
+          readControlState(context, page, backendNodeId, 'radio', true, safetySnapshots[index])))
         return after.some((checked, index) => checked !== before[index])
       })
       verifications.push(async () => {
-        const after = await Promise.all(backendNodeIds.map((backendNodeId) =>
-          readControlState(context, page, backendNodeId, 'radio', true)))
+        const after = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
+          readControlState(context, page, backendNodeId, 'radio', true, safetySnapshots[index])))
         if (!after[selectedIndex] || after.filter(Boolean).length !== 1) {
           throw actionVerificationError(`${field.key} did not retain one exclusive radio choice.`)
         }
       })
     } else if (field.type === 'checkbox' || field.type === 'radio') {
-      const before = await readControlState(context, page, field.backendNodeId, field.type, true)
-      await writeControlState(context, page, field.backendNodeId, field.type, Boolean(value))
+      const before = await readControlState(
+        context,
+        page,
+        field.backendNodeId,
+        field.type,
+        true,
+        field.safetySnapshot,
+      )
+      await writeControlState(
+        context,
+        page,
+        field.backendNodeId,
+        field.type,
+        Boolean(value),
+        field.safetySnapshot,
+      )
       changeChecks.push(async () =>
-        await readControlState(context, page, field.backendNodeId, field.type, true) !== before)
+        await readControlState(
+          context,
+          page,
+          field.backendNodeId,
+          field.type,
+          true,
+          field.safetySnapshot,
+        ) !== before)
       verifications.push(async () => {
-        if (await readControlState(context, page, field.backendNodeId, field.type, true) !== value) {
+        if (await readControlState(
+          context,
+          page,
+          field.backendNodeId,
+          field.type,
+          true,
+          field.safetySnapshot,
+        ) !== value) {
           throw actionVerificationError(`${field.key} did not retain its checked state.`)
         }
       })
     } else {
       const stringValue = String(value)
-      const before = await readControlState(context, page, field.backendNodeId, field.type, true)
-      await writeControlState(context, page, field.backendNodeId, field.type, stringValue)
+      const before = await readControlState(
+        context,
+        page,
+        field.backendNodeId,
+        field.type,
+        true,
+        field.safetySnapshot,
+      )
+      await writeControlState(
+        context,
+        page,
+        field.backendNodeId,
+        field.type,
+        stringValue,
+        field.safetySnapshot,
+      )
       changeChecks.push(async () =>
-        await readControlState(context, page, field.backendNodeId, field.type, true) !== before)
+        await readControlState(
+          context,
+          page,
+          field.backendNodeId,
+          field.type,
+          true,
+          field.safetySnapshot,
+        ) !== before)
       verifications.push(async () => {
-        if (await readControlState(context, page, field.backendNodeId, field.type, true) !== stringValue) {
+        if (await readControlState(
+          context,
+          page,
+          field.backendNodeId,
+          field.type,
+          true,
+          field.safetySnapshot,
+        ) !== stringValue) {
           throw actionVerificationError(`${field.key} did not retain its prepared value.`)
         }
       })
@@ -1356,18 +1887,39 @@ async function actionWouldChange(
   input: Record<string, unknown>,
 ): Promise<boolean> {
   if (action.kind === 'prepare_search' && action.backendNodeId && action.controlType) {
-    return await readControlState(context, page, action.backendNodeId, action.controlType, true) !== String(input.query)
+    return await readControlState(
+      context,
+      page,
+      action.backendNodeId,
+      action.controlType,
+      true,
+      action.safetySnapshot as string,
+    ) !== String(input.query)
   }
   if (action.kind === 'filter' && action.backendNodeId) {
     const optionIndex = action.optionIndices?.[Number(input.optionIndex)]
     if (optionIndex === undefined) return true
-    return await readControlState(context, page, action.backendNodeId, 'select-one', true, optionIndex) !== optionIndex
+    return await readControlState(
+      context,
+      page,
+      action.backendNodeId,
+      'select-one',
+      true,
+      action.safetySnapshot as string,
+      optionIndex,
+    ) !== optionIndex
   }
   if (action.kind === 'navigation') {
     const url = action.urls?.[Number(input.linkIndex)]
     const backendNodeId = action.backendNodeIds?.[Number(input.linkIndex)]
     if (!url || !backendNodeId) return true
-    await readLinkTarget(context, page, backendNodeId, url)
+    await readLinkTarget(
+      context,
+      page,
+      backendNodeId,
+      url,
+      action.safetySnapshots?.[Number(input.linkIndex)] as string,
+    )
     return page.url() !== url
   }
   for (const field of action.fields ?? []) {
@@ -1376,13 +1928,42 @@ async function actionWouldChange(
     if (field.type === 'select-one') {
       const optionIndex = field.optionIndices?.[Number(value)]
       if (optionIndex === undefined) return true
-      if (await readControlState(context, page, field.backendNodeId, field.type, true, optionIndex) !== optionIndex) return true
+      if (await readControlState(
+        context,
+        page,
+        field.backendNodeId,
+        field.type,
+        true,
+        field.safetySnapshot,
+        optionIndex,
+      ) !== optionIndex) return true
     } else if (field.type === 'radio-group') {
       const selectedBackendNodeId = field.backendNodeIds?.[Number(value)]
-      if (!selectedBackendNodeId || !await readControlState(context, page, selectedBackendNodeId, 'radio', true)) return true
+      if (!selectedBackendNodeId || !await readControlState(
+        context,
+        page,
+        selectedBackendNodeId,
+        'radio',
+        true,
+        field.safetySnapshots?.[Number(value)] as string,
+      )) return true
     } else if (field.type === 'checkbox' || field.type === 'radio') {
-      if (await readControlState(context, page, field.backendNodeId, field.type, true) !== value) return true
-    } else if (await readControlState(context, page, field.backendNodeId, field.type, true) !== String(value)) {
+      if (await readControlState(
+        context,
+        page,
+        field.backendNodeId,
+        field.type,
+        true,
+        field.safetySnapshot,
+      ) !== value) return true
+    } else if (await readControlState(
+      context,
+      page,
+      field.backendNodeId,
+      field.type,
+      true,
+      field.safetySnapshot,
+    ) !== String(value)) {
       return true
     }
   }
@@ -1601,6 +2182,7 @@ export class WrapperProofService {
         formId: _formId,
         optionValues: _optionValues,
         optionIndices: _optionIndices,
+        selectSampleIndex: _selectSampleIndex,
         minimum: _minimum,
         maximum: _maximum,
         numericStep: _numericStep,
@@ -1611,6 +2193,11 @@ export class WrapperProofService {
         dateLikeValues: _dateLikeValues,
         dateLikeSample: _dateLikeSample,
         checked: _checked,
+        textMinLength: _textMinLength,
+        textMaxLength: _textMaxLength,
+        textSample: _textSample,
+        textUnsupported: _textUnsupported,
+        safetySnapshot: _safetySnapshot,
         ...evidence
       }) => evidence),
       axEvidence,

@@ -11,6 +11,8 @@ function control(overrides: Partial<DetectedControl>): DetectedControl {
     label: 'Visible field',
     backendNodeId: 1,
     sensitive: false,
+    textSample: 'Sample',
+    safetySnapshot: 'safe-snapshot',
     ...overrides,
   }
 }
@@ -26,6 +28,7 @@ describe('inferSafeCapabilities', () => {
         label: 'Category filter',
         optionCount: 3,
         optionValues: ['all', 'one', 'two'],
+        selectSampleIndex: 1,
       }),
     ])
 
@@ -77,7 +80,15 @@ describe('inferSafeCapabilities', () => {
   it('excludes sensitive and consequential form fields', () => {
     const capabilities = inferSafeCapabilities([
       control({ id: 'one', fieldKey: 'property_size', formId: 'form-1', type: 'number' }),
-      control({ id: 'two', fieldKey: 'building_type', formId: 'form-1', tag: 'select', type: 'select-one', optionValues: ['house', 'flat'] }),
+      control({
+        id: 'two',
+        fieldKey: 'building_type',
+        formId: 'form-1',
+        tag: 'select',
+        type: 'select-one',
+        optionValues: ['house', 'flat'],
+        selectSampleIndex: 1,
+      }),
       control({ id: 'three', fieldKey: 'email', formId: 'form-1', label: 'Email address', sensitive: true }),
       control({ id: 'four', fieldKey: 'message', formId: 'form-1', label: 'Message' }),
     ])
@@ -128,7 +139,61 @@ describe('inferSafeCapabilities', () => {
     ]))
   })
 
-  it('keeps generated select samples inside the enabled option range', () => {
+  it('samples a radio choice different from the analyzed checked choice', () => {
+    const capabilities = inferSafeCapabilities([
+      control({
+        id: 'radio-1',
+        backendNodeId: 11,
+        fieldKey: 'heating_mode',
+        formId: 'form-1',
+        type: 'radio',
+        checked: true,
+      }),
+      control({
+        id: 'radio-2',
+        backendNodeId: 12,
+        fieldKey: 'heating_mode',
+        formId: 'form-1',
+        type: 'radio',
+        checked: false,
+      }),
+      control({ id: 'notes', fieldKey: 'details', formId: 'form-1', type: 'text' }),
+    ])
+
+    expect(capabilities[0].sampleInput).toEqual({ field_1: 1, field_2: 'Sample' })
+  })
+
+  it('publishes conservative code-point bounds for native UTF-16 text limits', () => {
+    const capabilities = inferSafeCapabilities([
+      control({
+        id: 'bounded-text',
+        fieldKey: 'bounded',
+        formId: 'form-1',
+        type: 'text',
+        textMaxLength: 1,
+        textSample: 'A',
+      }),
+      control({
+        id: 'bounded-detail',
+        fieldKey: 'detail',
+        formId: 'form-1',
+        type: 'textarea',
+        textMinLength: 2,
+        textMaxLength: 2,
+        textSample: 'AA',
+      }),
+    ])
+
+    expect(capabilities[0].inputSchema).toMatchObject({
+      properties: {
+        field_1: { maxLength: 1 },
+        field_2: { minLength: 2, maxLength: 2 },
+      },
+    })
+    expect(capabilities[0].sampleInput).toEqual({ field_1: 'A', field_2: 'AA' })
+  })
+
+  it('excludes a select with no safe alternative state from generated form samples', () => {
     const capabilities = inferSafeCapabilities([
       control({
         id: 'select-1',
@@ -142,11 +207,27 @@ describe('inferSafeCapabilities', () => {
       control({ id: 'text-1', fieldKey: 'details', formId: 'form-1', type: 'text' }),
     ])
 
+    expect(capabilities.find(({ name }) => name === 'prepare_visible_form')).toBeUndefined()
+  })
+
+  it('keeps other executable fields when an unchanged single-option select is excluded', () => {
+    const capabilities = inferSafeCapabilities([
+      control({
+        id: 'select-1',
+        fieldKey: 'building_type',
+        formId: 'form-1',
+        tag: 'select',
+        type: 'select-one',
+        optionValues: ['only-enabled-option'],
+        optionIndices: [2],
+      }),
+      control({ id: 'text-1', fieldKey: 'first', formId: 'form-1', type: 'text' }),
+      control({ id: 'text-2', fieldKey: 'second', formId: 'form-1', type: 'text' }),
+    ])
+
     const form = capabilities.find(({ name }) => name === 'prepare_visible_form')!
-    expect(form.inputSchema).toMatchObject({
-      properties: { field_1: { minimum: 0, maximum: 0 } },
-    })
-    expect(form.sampleInput).toEqual({ field_1: 0, field_2: 'Sample' })
+    expect(Object.keys((form.inputSchema.properties ?? {}) as object)).toEqual(['field_1', 'field_2'])
+    expect(form.sampleInput).toEqual({ field_1: 'Sample', field_2: 'Sample' })
   })
 
   it('publishes numeric bounds, step grids, and executable samples from detected controls', () => {

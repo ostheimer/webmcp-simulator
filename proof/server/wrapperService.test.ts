@@ -290,8 +290,10 @@ async function startFixture(): Promise<Fixture> {
     if (requestUrl === '/single-select-form') {
       response.end(`<!doctype html><title>Single select form</title>
         <form>
-          <select name="building_type" aria-label="Building type">
-            <option disabled>Unavailable</option><option value="only">Only enabled option</option>
+          <select name="heating_choice" aria-label="Heating choice">
+            <option disabled>Unavailable</option>
+            <option value="first">First enabled option</option>
+            <option value="second" selected>Second enabled option</option>
           </select>
           <input type="text" name="details" aria-label="Details">
         </form>`)
@@ -314,6 +316,123 @@ async function startFixture(): Promise<Fixture> {
           </select>
           <input type="text" name="details" aria-label="Details">
         </form>`)
+      return
+    }
+    if (requestUrl === '/select-safety-contracts') {
+      response.end(`<!doctype html><title>Select safety contracts</title>
+        <select id="sensitive-option-text" aria-label="Category filter">
+          <option label="Neutral" value="safe">Credit card</option>
+          <option label="Other" value="other">Other</option>
+        </select>
+        <select id="sensitive-option-value" aria-label="Sort filter">
+          <option label="Neutral" value="payment-token">Neutral</option>
+          <option label="Other" value="other">Other</option>
+        </select>
+        <select id="safe-filter" aria-label="Status filter">
+          <option value="ready" selected>Ready</option>
+          <option value="waiting">Waiting</option>
+        </select>
+        <select id="disabled-flood" aria-label="Type filter"></select>
+        <script>
+          const flood = document.getElementById('disabled-flood');
+          for (let index = 0; index < 240; index += 1) {
+            const option = document.createElement('option');
+            option.disabled = true;
+            option.textContent = 'Unavailable ' + index;
+            flood.append(option);
+          }
+          for (const value of ['unsafe-after-budget', 'second-after-budget']) {
+            const option = document.createElement('option');
+            option.value = value;
+            option.textContent = value;
+            flood.append(option);
+          }
+        </script>`)
+      return
+    }
+    if (requestUrl === '/aggregate-safety-budget') {
+      response.end(`<!doctype html><title>Aggregate safety budget</title>
+        <input id="label-budget" type="text" aria-label="Label budget">
+        <input id="reference-budget" type="text" aria-label="Reference budget">
+        <select id="option-budget" aria-label="Option budget"></select>
+        <input id="safe-budget-search" type="search" aria-label="Safe aggregate search">
+        <script>
+          const labelFragment = document.createDocumentFragment();
+          for (let index = 0; index < 16; index += 1) {
+            const label = document.createElement('label');
+            label.htmlFor = 'label-budget';
+            label.hidden = true;
+            label.textContent = 'x'.repeat(1800);
+            labelFragment.append(label);
+          }
+          document.body.append(labelFragment);
+
+          const referenceIds = [];
+          const referenceFragment = document.createDocumentFragment();
+          for (let index = 0; index < 16; index += 1) {
+            const reference = document.createElement('span');
+            reference.id = 'aggregate-reference-' + index;
+            reference.hidden = true;
+            reference.textContent = 'y'.repeat(1800);
+            referenceIds.push(reference.id);
+            referenceFragment.append(reference);
+          }
+          document.body.append(referenceFragment);
+          document.getElementById('reference-budget').setAttribute('aria-describedby', referenceIds.join(' '));
+
+          const select = document.getElementById('option-budget');
+          for (let index = 0; index < 12; index += 1) {
+            const option = document.createElement('option');
+            option.label = 'l'.repeat(800);
+            option.textContent = 't'.repeat(800);
+            option.value = 'v'.repeat(800) + index;
+            select.append(option);
+          }
+        </script>`)
+      return
+    }
+    if (requestUrl === '/text-contracts') {
+      response.end(`<!doctype html><title>Text contracts</title>
+        <form id="too-short-contract">
+          <input id="max-one" type="text" maxlength="1" aria-label="Tiny value">
+          <input id="max-one-detail" type="text" maxlength="1" aria-label="Tiny detail">
+        </form>
+        <form id="bounded-contract">
+          <input id="max-two" type="text" maxlength="2" value="🙂" aria-label="Bounded value">
+          <textarea id="bounded-textarea" minlength="2" maxlength="4" aria-label="Bounded detail"></textarea>
+        </form>
+        <form id="pattern-contract">
+          <input id="pattern-control" type="text" maxlength="20" pattern="[A-Z]+" aria-label="Pattern value">
+          <input id="pattern-detail" type="text" maxlength="20" aria-label="Pattern detail">
+        </form>
+        <form id="late-pattern-contract">
+          <input id="late-pattern" type="text" maxlength="20" aria-label="Late pattern value">
+          <input id="late-pattern-detail" type="text" maxlength="20" aria-label="Late pattern detail">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/checked-radio-groups') {
+      response.end(`<!doctype html><title>Checked radio groups</title>
+        <form id="first-radio-form">
+          <input id="first-a" type="radio" name="first_mode" value="a" checked><label for="first-a">First A</label>
+          <input id="first-b" type="radio" name="first_mode" value="b"><label for="first-b">First B</label>
+          <input type="text" aria-label="First detail">
+        </form>
+        <form id="second-radio-form">
+          <input id="second-a" type="radio" name="second_mode" value="a" checked><label for="second-a">Second A</label>
+          <input id="second-b" type="radio" name="second_mode" value="b"><label for="second-b">Second B</label>
+          <input type="text" aria-label="Second detail">
+        </form>
+        <form id="single-radio-form">
+          <input id="single-radio" type="radio" name="single_mode" value="a" checked><label for="single-radio">Single choice</label>
+          <input type="text" aria-label="Single detail">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/safety-race') {
+      response.end(`<!doctype html><title>Safety race</title>
+        <input id="race-search" type="search" aria-label="Race search"
+          oninput="this.setAttribute('aria-label', 'Credit card')">`)
       return
     }
     if (requestUrl === '/action-operability') {
@@ -816,7 +935,7 @@ describe('WrapperProofService security boundaries', () => {
 
     const selectAnalysis = await service.analyze(`${fixture.origin}/single-select-form`)
     const selectForm = selectAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
-    expect(selectForm.sampleInput).toEqual({ field_1: 0, field_2: 'Sample' })
+    expect(selectForm.sampleInput).toEqual({ field_1: 0, field_2: 'A' })
     const selectResult = await service.execute(
       selectAnalysis.sessionId,
       selectAnalysis.sessionToken,
@@ -869,7 +988,7 @@ describe('WrapperProofService security boundaries', () => {
     expect(form.inputSchema).toMatchObject({
       properties: { field_1: { minimum: 0, maximum: 1 } },
     })
-    expect(form.sampleInput).toEqual({ field_1: 1, field_2: 'Sample' })
+    expect(form.sampleInput).toEqual({ field_1: 1, field_2: 'A' })
     const formResult = await service.execute(
       analysis.sessionId,
       analysis.sessionToken,
@@ -901,6 +1020,318 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       currentForm.id,
     )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+  })
+
+  it('classifies every retained select label, text, and value and samples a different safe option', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/select-safety-contracts`)
+
+    expect(analysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))).toEqual([
+      { label: 'Category filter', sensitive: true },
+      { label: 'Sort filter', sensitive: true },
+      { label: 'Status filter', sensitive: false },
+      { label: 'Type filter', sensitive: false },
+    ])
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'filter')).toHaveLength(1)
+    expect(filter.sampleInput).toEqual({ optionIndex: 1 })
+    expect(filter.inputSchema).toMatchObject({
+      properties: { optionIndex: { minimum: 0, maximum: 1 } },
+    })
+    const result = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )
+    expect(result.structuredContent).toMatchObject({
+      isolatedStateChanged: true,
+      targetStateVerified: true,
+    })
+    expect(await internalSession(service, analysis.sessionId).page.locator('#safe-filter').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(1)
+  })
+
+  it('fails closed on cumulative per-control safety evidence while keeping another control usable', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/aggregate-safety-budget`)
+
+    expect(analysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))).toEqual([
+      { label: 'Label budget', sensitive: true },
+      { label: 'Reference budget', sensitive: true },
+      { label: 'Option budget', sensitive: true },
+      { label: 'Safe aggregate search', sensitive: false },
+    ])
+    expect(analysis.capabilities.map(({ name }) => name)).toEqual(['prepare_page_search'])
+    const search = analysis.capabilities[0]
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
+  })
+
+  it('keeps native text contracts aligned for schema, samples, Unicode, and pre-action validation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/text-contracts`)
+
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    const bounded = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(bounded.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'string', maxLength: 1 },
+        field_2: { type: 'string', minLength: 2, maxLength: 2 },
+      },
+    })
+    expect(bounded.sampleInput).toEqual({ field_1: 'A', field_2: 'AA' })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      bounded.name,
+      { field_1: '🙂🙂' },
+      undefined,
+      bounded.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      bounded.name,
+      { field_2: '🙂' },
+      undefined,
+      bounded.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
+
+    const prepared = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      bounded.name,
+      bounded.sampleInput,
+      undefined,
+      bounded.id,
+    )
+    expect(prepared.structuredContent).toMatchObject({
+      isolatedStateChanged: true,
+      targetStateVerified: true,
+    })
+    analysis = prepared.analysis
+    const boundedAgain = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      boundedAgain.name,
+      { field_1: '🙂' },
+      undefined,
+      boundedAgain.id,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
+
+    expect(analysis.domEvidence.find(({ label }) => label === 'Tiny value')).toMatchObject({ sensitive: false })
+    expect(analysis.domEvidence.find(({ label }) => label === 'Pattern value')).toMatchObject({ sensitive: false })
+  })
+
+  it('excludes native-pattern fields and rejects a pattern added after analysis before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/text-contracts`)
+    const latePatternForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(Object.keys((latePatternForm.inputSchema.properties ?? {}) as object)).toEqual(['field_1', 'field_2'])
+    expect(analysis.capabilities.some(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Pattern value'))).toBe(false)
+
+    await page.locator('#late-pattern').evaluate((input) => input.setAttribute('pattern', '[0-9]+'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      latePatternForm.name,
+      { field_1: 'A' },
+      undefined,
+      latePatternForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409, sessionInvalidated: false })
+    expect(await page.locator('#late-pattern').inputValue()).toBe('')
+
+    await page.locator('#late-pattern').evaluate((input) => input.removeAttribute('pattern'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      latePatternForm.name,
+      { field_1: 'A' },
+      undefined,
+      latePatternForm.id,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
+  })
+
+  it('samples a different checked radio choice and excludes a single-choice group', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/checked-radio-groups`)
+    const forms = analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')
+    expect(forms).toHaveLength(2)
+
+    for (let index = 0; index < forms.length; index += 1) {
+      const form = analysis.capabilities.find(({ name }) =>
+        name === (index === 0 ? 'prepare_visible_form' : 'prepare_visible_form_2'))!
+      expect(form.sampleInput).toMatchObject({ field_1: 1 })
+      const result = await service.execute(
+        analysis.sessionId,
+        analysis.sessionToken,
+        form.name,
+        form.sampleInput,
+        undefined,
+        form.id,
+      )
+      expect(result.structuredContent).toMatchObject({
+        isolatedStateChanged: true,
+        targetStateVerified: true,
+      })
+      analysis = result.analysis
+    }
+
+    const page = internalSession(service, analysis.sessionId).page
+    expect(await page.locator('#first-a, #first-b, #second-a, #second-b').evaluateAll(
+      (radios) => radios.map((radio) => (radio as HTMLInputElement).checked),
+    )).toEqual([false, true, false, true])
+    expect(analysis.capabilities.some(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Single choice'))).toBe(false)
+  })
+
+  it('revalidates page-authored safety evidence before read, write, and verification', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    const page = internalSession(service, analysis.sessionId).page
+
+    const searchMutations = [
+      { attribute: 'aria-label', value: 'Credit card', original: 'Search catalog' },
+      { attribute: 'autocomplete', value: 'current-password', original: null },
+      { attribute: 'name', value: 'userPassword', original: 'search_term' },
+      { attribute: 'id', value: 'creditCard', original: null },
+      { attribute: 'pattern', value: '[0-9]+', original: null },
+    ]
+    for (const mutation of searchMutations) {
+      await page.locator('[type=search]').evaluate((input, current) => {
+        input.setAttribute(current.attribute, current.value)
+      }, mutation)
+      await expect(service.execute(
+        analysis.sessionId,
+        analysis.sessionToken,
+        search.name,
+        { query: 'must not mutate' },
+        undefined,
+        search.id,
+      )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+      expect(await page.locator('[type=search]').inputValue()).toBe('')
+      await page.locator('[type=search]').evaluate((input, current) => {
+        if (current.original === null) input.removeAttribute(current.attribute)
+        else input.setAttribute(current.attribute, current.original)
+      }, mutation)
+    }
+
+    await page.locator('[type=search]').evaluate((input) => {
+      const description = document.createElement('span')
+      description.id = 'password-description'
+      description.textContent = 'User password'
+      document.body.append(description)
+      input.setAttribute('aria-describedby', description.id)
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'must not describe' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('[type=search]').inputValue()).toBe('')
+    await page.locator('[type=search]').evaluate((input) => input.removeAttribute('aria-describedby'))
+
+    await page.locator('select[aria-label="Category filter"] option[value="one"]').evaluate((option) => {
+      option.textContent = 'Credit card'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('select[aria-label="Category filter"]').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(1)
+    await page.locator('select[aria-label="Category filter"] option[value="one"]').evaluate((option) => {
+      option.textContent = 'One'
+    })
+
+    await page.locator('a[href="/next"]').evaluate((link) => link.setAttribute('title', 'Purchase'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      navigation.sampleInput,
+      undefined,
+      navigation.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(fixture.requests).not.toContain('/next')
+    await page.locator('a[href="/next"]').evaluate((link) => link.removeAttribute('title'))
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'safe after restore' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('invalidates when safety evidence changes during the begun action', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/safety-race`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'agent value' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('invalidates when a selected option becomes effectively disabled before verification', async () => {

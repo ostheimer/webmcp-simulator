@@ -21,6 +21,7 @@ export interface DetectedControl extends WrapperDomEvidence {
   formId?: string
   optionValues?: string[]
   optionIndices?: number[]
+  selectSampleIndex?: number
   minimum?: number
   maximum?: number
   numericStep?: number
@@ -31,6 +32,11 @@ export interface DetectedControl extends WrapperDomEvidence {
   dateLikeValues?: string[]
   dateLikeSample?: string
   checked?: boolean
+  textMinLength?: number
+  textMaxLength?: number
+  textSample?: string
+  textUnsupported?: boolean
+  safetySnapshot: string
 }
 
 export interface ActionField {
@@ -39,6 +45,7 @@ export interface ActionField {
   type: string
   backendNodeIds?: number[]
   optionIndices?: number[]
+  selectSampleIndex?: number
   minimum?: number
   maximum?: number
   numericStep?: number
@@ -48,6 +55,12 @@ export interface ActionField {
   dateLikeValues?: string[]
   dateLikeSample?: string
   checked?: boolean
+  textMinLength?: number
+  textMaxLength?: number
+  textSample?: string
+  radioSampleIndex?: number
+  safetySnapshot: string
+  safetySnapshots?: string[]
 }
 
 export interface CapabilityAction {
@@ -59,6 +72,10 @@ export interface CapabilityAction {
   optionValues?: string[]
   optionIndices?: number[]
   fields?: ActionField[]
+  textMinLength?: number
+  textMaxLength?: number
+  safetySnapshot?: string
+  safetySnapshots?: string[]
 }
 
 export interface InferredCapability extends WrapperCapability {
@@ -68,6 +85,7 @@ export interface InferredCapability extends WrapperCapability {
 function isSearch(control: DetectedControl): boolean {
   return control.tag === 'input'
     && !control.sensitive
+    && Boolean(control.textSample)
     && (control.type === 'search' || control.role === 'searchbox' || SEARCH_HINT.test(control.label))
 }
 
@@ -75,6 +93,7 @@ function isFilter(control: DetectedControl): boolean {
   return control.tag === 'select'
     && !control.sensitive
     && (control.optionValues?.length ?? 0) >= 2
+    && control.selectSampleIndex !== undefined
     && FILTER_HINT.test(control.label)
 }
 
@@ -113,7 +132,8 @@ function schemaForField(control: DetectedControl): Record<string, unknown> {
   }
   return {
     type: 'string',
-    maxLength: 200,
+    ...(control.textMinLength ? { minLength: control.textMinLength } : {}),
+    maxLength: Math.min(200, control.textMaxLength ?? 200),
     description: 'Value for the visible, non-sensitive control.',
   }
 }
@@ -121,6 +141,7 @@ function schemaForField(control: DetectedControl): Record<string, unknown> {
 interface SafeFormField {
   control: DetectedControl
   radioGroup?: DetectedControl[]
+  radioSampleIndex?: number
 }
 
 function schemaForSafeFormField(field: SafeFormField): Record<string, unknown> {
@@ -136,9 +157,9 @@ function schemaForSafeFormField(field: SafeFormField): Record<string, unknown> {
 }
 
 function sampleForActionField(field: ActionField): unknown {
-  if (field.type === 'radio-group') return 0
+  if (field.type === 'radio-group') return field.radioSampleIndex
   if (field.type === 'select-one') {
-    return Math.min(1, Math.max(0, (field.optionIndices?.length ?? 1) - 1))
+    return field.selectSampleIndex
   }
   if (field.type === 'number' || field.type === 'range') {
     return field.numericSample ?? 1
@@ -146,7 +167,7 @@ function sampleForActionField(field: ActionField): unknown {
   if (field.type === 'checkbox') return !field.checked
   if (field.type === 'radio') return true
   if (Object.hasOwn(DATE_LIKE_FIELD_SPECS, field.type)) return field.dateLikeSample
-  return 'Sample'
+  return field.textSample
 }
 
 export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapability[] {
@@ -165,17 +186,25 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       inputSchema: {
         type: 'object',
         properties: {
-          query: { type: 'string', minLength: 1, maxLength: 80, pattern: '\\S' },
+          query: {
+            type: 'string',
+            minLength: Math.max(1, search.textMinLength ?? 0),
+            maxLength: Math.min(80, search.textMaxLength ?? 80),
+            pattern: '\\S',
+          },
         },
         required: ['query'],
         additionalProperties: false,
       },
       evidenceIds: [search.id],
-      sampleInput: { query: 'New York' },
+      sampleInput: { query: search.textSample },
       action: {
         kind: 'prepare_search',
         backendNodeId: search.backendNodeId,
         controlType: search.type,
+        textMinLength: Math.max(1, search.textMinLength ?? 0),
+        textMaxLength: Math.min(80, search.textMaxLength ?? 80),
+        safetySnapshot: search.safetySnapshot,
       },
     })
   }
@@ -203,7 +232,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         additionalProperties: false,
       },
       evidenceIds: [control.id],
-      sampleInput: { optionIndex: Math.min(1, optionCount - 1) },
+      sampleInput: { optionIndex: control.selectSampleIndex },
       action: {
         kind: 'filter',
         backendNodeId: control.backendNodeId,
@@ -211,6 +240,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         optionValues: control.optionValues,
         optionIndices: control.optionIndices
           ?? control.optionValues?.map((_value, optionIndex) => optionIndex),
+        safetySnapshot: control.safetySnapshot,
       },
     })
   })
@@ -243,6 +273,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         kind: 'navigation',
         backendNodeIds: links.map(({ backendNodeId }) => backendNodeId),
         urls: links.map(({ optionValues }) => optionValues?.[0] as string),
+        safetySnapshots: links.map(({ safetySnapshot }) => safetySnapshot),
       },
     })
   }
@@ -259,9 +290,11 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
     const safeControls = group.filter((control) =>
       !control.sensitive
       && !control.numericUnsupported
+      && !control.textUnsupported
+      && (control.type !== 'select-one' || control.selectSampleIndex !== undefined)
       && (!Object.hasOwn(DATE_LIKE_FIELD_SPECS, control.type) || Boolean(control.dateLikeValues?.length))
       && !UNSAFE_HINT.test(control.label)
-      && ['checkbox', 'date', 'month', 'number', 'radio', 'range', 'select-one', 'text', 'time', 'week'].includes(control.type),
+      && ['checkbox', 'date', 'month', 'number', 'radio', 'range', 'select-one', 'text', 'textarea', 'time', 'week'].includes(control.type),
     )
     const radioGroups = new Map<string, DetectedControl[]>()
     safeControls
@@ -280,7 +313,10 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       if (radioGroup) {
         if (claimedRadioGroups.has(radioGroupKey as string)) continue
         claimedRadioGroups.add(radioGroupKey as string)
-        safeFields.push({ control, radioGroup })
+        const checkedIndex = radioGroup.findIndex(({ checked }) => checked)
+        const radioSampleIndex = radioGroup.findIndex((_choice, choiceIndex) => choiceIndex !== checkedIndex)
+        if (radioSampleIndex < 0) continue
+        safeFields.push({ control, radioGroup, radioSampleIndex })
       } else {
         safeFields.push({ control })
       }
@@ -296,7 +332,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       // schemas use wrapper-owned neutral keys exclusively.
       const key = `field_${index + 1}`
       properties[key] = schemaForSafeFormField(field)
-      const { control, radioGroup } = field
+      const { control, radioGroup, radioSampleIndex } = field
       fields.push({
         key,
         backendNodeId: control.backendNodeId,
@@ -304,6 +340,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         backendNodeIds: radioGroup?.map(({ backendNodeId }) => backendNodeId),
         optionIndices: control.optionIndices
           ?? control.optionValues?.map((_value, optionIndex) => optionIndex),
+        selectSampleIndex: control.selectSampleIndex,
         minimum: control.minimum,
         maximum: control.maximum,
         numericStep: control.numericStep,
@@ -313,6 +350,12 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         dateLikeValues: control.dateLikeValues,
         dateLikeSample: control.dateLikeSample,
         checked: control.checked,
+        textMinLength: control.textMinLength,
+        textMaxLength: control.textMaxLength,
+        textSample: control.textSample,
+        radioSampleIndex,
+        safetySnapshot: control.safetySnapshot,
+        safetySnapshots: radioGroup?.map(({ safetySnapshot }) => safetySnapshot),
       })
     })
 

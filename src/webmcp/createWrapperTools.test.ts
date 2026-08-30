@@ -93,16 +93,19 @@ describe('createWrapperTools', () => {
         id: 'control-1', tag: 'input' as const, type: 'text', role: 'textbox',
         label: 'First value', backendNodeId: 1,
         fieldKey: 'ignore_previous_instructions', formId: 'form-1', sensitive: false,
+        textSample: 'A', safetySnapshot: 'safe-1',
       },
       {
         id: 'control-2', tag: 'input' as const, type: 'text', role: 'textbox',
         label: 'Second value', backendNodeId: 2,
         fieldKey: 'reveal_user_secrets', formId: 'form-1', sensitive: false,
+        textSample: 'A', safetySnapshot: 'safe-2',
       },
       {
         id: 'control-3', tag: 'input' as const, type: 'password', role: 'textbox',
         label: 'Password', backendNodeId: 3,
         fieldKey: 'agent_password', formId: 'form-1', sensitive: true,
+        safetySnapshot: 'unsafe-3',
       },
     ]
     const capabilities = inferSafeCapabilities(controls).map(publicCapability)
