@@ -1,8 +1,9 @@
 import { createServer, type Server } from 'node:http'
+import { createSocket } from 'node:dgram'
 import { once } from 'node:events'
 import { gzipSync } from 'node:zlib'
-import type { Page } from 'playwright'
-import { afterEach, describe, expect, it } from 'vitest'
+import type { Browser, Page } from 'playwright'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PublicTarget } from './publicTarget.ts'
 import { WRAPPER_SESSION_TTL_MS } from './wrapperLimits.ts'
 import {
@@ -718,6 +719,96 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/owner-context-safety') {
+      response.end(`<!doctype html><title>Owner context safety</title>
+        <style>fieldset{border:0;margin:0;padding:0}</style>
+        <form aria-label="Payment">
+          <input type="text" aria-label="Sensitive owner value">
+          <input type="text" aria-label="Sensitive owner detail">
+        </form>
+        <form>
+          <fieldset title="User password">
+            <input type="text" aria-label="Sensitive fieldset value">
+            <input type="text" aria-label="Sensitive fieldset detail">
+          </fieldset>
+        </form>
+        <form>
+          <fieldset>
+            <legend>Credit card reference</legend>
+            <input type="text" aria-label="Sensitive legend value">
+            <input type="text" aria-label="Sensitive legend detail">
+          </fieldset>
+        </form>
+        <form id="late-owner-form" aria-label="Reference context">
+          <fieldset id="late-owner-fieldset" title="Overview">
+            <legend id="late-owner-legend">Reference options</legend>
+            <input id="late-owner-value" type="text" aria-label="Late owner value">
+            <input id="late-owner-detail" type="text" aria-label="Late owner detail">
+          </fieldset>
+        </form>
+        <form aria-label="Neutral context">
+          <fieldset title="Overview"><legend>Reference options</legend>
+            <input type="text" aria-label="Neutral owner value">
+            <input type="text" aria-label="Neutral owner detail">
+          </fieldset>
+        </form>
+        <form id="owner-reference-overflow" aria-label="Reference context">
+          <input type="text" aria-label="Reference overflow value">
+          <input type="text" aria-label="Reference overflow detail">
+        </form>
+        <form id="owner-depth-overflow" aria-label="Reference context"></form>
+        <form id="owner-text-overflow" aria-label="Reference context">
+          <fieldset><legend id="owner-huge-legend"></legend>
+            <input type="text" aria-label="Text overflow value">
+            <input type="text" aria-label="Text overflow detail">
+          </fieldset>
+        </form>
+        <form id="owner-aggregate-overflow" aria-label="Reference context">
+          <input type="text" aria-label="Aggregate overflow value">
+          <input type="text" aria-label="Aggregate overflow detail">
+        </form>
+        <form id="owner-fieldset-overflow" aria-label="Reference context"></form>
+        <script>
+          const referenceIds = [];
+          for (let index = 0; index < 17; index += 1) {
+            const reference = document.createElement('span');
+            reference.id = 'owner-reference-' + index;
+            reference.textContent = 'Reference ' + index;
+            document.body.append(reference);
+            referenceIds.push(reference.id);
+          }
+          document.getElementById('owner-reference-overflow').setAttribute('aria-labelledby', referenceIds.join(' '));
+
+          let depthRoot = document.getElementById('owner-depth-overflow');
+          for (let index = 0; index < 260; index += 1) {
+            const wrapper = document.createElement('div');
+            depthRoot.append(wrapper);
+            depthRoot = wrapper;
+          }
+          depthRoot.innerHTML = '<input type="text" aria-label="Depth overflow value"><input type="text" aria-label="Depth overflow detail">';
+          document.getElementById('owner-huge-legend').textContent = 'x'.repeat(5000);
+
+          const aggregateIds = [];
+          for (let index = 0; index < 7; index += 1) {
+            const reference = document.createElement('span');
+            reference.id = 'owner-aggregate-' + index;
+            reference.textContent = 'x'.repeat(4000);
+            document.body.append(reference);
+            aggregateIds.push(reference.id);
+          }
+          document.getElementById('owner-aggregate-overflow').setAttribute('aria-describedby', aggregateIds.join(' '));
+
+          let fieldsetRoot = document.getElementById('owner-fieldset-overflow');
+          for (let index = 0; index < 17; index += 1) {
+            const fieldset = document.createElement('fieldset');
+            fieldset.setAttribute('aria-label', 'Reference group ' + index);
+            fieldsetRoot.append(fieldset);
+            fieldsetRoot = fieldset;
+          }
+          fieldsetRoot.innerHTML = '<input type="text" aria-label="Fieldset overflow value"><input type="text" aria-label="Fieldset overflow detail">';
+        </script>`)
+      return
+    }
     if (requestUrl === '/unicode-safety-normalization') {
       response.end(`<!doctype html><title>Unicode safety normalization</title>
         <form id="zero-width-sensitive-form">
@@ -1049,6 +1140,86 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl.startsWith('/webtransport-egress')) {
+      const probePort = new URL(requestUrl, 'http://fixture.invalid').searchParams.get('port') ?? '1'
+      const transportUrl = `https://127.0.0.1:${probePort}`
+      response.end(`<!doctype html><title>WebTransport boundary</title>
+        <input type="search" aria-label="Allowed page search">
+        <script>
+          globalThis.webTransportProof = {
+            window: 'pending', dedicated: 'pending', shared: 'pending', worklet: 'pending'
+          };
+          try {
+            new WebTransport(${JSON.stringify(transportUrl)});
+            webTransportProof.window = 'constructed';
+          } catch (error) {
+            webTransportProof.window = error && error.name === 'SecurityError' ? 'blocked' : 'error';
+          }
+          const workerSource = ${JSON.stringify(`
+            self.onmessage = ({ data }) => {
+              try {
+                const transport = new WebTransport(data);
+                transport.ready.then(
+                  () => self.postMessage('connected'),
+                  () => self.postMessage('blocked'),
+                );
+              } catch { self.postMessage('blocked'); }
+            };
+          `)};
+          try {
+            const worker = new Worker(URL.createObjectURL(new Blob([workerSource], { type: 'text/javascript' })));
+            worker.onmessage = ({ data }) => { webTransportProof.dedicated = data; worker.terminate(); };
+            worker.postMessage(${JSON.stringify(transportUrl)});
+          } catch { webTransportProof.dedicated = 'blocked'; }
+          try {
+            const sharedSource = ${JSON.stringify(`
+              self.onconnect = (event) => {
+                const port = event.ports[0];
+                port.onmessage = ({ data }) => {
+                  try {
+                    const transport = new WebTransport(data);
+                    transport.ready.then(
+                      () => port.postMessage('connected'),
+                      () => port.postMessage('blocked'),
+                    );
+                  } catch { port.postMessage('blocked'); }
+                };
+                port.start();
+              };
+            `)};
+            const shared = new SharedWorker(URL.createObjectURL(new Blob([sharedSource], { type: 'text/javascript' })));
+            shared.port.onmessage = ({ data }) => { webTransportProof.shared = data; shared.port.close(); };
+            shared.port.start();
+            shared.port.postMessage(${JSON.stringify(transportUrl)});
+          } catch { webTransportProof.shared = 'blocked'; }
+          (async () => {
+            try {
+              const context = new OfflineAudioContext(1, 128, 44100);
+              const moduleSource = ${JSON.stringify(`
+                class WebTransportProbe extends AudioWorkletProcessor {
+                  constructor() {
+                    super();
+                    let result = 'not-exposed';
+                    if (typeof WebTransport === 'function') {
+                      try { new WebTransport('${transportUrl}'); result = 'constructed'; }
+                      catch { result = 'blocked'; }
+                    }
+                    this.port.postMessage(result);
+                  }
+                  process() { return false; }
+                }
+                registerProcessor('webtransport-probe', WebTransportProbe);
+              `)};
+              await context.audioWorklet.addModule(URL.createObjectURL(new Blob([moduleSource], { type: 'text/javascript' })));
+              const node = new AudioWorkletNode(context, 'webtransport-probe');
+              node.port.onmessage = ({ data }) => { webTransportProof.worklet = data; };
+              node.connect(context.destination);
+              await context.startRendering();
+            } catch { webTransportProof.worklet = 'probe-error'; }
+          })();
+        </script>`)
+      return
+    }
     if (requestUrl === '/unsafe-links') {
       response.end(`<!doctype html><title>Unsafe links</title>
         <a href="/booking">Learn more</a>
@@ -1198,6 +1369,72 @@ describe('isConsequentialNavigationUrl', () => {
 })
 
 describe('WrapperProofService security boundaries', () => {
+  it('retains capacity for aborted pending launches until every late browser is closed', async () => {
+    const pendingLaunches: Array<{
+      resolveBrowser: (browser: Browser) => void
+      close: ReturnType<typeof vi.fn>
+      finishClose: () => void
+    }> = []
+    const launchBrowser = vi.fn(() => {
+      let resolveBrowser!: (browser: Browser) => void
+      let resolveClose!: () => void
+      const close = vi.fn(() => new Promise<void>((resolve) => { resolveClose = resolve }))
+      const browser = { close } as unknown as Browser
+      const launch = new Promise<Browser>((resolve) => { resolveBrowser = resolve })
+      pendingLaunches.push({
+        resolveBrowser,
+        close,
+        finishClose: () => resolveClose(),
+      })
+      return launch.then(() => browser)
+    })
+    const service = new WrapperProofService({
+      resolveTarget: async (value) => {
+        const url = new URL(value)
+        return {
+          url: url.toString(),
+          origin: url.origin,
+          hostname: url.hostname,
+          pinnedAddress: '203.0.113.10',
+          addresses: [{ address: '203.0.113.10', family: 4 }],
+        }
+      },
+      launchBrowser,
+    })
+    services.push(service)
+
+    const controllers = Array.from({ length: 3 }, () => new AbortController())
+    const attempts = controllers.map((controller) =>
+      service.analyze('https://public.example.at/', controller.signal))
+    await vi.waitFor(() => expect(launchBrowser).toHaveBeenCalledTimes(3))
+    controllers.forEach((controller) => controller.abort())
+    await Promise.all(attempts.map((attempt) =>
+      expect(attempt).rejects.toMatchObject({ name: 'AbortError' })))
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 3 })
+
+    await expect(service.analyze('https://public.example.at/')).rejects.toMatchObject({
+      code: 'sandbox_capacity',
+      status: 503,
+    })
+    expect(launchBrowser).toHaveBeenCalledTimes(3)
+
+    pendingLaunches.forEach(({ resolveBrowser }) => resolveBrowser({} as Browser))
+    await vi.waitFor(() => pendingLaunches.forEach(({ close }) => expect(close).toHaveBeenCalledOnce()))
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 3 })
+    pendingLaunches.forEach(({ finishClose }) => finishClose())
+    await vi.waitFor(() => expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 }))
+
+    const recoveryController = new AbortController()
+    const recovery = service.analyze('https://public.example.at/', recoveryController.signal)
+    await vi.waitFor(() => expect(launchBrowser).toHaveBeenCalledTimes(4))
+    recoveryController.abort()
+    await expect(recovery).rejects.toMatchObject({ name: 'AbortError' })
+    pendingLaunches[3]!.resolveBrowser({} as Browser)
+    await vi.waitFor(() => expect(pendingLaunches[3]!.close).toHaveBeenCalledOnce())
+    pendingLaunches[3]!.finishClose()
+    await vi.waitFor(() => expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 }))
+  })
+
   it('releases analysis reservations after target-resolution failures', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -2026,6 +2263,92 @@ describe('WrapperProofService security boundaries', () => {
       referencedForm.sampleInput,
       undefined,
       referencedForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('classifies bounded form, fieldset, and legend context and revalidates owner mutations', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/owner-context-safety`)
+
+    const evidenceByLabel = new Map(analysis.domEvidence.map((evidence) => [evidence.label, evidence]))
+    for (const label of [
+      'Sensitive owner value',
+      'Sensitive owner detail',
+      'Sensitive fieldset value',
+      'Sensitive fieldset detail',
+      'Sensitive legend value',
+      'Sensitive legend detail',
+      'Reference overflow value',
+      'Reference overflow detail',
+      'Depth overflow value',
+      'Depth overflow detail',
+      'Text overflow value',
+      'Text overflow detail',
+      'Aggregate overflow value',
+      'Aggregate overflow detail',
+      'Fieldset overflow value',
+      'Fieldset overflow detail',
+    ]) expect(evidenceByLabel.get(label)?.sensitive).toBe(true)
+
+    const forms = analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')
+    expect(forms).toHaveLength(2)
+    const lateForm = forms.find(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Late owner value'))!
+    const page = internalSession(service, analysis.sessionId).page
+
+    const expectLateMutationRejected = async (
+      selector: string,
+      attribute: string | undefined,
+      unsafeValue: string,
+      safeValue: string,
+    ) => {
+      await page.locator(selector).evaluate((node, mutation) => {
+        if (mutation.attribute) node.setAttribute(mutation.attribute, mutation.value)
+        else node.textContent = mutation.value
+      }, { attribute, value: unsafeValue })
+      await expect(service.execute(
+        analysis.sessionId,
+        analysis.sessionToken,
+        lateForm.name,
+        lateForm.sampleInput,
+        undefined,
+        lateForm.id,
+      )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+      expect(await page.locator('#late-owner-value').inputValue()).toBe('')
+      expect(await page.locator('#late-owner-detail').inputValue()).toBe('')
+      await page.locator(selector).evaluate((node, mutation) => {
+        if (mutation.attribute) node.setAttribute(mutation.attribute, mutation.value)
+        else node.textContent = mutation.value
+      }, { attribute, value: safeValue })
+    }
+
+    await expectLateMutationRejected('#late-owner-form', 'aria-label', 'Payment', 'Reference context')
+    await expectLateMutationRejected('#late-owner-fieldset', 'title', 'User password', 'Overview')
+    await expectLateMutationRejected('#late-owner-legend', undefined, 'Credit card', 'Reference options')
+
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+    const neutralForm = analysis.capabilities.find(({ kind, evidenceIds }) =>
+      kind === 'prepare_form' && evidenceIds.some((id) =>
+        analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Neutral owner value'))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
@@ -3447,6 +3770,60 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({
       structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
     })
+  })
+
+  it('blocks WebTransport egress process-wide across page and worker realms', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const probe = createSocket('udp4')
+    let probeDatagrams = 0
+    probe.on('message', () => { probeDatagrams += 1 })
+    probe.bind(0, '127.0.0.1')
+    await once(probe, 'listening')
+    const probeAddress = probe.address()
+    const fixtureAddress = fixture.server.address()
+    if (typeof probeAddress === 'string' || !fixtureAddress || typeof fixtureAddress === 'string') {
+      throw new Error('WebTransport fixture did not expose local ports.')
+    }
+    const origin = `http://127.0.0.1:${fixtureAddress.port}`
+    const service = new WrapperProofService({
+      actionSettleMs: 20,
+      resolveTarget: async (value) => {
+        const url = new URL(value)
+        return {
+          url: url.toString(),
+          origin: url.origin,
+          hostname: url.hostname,
+          pinnedAddress: '127.0.0.1',
+          addresses: [{ address: '127.0.0.1', family: 4 }],
+        }
+      },
+    })
+    services.push(service)
+
+    try {
+      const analysis = await service.analyze(
+        `${origin}/webtransport-egress?port=${probeAddress.port}`,
+      )
+      const page = internalSession(service, analysis.sessionId).page
+      await page.waitForTimeout(1_000)
+      const realmResults = await page.evaluate(() =>
+        (globalThis as typeof globalThis & {
+          webTransportProof: Record<string, string>
+        }).webTransportProof)
+      expect(realmResults).toEqual({
+        window: 'blocked',
+        dedicated: 'blocked',
+        shared: 'blocked',
+        worklet: 'not-exposed',
+      })
+      await new Promise((resolve) => setTimeout(resolve, 250))
+      expect(probeDatagrams).toBe(0)
+      expect(analysis.capabilities.some(({ kind }) => kind === 'prepare_search')).toBe(true)
+    } finally {
+      probe.close()
+      await once(probe, 'close')
+    }
   })
 
   it('rejects repeated search and filter values before mutation while preserving the session', async () => {

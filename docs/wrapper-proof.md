@@ -25,6 +25,10 @@ React wrapper page
      -> reject a declared response above 4 MiB and continuously stop loading
         when decoded/encoded CDP traffic exceeds 4 MiB per resource or 20 MiB
         cumulatively across the short-lived session
+     -> disable QUIC as the process-wide WebTransport egress boundary for the
+        pinned, regression-tested Chromium build;
+        additionally block WebTransport in document realms and disable dedicated
+        and shared worker construction before page scripts run
      -> block frames, popups, downloads, WebSocket, EventSource, WebRTC,
         sendBeacon, service workers, uploads, and non-read HTTP methods
      -> collect only DOM controls/links with visible pixels inside the fixed
@@ -80,6 +84,11 @@ placeholder, name, ID, and autocomplete. Reference, label, image, traversal,
 and aggregate text budgets fail closed on overflow. Controls without a genuine
 bounded identifying source are excluded; public display labels remain bounded
 and do not determine whether a field is sensitive.
+Each control's exact private snapshot also includes its owning form and every
+bounded ancestor fieldset: their ARIA/name/ID/title evidence, referenced nodes,
+and bounded legends are classified and revalidated before every read, write, or
+verification. Overflow in owner count, ancestry, references, text, or aggregate
+evidence excludes the control; owner text never enters public tool metadata.
 Filter and navigation choices use numeric indices. Password, secret, token,
 email, phone, message, payment, account, upload, purchase, booking, publishing,
 deletion, and similar controls are excluded.
@@ -135,6 +144,19 @@ metadata.
   persistence, account, or multi-tenant layer.
 - Browser automation detection, CSP, consent walls, or rendering failures are
   reported as unsupported. The wrapper does not bypass them.
+- Local analysis has one fixed 35-second deadline beginning before request-body
+  consumption. Request abort or deadline expiry propagates through target
+  resolution, Chromium launch, CDP setup, navigation, and atomic capture; every
+  partial browser/session/reservation is closed before capacity becomes reusable.
+- Playwright HTTP and WebSocket routing is not treated as a WebTransport guard.
+  The current lockfile-resolved Playwright 1.62.1 / Chromium 151.0.7922.34 build
+  runs with QUIC disabled for every renderer realm; this implementation assumption
+  must be revalidated before any Chromium or Playwright upgrade because future
+  WebTransport transports may differ.
+  Document WebTransport and dedicated/shared worker construction are additionally blocked.
+  Service workers are disabled by the browser context. Current Chromium exposes
+  WebTransport to Window/Worker, not Worklet globals; the regression exercises
+  Window, dedicated worker, shared worker, and an AudioWorklet exposure probe.
 - Preparation is a network-silent boundary: all HTTP requests are blocked from
   before the first DOM mutation until the session closes. Explicit navigation
   separately permits same-origin document/static-resource GET/HEAD reads and

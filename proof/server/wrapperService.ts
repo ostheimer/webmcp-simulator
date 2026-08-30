@@ -131,6 +131,8 @@ interface AxNode {
 
 export interface WrapperProofServiceOptions {
   resolveTarget?: (value: string) => Promise<PublicTarget>
+  /** Test-only browser-launch injection for pending-launch lifecycle regression coverage. */
+  launchBrowser?: (options: Parameters<typeof chromium.launch>[0]) => Promise<Browser>
   actionStartDelayMs?: number
   actionSettleMs?: number
   sessionExpiresAtMs?: number
@@ -450,6 +452,7 @@ function captureIsolatedSafetyEvidence(
   ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string }>
   ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string }>
   anchorImageAlts: string[]
+  ownerContextEvidence: string[]
 } {
   const getAttribute = Element.prototype.getAttribute
   const matches = Element.prototype.matches
@@ -515,8 +518,8 @@ function captureIsolatedSafetyEvidence(
     if (!overflow && nodesInspected === 256 && nextNode.call(walker)) overflow = true
     return { values, overflow: aggregateOverflow || overflow }
   }
-  const referenced = (attribute: string) => {
-    const rawSource = getAttribute.call(element, attribute) ?? ''
+  const referenced = (root: Element, attribute: string) => {
+    const rawSource = getAttribute.call(root, attribute) ?? ''
     const raw = bounded(rawSource)
     const ids: string[] = []
     let cursor = 0
@@ -562,6 +565,127 @@ function captureIsolatedSafetyEvidence(
       overflow: aggregateOverflow || overflow || entries.some((entry) => entry.overflow),
     }
   }
+  const ownerContextEvidence: string[] = []
+  const ownerContextSnapshots: Array<{ kind: string, values: string[] }> = []
+  let ownerContextOverflow = false
+  const captureOwnerContextNode = (
+    root: Element,
+    kind: 'form' | 'fieldset' | 'legend',
+    includeText: boolean,
+  ) => {
+    const values: string[] = []
+    const retainExisting = (slot: string, value: string) => {
+      values.push(slot, value)
+      ownerContextEvidence.push(value)
+    }
+    const retain = (slot: string, value: unknown) => {
+      const captured = bounded(value)
+      retainExisting(slot, captured.value)
+      ownerContextOverflow ||= captured.overflow
+    }
+    for (const name of [
+      'aria-label',
+      'aria-description',
+      'aria-labelledby',
+      'aria-describedby',
+      'title',
+      'name',
+      'id',
+      'role',
+    ]) retain(`attribute:${name}`, getAttribute.call(root, name) ?? '')
+    for (const attribute of ['aria-labelledby', 'aria-describedby']) {
+      const reference = referenced(root, attribute)
+      retainExisting(`${attribute}:raw`, reference.raw)
+      reference.ids.forEach((id, index) => retainExisting(`${attribute}:id:${index}`, id))
+      reference.entries.forEach((entry, index) => {
+        retainExisting(`${attribute}:text:${index}`, entry.text.value)
+        entry.imageAlts.forEach((alt, altIndex) =>
+          retainExisting(`${attribute}:image:${index}:${altIndex}`, alt))
+        retainExisting(`${attribute}:aria-label:${index}`, entry.ariaLabel.value)
+        retainExisting(`${attribute}:title:${index}`, entry.title.value)
+      })
+      ownerContextOverflow ||= reference.overflow
+    }
+    if (includeText) {
+      const text = boundedNodeText(root)
+      retainExisting('text', text.value)
+      const imageAlts = boundedDescendantImageAlts(root)
+      imageAlts.values.forEach((alt, index) => retainExisting(`image:${index}`, alt))
+      ownerContextOverflow ||= text.overflow || imageAlts.overflow
+    }
+    ownerContextSnapshots.push({ kind, values })
+  }
+  let ownerForm: HTMLFormElement | null = null
+  if (
+    element instanceof HTMLInputElement
+    || element instanceof HTMLSelectElement
+    || element instanceof HTMLTextAreaElement
+  ) {
+    const prototype = element instanceof HTMLSelectElement
+      ? HTMLSelectElement.prototype
+      : element instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype
+    const formGetter = Object.getOwnPropertyDescriptor(prototype, 'form')?.get
+    if (!formGetter) ownerContextOverflow = true
+    else ownerForm = formGetter.call(element) as HTMLFormElement | null
+  }
+  if (ownerForm) captureOwnerContextNode(ownerForm, 'form', false)
+
+  const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get
+  if (!parentElementGetter) {
+    ownerContextOverflow = true
+  } else {
+    let ancestor = parentElementGetter.call(element) as Element | null
+    let ancestorsInspected = 0
+    let fieldsetsCaptured = 0
+    while (ancestor && ancestorsInspected < 256) {
+      ancestorsInspected += 1
+      if (ancestor instanceof HTMLFieldSetElement) {
+        fieldsetsCaptured += 1
+        if (fieldsetsCaptured > 16) {
+          ownerContextOverflow = true
+          break
+        }
+        captureOwnerContextNode(ancestor, 'fieldset', false)
+        const legendWalker = createTreeWalker.call(document, ancestor, NodeFilter.SHOW_ELEMENT)
+        let legendNodesInspected = 0
+        let legendsCaptured = 0
+        let legendTraversalComplete = false
+        while (legendNodesInspected < 256) {
+          const candidate = nextNode.call(legendWalker) as Element | null
+          if (!candidate) {
+            legendTraversalComplete = true
+            break
+          }
+          legendNodesInspected += 1
+          if (!(candidate instanceof HTMLLegendElement)) continue
+          let owner = parentElementGetter.call(candidate) as Element | null
+          let ownerHops = 0
+          while (owner && !(owner instanceof HTMLFieldSetElement) && ownerHops < 256) {
+            owner = parentElementGetter.call(owner) as Element | null
+            ownerHops += 1
+          }
+          if (ownerHops >= 256) {
+            ownerContextOverflow = true
+            break
+          }
+          if (owner !== ancestor) continue
+          legendsCaptured += 1
+          if (legendsCaptured > 16) {
+            ownerContextOverflow = true
+            break
+          }
+          captureOwnerContextNode(candidate, 'legend', true)
+        }
+        if (!legendTraversalComplete && !ownerContextOverflow && nextNode.call(legendWalker)) {
+          ownerContextOverflow = true
+        }
+      }
+      ancestor = parentElementGetter.call(ancestor) as Element | null
+    }
+    if (ancestor) ownerContextOverflow = true
+  }
   const attributeNames = [
     'aria-label',
     'aria-labelledby',
@@ -592,8 +716,8 @@ function captureIsolatedSafetyEvidence(
     if (aggregateOverflow) break
     attributes.push({ name, ...bounded(getAttribute.call(element, name) ?? '') })
   }
-  const ariaLabelled = referenced('aria-labelledby')
-  const ariaDescribed = referenced('aria-describedby')
+  const ariaLabelled = referenced(element, 'aria-labelledby')
+  const ariaDescribed = referenced(element, 'aria-describedby')
   const labels: Array<{
     text: { value: string, overflow: boolean }
     imageAlts: string[]
@@ -692,6 +816,7 @@ function captureIsolatedSafetyEvidence(
     || anchorText.overflow
     || anchorImageAlts.overflow
     || optionOverflow
+    || ownerContextOverflow
   if (overflow) {
     return {
       snapshot: '',
@@ -701,6 +826,7 @@ function captureIsolatedSafetyEvidence(
       ariaLabelledEntries: [],
       ariaDescribedEntries: [],
       anchorImageAlts: [],
+      ownerContextEvidence: [],
     }
   }
   const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title }) => ({
@@ -732,6 +858,7 @@ function captureIsolatedSafetyEvidence(
       anchorText: anchorText.value,
       anchorImageAlts: anchorImageAlts.values,
       optionEntries,
+      ownerContext: ownerContextSnapshots,
       overflow,
     })
   if (snapshot.length > maxTotalSafetyEvidenceLength) {
@@ -743,6 +870,7 @@ function captureIsolatedSafetyEvidence(
       ariaLabelledEntries: [],
       ariaDescribedEntries: [],
       anchorImageAlts: [],
+      ownerContextEvidence: [],
     }
   }
   return {
@@ -753,6 +881,7 @@ function captureIsolatedSafetyEvidence(
     ariaLabelledEntries,
     ariaDescribedEntries,
     anchorImageAlts: anchorImageAlts.values,
+    ownerContextEvidence,
   }
 }
 
@@ -1265,6 +1394,7 @@ function classifyDomInIsolatedWorld({
           optionText,
           optionValue,
         ]),
+        ...safetyCapture.ownerContextEvidence,
       ].map((value) => String(value ?? ''))
       const hasUnsafeEvidence = safetyEvidenceSources.some((value) => {
         const tokenized = tokenizeEvidence(value)
@@ -2696,6 +2826,7 @@ export class WrapperProofService {
   private sessions = new Map<string, ProofSession>()
   private analysisReservations = 0
   private readonly resolveTarget: (value: string) => Promise<PublicTarget>
+  private readonly launchBrowser: (options: Parameters<typeof chromium.launch>[0]) => Promise<Browser>
   private readonly actionStartDelayMs: number
   private readonly actionSettleMs: number
   private readonly sessionExpiresAtMs: number
@@ -2705,6 +2836,7 @@ export class WrapperProofService {
 
   constructor(options: WrapperProofServiceOptions = {}) {
     this.resolveTarget = options.resolveTarget ?? resolvePublicTarget
+    this.launchBrowser = options.launchBrowser ?? ((launchOptions) => chromium.launch(launchOptions))
     this.actionStartDelayMs = options.actionStartDelayMs ?? 0
     this.actionSettleMs = options.actionSettleMs ?? ACTION_SETTLE_MS
     this.sessionExpiresAtMs = options.sessionExpiresAtMs ?? Number.POSITIVE_INFINITY
@@ -3002,11 +3134,12 @@ export class WrapperProofService {
       reservationActive = false
       this.analysisReservations -= 1
     }
+    let pendingLaunchOwnsReservation = false
     try {
       throwIfAborted(signal)
       const target = await raceWithSignal(this.resolveTarget(value), signal)
       const pinnedAddress = target.pinnedAddress.includes(':') ? `[${target.pinnedAddress}]` : target.pinnedAddress
-      const browserLaunch = chromium.launch({
+      const browserLaunch = this.launchBrowser({
         headless: true,
         chromiumSandbox: true,
         args: [
@@ -3014,6 +3147,10 @@ export class WrapperProofService {
           '--disable-background-networking',
           '--disable-breakpad',
           '--disable-component-update',
+          // The pinned Chromium build implements WebTransport over QUIC outside
+          // Playwright's request routing. Revalidate this process-wide guard
+          // before every Chromium/Playwright upgrade.
+          '--disable-quic',
           '--disable-sync',
           '--no-first-run',
         ],
@@ -3023,7 +3160,11 @@ export class WrapperProofService {
         browser = await raceWithSignal(browserLaunch, signal)
       } catch (error) {
         if (signal?.aborted) {
-          void browserLaunch.then((launchedBrowser) => launchedBrowser.close()).catch(() => undefined)
+          pendingLaunchOwnsReservation = true
+          void browserLaunch
+            .then((launchedBrowser) => launchedBrowser.close())
+            .catch(() => undefined)
+            .finally(releaseAnalysisReservation)
           throw analysisAbortError()
         }
         throw error
@@ -3042,6 +3183,24 @@ export class WrapperProofService {
         viewport: { width: CAPTURE_VIEWPORT_WIDTH, height: CAPTURE_VIEWPORT_HEIGHT },
       }), signal)
       await raceWithSignal(context.addInitScript(() => {
+        Object.defineProperty(globalThis, 'WebTransport', {
+          configurable: false,
+          value: class BlockedWebTransport {
+            constructor() {
+              throw new DOMException('WebTransport is disabled in the isolated proof.', 'SecurityError')
+            }
+          },
+        })
+        for (const constructorName of ['Worker', 'SharedWorker'] as const) {
+          Object.defineProperty(globalThis, constructorName, {
+            configurable: false,
+            value: class BlockedWorkerRealm {
+              constructor() {
+                throw new DOMException('Worker realms are disabled in the isolated proof.', 'SecurityError')
+              }
+            },
+          })
+        }
         Object.defineProperty(window, 'WebSocket', {
           configurable: false,
           value: class BlockedWebSocket {
@@ -3226,7 +3385,7 @@ export class WrapperProofService {
         throw error
       }
     } finally {
-      releaseAnalysisReservation()
+      if (!pendingLaunchOwnsReservation) releaseAnalysisReservation()
     }
   }
 

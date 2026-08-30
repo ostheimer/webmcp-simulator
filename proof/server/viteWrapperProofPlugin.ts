@@ -1,7 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Plugin } from 'vite'
 import { WrapperProofService } from './wrapperService.ts'
-import { WRAPPER_MAX_REQUEST_BODY_BYTES } from './wrapperLimits.ts'
+import {
+  WRAPPER_ANALYSIS_TIMEOUT_MS,
+  WRAPPER_MAX_REQUEST_BODY_BYTES,
+} from './wrapperLimits.ts'
 import { WrapperServiceError } from './wrapperErrors.ts'
 
 export function localPublicError(
@@ -49,14 +52,45 @@ function localBoundaryError(
   )
 }
 
-async function readJson(request: IncomingMessage, actionRequest: boolean): Promise<Record<string, unknown>> {
+function localAbortError(): DOMException {
+  return new DOMException('The local wrapper request was cancelled.', 'AbortError')
+}
+
+async function raceLocalSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise
+  if (signal.aborted) {
+    void promise.catch(() => undefined)
+    throw localAbortError()
+  }
+  let rejectAbort!: (reason: DOMException) => void
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject
+  })
+  const onAbort = () => rejectAbort(localAbortError())
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await Promise.race([promise, aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
+}
+
+async function readJson(
+  request: IncomingMessage,
+  actionRequest: boolean,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
   const declaredLength = Number(request.headers['content-length'] ?? 0)
   if (Number.isFinite(declaredLength) && declaredLength > WRAPPER_MAX_REQUEST_BODY_BYTES) {
     throw localBoundaryError('Request body is too large.', 413, actionRequest, 'body_limit')
   }
   const chunks: Buffer[] = []
   let size = 0
-  for await (const chunk of request) {
+  const iterator = request[Symbol.asyncIterator]()
+  while (true) {
+    const next = await raceLocalSignal(iterator.next(), signal)
+    if (next.done) break
+    const chunk = next.value
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     size += buffer.length
     if (size > WRAPPER_MAX_REQUEST_BODY_BYTES) {
@@ -110,8 +144,19 @@ function assertLocalApiRequest(request: IncomingMessage, actionRequest: boolean)
   }
 }
 
-export function wrapperProofPlugin(service = new WrapperProofService()): Plugin {
+export interface WrapperProofPluginOptions {
+  /** Test-only override. Production-like local development uses the fixed shared limit. */
+  analysisTimeoutMs?: number
+  /** Test-only scheduling hook for the post-result/pre-response deadline boundary. */
+  beforeAnalyzeResponse?: () => Promise<void>
+}
+
+export function wrapperProofPlugin(
+  service = new WrapperProofService(),
+  options: WrapperProofPluginOptions = {},
+): Plugin {
   const activeAnalyses = new Set<string>()
+  const analysisTimeoutMs = options.analysisTimeoutMs ?? WRAPPER_ANALYSIS_TIMEOUT_MS
   return {
     name: 'webmcp-wrapper-proof',
     apply: 'serve',
@@ -135,14 +180,23 @@ export function wrapperProofPlugin(service = new WrapperProofService()): Plugin 
           }
           if (request.method === 'POST' && request.url === '/analyze') {
             const controller = new AbortController()
-            const abort = () => controller.abort()
-            const abortOnClosedResponse = () => {
-              if (!response.writableEnded) controller.abort()
+            let requestAborted = false
+            let deadlineExpired = false
+            const abort = () => {
+              requestAborted = true
+              controller.abort()
             }
+            const abortOnClosedResponse = () => {
+              if (!response.writableEnded) abort()
+            }
+            const deadline = setTimeout(() => {
+              deadlineExpired = true
+              controller.abort()
+            }, analysisTimeoutMs)
             request.once('aborted', abort)
             response.once('close', abortOnClosedResponse)
             try {
-              const body = await readJson(request, false)
+              const body = await readJson(request, false, controller.signal)
               if (typeof body.url !== 'string') {
                 throw localBoundaryError('url must be a string.', 400, false)
               }
@@ -153,8 +207,16 @@ export function wrapperProofPlugin(service = new WrapperProofService()): Plugin 
               activeAnalyses.add(clientId)
               try {
                 const analysis = await service.analyze(body.url, controller.signal)
+                await options.beforeAnalyzeResponse?.()
                 if (controller.signal.aborted) {
                   await service.closeSession(analysis.sessionId, analysis.sessionToken)
+                  if (deadlineExpired && !requestAborted) {
+                    throw new WrapperServiceError(
+                      'analysis_timeout',
+                      'The isolated website analysis exceeded its safety deadline.',
+                      504,
+                    )
+                  }
                   return
                 }
                 sendJson(response, 200, analysis)
@@ -162,8 +224,17 @@ export function wrapperProofPlugin(service = new WrapperProofService()): Plugin 
                 activeAnalyses.delete(clientId)
               }
             } catch (error) {
-              if (!controller.signal.aborted) throw error
+              if (requestAborted) return
+              if (deadlineExpired) {
+                throw new WrapperServiceError(
+                  'analysis_timeout',
+                  'The isolated website analysis exceeded its safety deadline.',
+                  504,
+                )
+              }
+              throw error
             } finally {
+              clearTimeout(deadline)
               request.off('aborted', abort)
               response.off('close', abortOnClosedResponse)
             }

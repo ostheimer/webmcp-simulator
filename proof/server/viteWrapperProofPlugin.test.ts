@@ -233,6 +233,134 @@ describe('local wrapper API error boundary', () => {
     }
   })
 
+  it('enforces one fixed local analysis deadline before and after browser launch and frees capacity', async () => {
+    const heldResponses: ServerResponse[] = []
+    let postLaunchRequests = 0
+    const targetServer = createHttpServer((request, response) => {
+      response.setHeader('Content-Type', 'text/html; charset=utf-8')
+      if (request.url === '/post-launch-stall') {
+        postLaunchRequests += 1
+        response.write('<!doctype html><title>Post launch stall</title><main>')
+        heldResponses.push(response)
+        return
+      }
+      response.end('<!doctype html><title>Deadline recovered</title><input type="search" aria-label="Recovered search">')
+    })
+    targetServer.listen(0, '127.0.0.1')
+    await once(targetServer, 'listening')
+    const targetAddress = targetServer.address()
+    if (!targetAddress || typeof targetAddress === 'string') throw new Error('Target fixture did not expose a port.')
+    const targetOrigin = `http://proof.example.at:${targetAddress.port}`
+    const resolveTarget = async (value: string): Promise<PublicTarget> => {
+      const url = new URL(value)
+      if (url.pathname === '/pre-session-stall') {
+        await new Promise<never>(() => undefined)
+      }
+      return {
+        url: url.toString(),
+        origin: url.origin,
+        hostname: url.hostname,
+        pinnedAddress: '127.0.0.1',
+        addresses: [{ address: '127.0.0.1', family: 4 }],
+      }
+    }
+    const service = new WrapperProofService({ resolveTarget, actionSettleMs: 20 })
+    const vite = await createViteServer({
+      appType: 'custom',
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [wrapperProofPlugin(service, { analysisTimeoutMs: 1_200 })],
+      server: { host: '127.0.0.1', port: 0 },
+    })
+    await vite.listen()
+    const viteAddress = vite.httpServer?.address()
+    if (!viteAddress || typeof viteAddress === 'string') throw new Error('Vite fixture did not expose a port.')
+    const apiOrigin = `http://127.0.0.1:${viteAddress.port}`
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-WebMCP-Client': 'local-deadline-client-01',
+    }
+    const analyze = (path: string) => fetch(`${apiOrigin}/api/wrapper/analyze`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ url: `${targetOrigin}${path}` }),
+    })
+    const expectDeadline = async (path: string) => {
+      const response = await analyze(path)
+      expect(response.status).toBe(504)
+      const body = await response.json()
+      expect(body).toEqual({
+        error: 'The isolated website analysis exceeded its safety deadline.',
+        code: 'analysis_timeout',
+      })
+      expect(JSON.stringify(body)).not.toMatch(/secret|token|path|chromium|playwright/i)
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 0, reservations: 0 })
+    }
+
+    try {
+      await expectDeadline('/pre-session-stall')
+      await expectDeadline('/post-launch-stall')
+      expect(postLaunchRequests).toBe(1)
+      await vi.waitFor(() => expect(heldResponses[0]?.destroyed).toBe(true), { timeout: 2_000 })
+
+      const recovered = await analyze('/')
+      expect(recovered.status).toBe(200)
+      expect((await recovered.json() as WrapperAnalysis).title).toBe('Deadline recovered')
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 1, reservations: 0 })
+    } finally {
+      heldResponses.splice(0).forEach((response) => response.destroy())
+      await vite.close()
+      await service.close()
+      targetServer.close()
+      await once(targetServer, 'close')
+    }
+  })
+
+  it('closes a completed analysis exactly once and returns 504 when the deadline wins before response send', async () => {
+    const analysis = {
+      sessionId: 'post-result-session',
+      sessionToken: 'post-result-token',
+    } as WrapperAnalysis
+    const analyze = vi.fn(async () => analysis)
+    const closeSession = vi.fn(async () => true)
+    const close = vi.fn(async () => undefined)
+    const service = { analyze, closeSession, close } as unknown as WrapperProofService
+    const vite = await createViteServer({
+      appType: 'custom',
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [wrapperProofPlugin(service, {
+        analysisTimeoutMs: 20,
+        beforeAnalyzeResponse: () => new Promise((resolve) => setTimeout(resolve, 50)),
+      })],
+      server: { host: '127.0.0.1', port: 0 },
+    })
+    await vite.listen()
+    const viteAddress = vite.httpServer?.address()
+    if (!viteAddress || typeof viteAddress === 'string') throw new Error('Vite fixture did not expose a port.')
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${viteAddress.port}/api/wrapper/analyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-WebMCP-Client': 'post-result-deadline-01',
+        },
+        body: JSON.stringify({ url: 'https://example.com/' }),
+      })
+      expect(response.status).toBe(504)
+      expect(await response.json()).toEqual({
+        error: 'The isolated website analysis exceeded its safety deadline.',
+        code: 'analysis_timeout',
+      })
+      expect(analyze).toHaveBeenCalledOnce()
+      expect(closeSession).toHaveBeenCalledOnce()
+      expect(closeSession).toHaveBeenCalledWith('post-result-session', 'post-result-token')
+    } finally {
+      await vite.close()
+    }
+  })
+
   it('admits at most three concurrent analyses across distinct browser clients', async () => {
     const heldResponses: ServerResponse[] = []
     let slowRequests = 0
