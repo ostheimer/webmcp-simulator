@@ -30,7 +30,7 @@ try {
     toolName: capability.name,
     input: capability.sampleInput,
   })
-  const after = digest(action.screenshotDataUrl)
+  const after = digest(action.analysis.screenshotDataUrl)
   if (before === after) throw new Error('The isolated screenshot did not change.')
   if (action.finalUrl !== action.analysis.finalUrl || !action.structuredContent.targetStateVerified) {
     throw new Error('The action did not return verified current-page state.')

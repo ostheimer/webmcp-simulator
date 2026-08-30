@@ -66,7 +66,6 @@ const analysis: WrapperAnalysis = {
 function actionResult(nextAnalysis: WrapperAnalysis): WrapperActionResult {
   return {
     finalUrl: nextAnalysis.finalUrl,
-    screenshotDataUrl: nextAnalysis.screenshotDataUrl,
     analysis: nextAnalysis,
     activity: {
       id: 'activity-current',

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { WrapperActionResult, WrapperAnalysis } from '../../src/features/wrapper/types.ts'
 import type { ProductionWrapperBackend } from './productionApi.ts'
 import {
   BoundedRateStore,
@@ -7,7 +8,11 @@ import {
   handleCloseRequest,
   handleHealthRequest,
 } from './productionApi.ts'
-import { WRAPPER_MAX_REQUEST_BODY_BYTES, WRAPPER_MAX_RESPONSE_BYTES } from './wrapperLimits.ts'
+import {
+  WRAPPER_MAX_REQUEST_BODY_BYTES,
+  WRAPPER_MAX_RESPONSE_BYTES,
+  WRAPPER_MAX_SCREENSHOT_BYTES,
+} from './wrapperLimits.ts'
 import { WrapperServiceError } from './wrapperErrors.ts'
 
 function request(
@@ -165,6 +170,97 @@ describe('production wrapper API boundaries', () => {
     }, { clientId: 'response_limit_client_01' }), target)
     expect(response.status).toBe(507)
     expect(await response.json()).toMatchObject({ code: 'response_limit' })
+  })
+
+  it('serializes a critical-size action screenshot exactly once below the API limit', async () => {
+    const jpegBytes = 850 * 1024
+    expect(jpegBytes).toBeLessThanOrEqual(WRAPPER_MAX_SCREENSHOT_BYTES)
+    const criticalScreenshot = `data:image/jpeg;base64,${Buffer.alloc(jpegBytes).toString('base64')}`
+    const analysis: WrapperAnalysis = {
+      sessionId: 'session-critical-size',
+      sessionToken: 'token-critical-size',
+      requestedUrl: 'https://public.example.at/',
+      finalUrl: 'https://public.example.at/',
+      title: 'Critical screenshot fixture',
+      screenshotDataUrl: criticalScreenshot,
+      domEvidence: [],
+      axEvidence: [],
+      capabilities: [],
+      warnings: [],
+      blockedRequests: 0,
+      analyzedPages: 1,
+      maxPages: 10,
+      expiresAt: '2026-08-30T10:05:00.000Z',
+      runtime: {
+        provider: 'vercel-sandbox',
+        runtimeMs: 100,
+        vcpus: 2,
+        memoryMb: 4096,
+        allowedNetworkRequests: 1,
+        blockedNetworkRequests: 0,
+        estimatedCost: {
+          currency: 'USD',
+          lowerBound: 0,
+          upperBound: 0.0001,
+          basis: 'illustrative-list-price',
+        },
+      },
+      createdAt: '2026-08-30T10:00:00.000Z',
+    }
+    const action: WrapperActionResult = {
+      finalUrl: analysis.finalUrl,
+      analysis,
+      activity: {
+        id: 'activity-critical-size',
+        toolName: 'prepare_page_search',
+        summary: 'Prepared.',
+        createdAt: analysis.createdAt,
+      },
+      structuredContent: {
+        toolName: 'prepare_page_search',
+        actionKind: 'prepare_search',
+        finalUrl: analysis.finalUrl,
+        isolatedStateChanged: true,
+        targetStateVerified: true,
+        networkPolicy: 'blocked-after-preparation',
+        blockedNetworkRequests: 0,
+        allowedNetworkRequests: 0,
+        formSubmissionPrevented: true,
+        navigationOccurred: false,
+      },
+    }
+    const target = backend({
+      analyze: vi.fn(async () => analysis),
+      execute: vi.fn(async () => action),
+    })
+    const options = {
+      clientId: 'critical_screenshot_client_01',
+      sourceIp: '198.51.100.211',
+    }
+
+    const analysisResponse = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: analysis.requestedUrl,
+    }, options), target)
+    expect(analysisResponse.status).toBe(200)
+    expect(Buffer.byteLength(await analysisResponse.clone().text())).toBeLessThan(WRAPPER_MAX_RESPONSE_BYTES)
+
+    const actionResponse = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: analysis.sessionId,
+      sessionToken: analysis.sessionToken,
+      capabilityId: 'capability-critical-size',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, options), target)
+    expect(actionResponse.status).toBe(200)
+    const actionText = await actionResponse.text()
+    expect(Buffer.byteLength(actionText)).toBeLessThan(WRAPPER_MAX_RESPONSE_BYTES)
+    expect(actionText.match(/data:image\/jpeg;base64/g)).toHaveLength(1)
+    const actionBody = JSON.parse(actionText) as Record<string, unknown>
+    expect(actionBody).not.toHaveProperty('screenshotDataUrl')
+    expect(actionBody).not.toHaveProperty('sessionInvalidated')
+    expect(actionBody).toMatchObject({
+      analysis: { screenshotDataUrl: criticalScreenshot },
+    })
   })
 
   it('allows only one running analysis per client and rate-limits repeated starts', async () => {

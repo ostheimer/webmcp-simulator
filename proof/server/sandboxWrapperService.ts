@@ -506,7 +506,12 @@ export class SandboxWrapperService {
         startedAtMs,
         this.now,
       )
-      return { ...result, analysis, finalUrl: analysis.finalUrl, screenshotDataUrl: analysis.screenshotDataUrl }
+      return {
+        finalUrl: analysis.finalUrl,
+        analysis,
+        activity: result.activity,
+        structuredContent: result.structuredContent,
+      }
     } catch (error) {
       const nonMutating = isNonMutatingActionRejection(error)
       if (!nonMutating) {

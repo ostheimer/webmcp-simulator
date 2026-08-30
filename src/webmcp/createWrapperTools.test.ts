@@ -48,7 +48,6 @@ describe('createWrapperTools', () => {
   it('registers only fixed capability metadata and calls the isolated handler', async () => {
     const execute = vi.fn().mockResolvedValue({
       finalUrl: analysis.finalUrl,
-      screenshotDataUrl: 'data:image/jpeg;base64,BB==',
       analysis,
       activity: {
         id: 'activity-1',

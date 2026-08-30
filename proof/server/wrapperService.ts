@@ -40,7 +40,7 @@ const CAPTURE_VIEWPORT_HEIGHT = 900
 const MAX_SAFETY_EVIDENCE_LENGTH = 4_096
 const MAX_TOTAL_SAFETY_EVIDENCE_LENGTH = 24 * 1_024
 const MAX_ANALYSIS_CAPTURE_ATTEMPTS = 2
-const UNSAFE_FIELD_HINT = /\b(address|book|buy|card|checkout|comment|contact|credential|delete|email|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
+const UNSAFE_FIELD_HINT = /\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|order|ordering|purchase|purchasing|reservation|reserve|subscribe|termin|bestellen|bestellung|buchen|buchung|kaufen|kasse|reservieren|reservierung|warenkorb)\b/i
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
   'additional-name',
@@ -461,8 +461,8 @@ function captureIsolatedSafetyEvidence(
   overflow: boolean
   optionEntries: Array<{ optionIndex: number, labelAttribute: string, text: string, value: string }>
   labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[] }>
-  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[] }>
-  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[] }>
+  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string }>
+  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string }>
   anchorImageAlts: string[]
   generatedContent: string[]
   ownerContextEvidence: string[]
@@ -594,6 +594,8 @@ function captureIsolatedSafetyEvidence(
       ariaLabel: { value: string, overflow: boolean }
       title: { value: string, overflow: boolean }
       generatedContent: string[]
+      nativeControlKind: { value: string, overflow: boolean }
+      nativeControlValue: { value: string, overflow: boolean }
       overflow: boolean
     }> = []
     for (const id of ids) {
@@ -608,17 +610,36 @@ function captureIsolatedSafetyEvidence(
       const generatedContent = node instanceof Element
         ? boundedGeneratedContent(node)
         : { values: [] as string[], overflow: false }
+      let nativeControlKind = bounded('')
+      let nativeControlValue = bounded('')
+      if (node instanceof HTMLInputElement) {
+        const typeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
+        const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+        if (!typeGetter || !valueGetter) {
+          nativeControlKind = bounded('', true)
+        } else {
+          const nativeType = bounded(typeGetter.call(node))
+          if (['button', 'submit', 'reset'].includes(nativeType.value)) {
+            nativeControlKind = nativeType
+            nativeControlValue = bounded(valueGetter.call(node))
+          }
+        }
+      }
       entries.push({
         text,
         imageAlts: imageAlts.values,
         ariaLabel,
         title,
         generatedContent: generatedContent.values,
+        nativeControlKind,
+        nativeControlValue,
         overflow: text.overflow
           || imageAlts.overflow
           || ariaLabel.overflow
           || title.overflow
-          || generatedContent.overflow,
+          || generatedContent.overflow
+          || nativeControlKind.overflow
+          || nativeControlValue.overflow,
       })
     }
     return {
@@ -666,6 +687,8 @@ function captureIsolatedSafetyEvidence(
           retainExisting(`${attribute}:image:${index}:${altIndex}`, alt))
         retainExisting(`${attribute}:aria-label:${index}`, entry.ariaLabel.value)
         retainExisting(`${attribute}:title:${index}`, entry.title.value)
+        retainExisting(`${attribute}:native-kind:${index}`, entry.nativeControlKind.value)
+        retainExisting(`${attribute}:native-value:${index}`, entry.nativeControlValue.value)
         entry.generatedContent.forEach((content, contentIndex) =>
           retainExisting(`${attribute}:generated:${index}:${contentIndex}`, content))
       })
@@ -920,20 +943,24 @@ function captureIsolatedSafetyEvidence(
     generatedContent,
   }))
   const ariaLabelledEntries = ariaLabelled.entries
-    .map(({ text, imageAlts, ariaLabel, title, generatedContent }) => ({
+    .map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
       title: title.value,
       generatedContent,
+      nativeControlKind: nativeControlKind.value,
+      nativeControlValue: nativeControlValue.value,
     }))
   const ariaDescribedEntries = ariaDescribed.entries
-    .map(({ text, imageAlts, ariaLabel, title, generatedContent }) => ({
+    .map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
       title: title.value,
       generatedContent,
+      nativeControlKind: nativeControlKind.value,
+      nativeControlValue: nativeControlValue.value,
     }))
   const snapshot = JSON.stringify({
       attributes: attributes.map(({ name, value }) => [name, value]),
@@ -1451,19 +1478,21 @@ function classifyDomInIsolatedWorld({
         ariaLabelled.raw,
         ...ariaLabelled.ids,
         ...ariaLabelled.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent }) => [
+        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent, nativeControlValue }) => [
           ...imageAlts,
           ariaLabel,
           title,
+          nativeControlValue,
           ...generatedContent,
         ]),
         ariaDescribed.raw,
         ...ariaDescribed.ids,
         ...ariaDescribed.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent }) => [
+        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, title, generatedContent, nativeControlValue }) => [
           ...imageAlts,
           ariaLabel,
           title,
+          nativeControlValue,
           ...generatedContent,
         ]),
         ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title, generatedContent }) => [
@@ -3225,7 +3254,9 @@ export class WrapperProofService {
         const candidateAxEvidence = await collectAxEvidence(
           session.context,
           session.page,
-          candidateDomEvidence.map(({ backendNodeId }) => backendNodeId),
+          candidateDomEvidence
+            .filter(({ sensitive }) => !sensitive)
+            .map(({ backendNodeId }) => backendNodeId),
         )
         const after = await guard.snapshot()
         if (
@@ -3750,7 +3781,6 @@ export class WrapperProofService {
         : 'blocked-after-preparation'
       const result: WrapperActionResult = {
         finalUrl: analysis.finalUrl,
-        screenshotDataUrl: analysis.screenshotDataUrl,
         analysis,
         activity: {
           id: randomUUID(),

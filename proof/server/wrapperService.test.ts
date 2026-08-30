@@ -669,6 +669,35 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/aria-reference-native-value-safety') {
+      response.end(`<!doctype html><title>ARIA native value safety</title>
+        <style>.reference-source{position:absolute;left:-10000px;top:0}</style>
+        <input class="reference-source" id="sensitive-button-value" type="button" value="Credit card number">
+        <input class="reference-source" id="sensitive-submit-value" type="submit" value="BIC">
+        <input class="reference-source" id="sensitive-reset-value" type="reset" value="Bank account">
+        <input class="reference-source" id="late-native-value" type="submit" value="Reference action">
+        <input class="reference-source" id="neutral-native-value" type="button" value="Reference option">
+        <input class="reference-source" id="overflow-native-value" type="button">
+        <form id="sensitive-native-value-form">
+          <input type="text" name="sensitive_button_reference" aria-labelledby="sensitive-button-value">
+          <input type="text" name="sensitive_submit_reference" aria-labelledby="sensitive-submit-value">
+          <input type="text" name="sensitive_reset_reference" aria-labelledby="sensitive-reset-value">
+        </form>
+        <form id="late-native-value-form">
+          <input id="late-native-value-input" type="text" name="late_reference" aria-labelledby="late-native-value">
+          <input id="late-native-value-detail" type="text" aria-label="Late native detail">
+        </form>
+        <form id="neutral-native-value-form">
+          <input id="neutral-native-value-input" type="text" name="neutral_reference" aria-labelledby="neutral-native-value">
+          <input type="text" aria-label="Neutral native detail">
+        </form>
+        <form id="overflow-native-value-form">
+          <input type="text" name="overflow_reference" aria-labelledby="overflow-native-value">
+          <input type="text" aria-label="Overflow native detail">
+        </form>
+        <script>document.getElementById('overflow-native-value').value = 'x'.repeat(4097)</script>`)
+      return
+    }
     if (requestUrl === '/aria-description-safety') {
       response.end(`<!doctype html><title>ARIA description safety</title>
         <form id="sensitive-description-form">
@@ -871,6 +900,22 @@ async function startFixture(): Promise<Fixture> {
           <input id="unicode-race-input" type="text" name="reference" aria-label="ASCII reference"
             oninput="this.setAttribute('aria-label', 'Credit ca\u200Brd')">
           <input type="text" aria-label="Unicode race detail">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/financial-field-safety') {
+      response.end(`<!doctype html><title>Financial field safety</title>
+        <form id="sensitive-bank-form">
+          <input type="text" name="reference_one" aria-label="I&#x200B;BAN">
+          <input type="text" name="reference_two" aria-label="ＢＩＣ">
+        </form>
+        <form id="neutral-bank-boundary-form">
+          <input id="neutral-bank-boundary-one" type="text" name="bicycle_reference" aria-label="Bicycle reference">
+          <input type="text" name="urban_plan" aria-label="Urban planning note">
+        </form>
+        <form id="late-bank-form">
+          <input id="late-bank-one" type="text" name="project_reference" aria-label="Project reference">
+          <input id="late-bank-two" type="text" name="project_note" aria-label="Project note">
         </form>`)
       return
     }
@@ -2154,6 +2199,73 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
+  it('keeps referenced native button values private while classifying and revalidating them', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/aria-reference-native-value-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(await page.getByRole('textbox', { name: 'Credit card number' }).count()).toBe(1)
+    expect(await page.getByRole('textbox', { name: 'BIC' }).count()).toBe(1)
+    expect(await page.getByRole('textbox', { name: 'Bank account' }).count()).toBe(1)
+    const sensitiveReferences = analysis.domEvidence.filter(({ label }) =>
+      ['sensitive_button_reference', 'sensitive_submit_reference', 'sensitive_reset_reference']
+        .includes(label))
+    expect(sensitiveReferences).toHaveLength(3)
+    expect(sensitiveReferences.every(({ sensitive }) => sensitive)).toBe(true)
+    expect(analysis.domEvidence.find(({ label }) => label === 'overflow_reference'))
+      .toMatchObject({ sensitive: true })
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    expect(JSON.stringify({
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+      capabilities: analysis.capabilities,
+    })).not.toMatch(/Credit card number|Bank account|BIC/)
+
+    const lateEvidenceId = analysis.domEvidence.find(({ label }) => label === 'late_reference')!.id
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidenceId))!
+    await page.locator('#late-native-value').evaluate((reference) => {
+      ;(reference as HTMLInputElement).value = 'User password'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-native-value-input').inputValue()).toBe('')
+    expect(await page.locator('#late-native-value-detail').inputValue()).toBe('')
+
+    await page.locator('#late-native-value').evaluate((reference) => {
+      ;(reference as HTMLInputElement).value = 'Reference action'
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+
+    const neutralEvidenceId = analysis.domEvidence.find(({ label }) => label === 'neutral_reference')!.id
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidenceId))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
   it('classifies bounded aria-description evidence and revalidates late mutations', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -2557,6 +2669,68 @@ describe('WrapperProofService security boundaries', () => {
       raceForm.id,
     )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('classifies normalized bank-account evidence without matching neutral word substrings', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/financial-field-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(analysis.domEvidence.find(({ label }) => label.includes('I\u200bBAN'))).toMatchObject({ sensitive: true })
+    expect(analysis.domEvidence.find(({ label }) => label === 'ＢＩＣ')).toMatchObject({ sensitive: true })
+    expect(analysis.domEvidence.find(({ label }) => label === 'Bicycle reference')).toMatchObject({ sensitive: false })
+    expect(analysis.domEvidence.find(({ label }) => label === 'Urban planning note')).toMatchObject({ sensitive: false })
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+
+    const lateEvidenceId = analysis.domEvidence.find(({ label }) => label === 'Project reference')!.id
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidenceId))!
+    await page.locator('#late-bank-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'I\u200bBAN')
+    })
+    await page.locator('#late-bank-two').evaluate((input) => {
+      input.setAttribute('aria-label', 'ＢＩＣ')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-bank-one').inputValue()).toBe('')
+    expect(await page.locator('#late-bank-two').inputValue()).toBe('')
+
+    await page.locator('#late-bank-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'Project reference')
+    })
+    await page.locator('#late-bank-two').evaluate((input) => {
+      input.setAttribute('aria-label', 'Project note')
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+
+    const neutralEvidenceId = analysis.domEvidence.find(({ label }) => label === 'Bicycle reference')!.id
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidenceId))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
   it('maps only effectively visible select options and rejects late hiding before mutation', async () => {

@@ -49,7 +49,6 @@ function actionFixture(runtimeMs = 20): WrapperActionResult {
   const analysis = analysisFixture(runtimeMs)
   return {
     finalUrl: analysis.finalUrl,
-    screenshotDataUrl: analysis.screenshotDataUrl,
     analysis,
     activity: {
       id: 'activity-1',
@@ -81,6 +80,7 @@ class FakeSandbox {
   forceStatus?: number
   forceError?: { status: number, code: string, error: string, sessionInvalidated?: boolean }
   delayAction = false
+  legacyActionScreenshot = false
   afterAnalyzeResult?: () => void
   commandError?: Error
   totalDurationMs: number | undefined = 1_000
@@ -127,10 +127,13 @@ class FakeSandbox {
       ? operation === 'analyze'
         ? analysisFixture(this.workerRuntimeMs)
         : operation === 'action'
-          ? {
-              result: actionFixture(this.workerRuntimeMs),
-              outerExpiresAtMs: this.outerExpiresAtMs,
-            }
+          ? (() => {
+              const result = actionFixture(this.workerRuntimeMs)
+              if (this.legacyActionScreenshot) {
+                ;(result as WrapperActionResult & { screenshotDataUrl?: string }).screenshotDataUrl = result.analysis.screenshotDataUrl
+              }
+              return { result, outerExpiresAtMs: this.outerExpiresAtMs }
+            })()
           : { ready: true, closed: true }
       : status === 410
         ? { error: 'The isolated browser session expired.', code: 'session_expired' }
@@ -478,6 +481,7 @@ describe('SandboxWrapperService session boundaries', () => {
 
   it('keeps cumulative worker runtime and cost monotonic when reconnect metrics are stale or absent', async () => {
     const harness = createHarness()
+    harness.sandbox.legacyActionScreenshot = true
     harness.sandbox.totalDurationMs = 500
     harness.sandbox.totalActiveCpuDurationMs = undefined
     harness.sandbox.workerRuntimeMs = 1_200
@@ -502,6 +506,8 @@ describe('SandboxWrapperService session boundaries', () => {
 
     expect([analysis.runtime.runtimeMs, first.analysis.runtime.runtimeMs, second.analysis.runtime.runtimeMs])
       .toEqual([1_200, 2_500, 4_200])
+    expect(first).not.toHaveProperty('screenshotDataUrl')
+    expect(first.analysis.screenshotDataUrl).toBe('data:image/jpeg;base64,AA==')
     expect(second.analysis.runtime.estimatedCost.lowerBound)
       .toBeGreaterThanOrEqual(first.analysis.runtime.estimatedCost.lowerBound)
     expect(second.analysis.runtime.estimatedCost.upperBound)

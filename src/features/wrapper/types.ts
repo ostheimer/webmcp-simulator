@@ -69,7 +69,6 @@ export interface WrapperActivity {
 
 export interface WrapperActionResult {
   finalUrl: string
-  screenshotDataUrl: string
   analysis: WrapperAnalysis
   activity: WrapperActivity
   structuredContent: {
