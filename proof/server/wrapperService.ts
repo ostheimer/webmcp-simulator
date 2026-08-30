@@ -446,9 +446,10 @@ function captureIsolatedSafetyEvidence(
   snapshot: string
   overflow: boolean
   optionEntries: Array<{ optionIndex: number, labelAttribute: string, text: string, value: string }>
-  labelEntries: Array<{ text: string, imageAlts: string[] }>
+  labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string }>
   ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string }>
   ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string }>
+  anchorImageAlts: string[]
 } {
   const getAttribute = Element.prototype.getAttribute
   const matches = Element.prototype.matches
@@ -565,6 +566,7 @@ function captureIsolatedSafetyEvidence(
     'aria-label',
     'aria-labelledby',
     'aria-describedby',
+    'aria-description',
     'autocomplete',
     'placeholder',
     'name',
@@ -595,6 +597,8 @@ function captureIsolatedSafetyEvidence(
   const labels: Array<{
     text: { value: string, overflow: boolean }
     imageAlts: string[]
+    ariaLabel: { value: string, overflow: boolean }
+    title: { value: string, overflow: boolean }
     overflow: boolean
   }> = []
   let labelsOverflow = false
@@ -614,10 +618,14 @@ function captureIsolatedSafetyEvidence(
       if (label) {
         const text = boundedNodeText(label)
         const imageAlts = boundedDescendantImageAlts(label)
+        const ariaLabel = bounded(getAttribute.call(label, 'aria-label') ?? '')
+        const title = bounded(getAttribute.call(label, 'title') ?? '')
         labels.push({
           text,
           imageAlts: imageAlts.values,
-          overflow: text.overflow || imageAlts.overflow,
+          ariaLabel,
+          title,
+          overflow: text.overflow || imageAlts.overflow || ariaLabel.overflow || title.overflow,
         })
       }
     }
@@ -634,21 +642,9 @@ function captureIsolatedSafetyEvidence(
     if (!requiredGetter) aggregateOverflow = true
     else nativeRequired = Boolean(requiredGetter.call(element))
   }
-  let imageAlt = { value: '', overflow: false }
-  if (element instanceof HTMLAnchorElement) {
-    const walker = createTreeWalker.call(document, element, NodeFilter.SHOW_ELEMENT)
-    let nodesInspected = 0
-    while (!aggregateOverflow && nodesInspected < 256) {
-      const node = nextNode.call(walker)
-      if (!node) break
-      nodesInspected += 1
-      if (node instanceof HTMLImageElement) {
-        imageAlt = bounded(getAttribute.call(node, 'alt') ?? '')
-        break
-      }
-    }
-    if (nodesInspected === 256 && nextNode.call(walker)) imageAlt.overflow = true
-  }
+  const anchorImageAlts = element instanceof HTMLAnchorElement
+    ? boundedDescendantImageAlts(element)
+    : { values: [] as string[], overflow: false }
   const optionEntries: Array<{
     optionIndex: number
     labelAttribute: string
@@ -694,7 +690,7 @@ function captureIsolatedSafetyEvidence(
     || labelsOverflow
     || labels.some((label) => label.overflow)
     || anchorText.overflow
-    || imageAlt.overflow
+    || anchorImageAlts.overflow
     || optionOverflow
   if (overflow) {
     return {
@@ -704,9 +700,15 @@ function captureIsolatedSafetyEvidence(
       labelEntries: [],
       ariaLabelledEntries: [],
       ariaDescribedEntries: [],
+      anchorImageAlts: [],
     }
   }
-  const labelEntries = labels.map(({ text, imageAlts }) => ({ text: text.value, imageAlts }))
+  const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title }) => ({
+    text: text.value,
+    imageAlts,
+    ariaLabel: ariaLabel.value,
+    title: title.value,
+  }))
   const ariaLabelledEntries = ariaLabelled.entries
     .map(({ text, imageAlts, ariaLabel, title }) => ({
       text: text.value,
@@ -728,7 +730,7 @@ function captureIsolatedSafetyEvidence(
       labels: labelEntries,
       nativeRequired,
       anchorText: anchorText.value,
-      imageAlt: imageAlt.value,
+      anchorImageAlts: anchorImageAlts.values,
       optionEntries,
       overflow,
     })
@@ -740,6 +742,7 @@ function captureIsolatedSafetyEvidence(
       labelEntries: [],
       ariaLabelledEntries: [],
       ariaDescribedEntries: [],
+      anchorImageAlts: [],
     }
   }
   return {
@@ -749,6 +752,7 @@ function captureIsolatedSafetyEvidence(
     labelEntries,
     ariaLabelledEntries,
     ariaDescribedEntries,
+    anchorImageAlts: anchorImageAlts.values,
   }
 }
 
@@ -820,17 +824,6 @@ function classifyDomInIsolatedWorld({
       return hasMoreNodes || value.length > maxSafetyEvidenceLength
         ? `${value.slice(0, maxSafetyEvidenceLength)}!`
         : value
-    }
-    const boundedImageAlt = (root: Element): string => {
-      const elementWalker = createTreeWalker.call(document, root, NodeFilter.SHOW_ELEMENT)
-      let nodesInspected = 0
-      while (nodesInspected < 256) {
-        const node = nextNode.call(elementWalker)
-        if (!node) return ''
-        nodesInspected += 1
-        if (node instanceof HTMLImageElement) return boundedRaw(node.getAttribute('alt') ?? '')
-      }
-      return nextNode.call(elementWalker) ? '!'.repeat(maxSafetyEvidenceLength + 1) : ''
     }
     const isReadOnlyControl = (element: Element): boolean => {
       if (element instanceof HTMLInputElement) {
@@ -937,21 +930,28 @@ function classifyDomInIsolatedWorld({
       const ariaLabelled = referencedElements('aria-labelledby')
       const ariaDescribed = referencedElements('aria-describedby')
       const accessibleNodeText = (node: Element) => boundedNodeText(node)
-      const ariaLabelledText = ariaLabelled.nodes
-        .map(accessibleNodeText)
-        .find((value) => value.trim())
-      const explicitLabel = element.getAttribute('aria-label')
-        || ariaLabelledText
-        || (element instanceof HTMLAnchorElement
-          ? boundedNodeText(element) || boundedImageAlt(element) || element.title
-          : '')
-        || safetyCapture.labelEntries
-          .map(({ text: labelText, imageAlts }) => labelText || imageAlts.find((value) => value.trim()) || '')
-          .find((value) => value.trim())
-        || element.getAttribute('placeholder')
-        || element.getAttribute('name')
-        || element.getAttribute('id')
-        || element.tagName.toLowerCase()
+      const firstNonBlank = (...values: unknown[]) => values
+        .find((value) => Boolean(normalize(value))) ?? ''
+      const ariaLabelledIdentity = safetyCapture.ariaLabelledEntries
+        .map(({ text, imageAlts, ariaLabel, title }) =>
+          firstNonBlank(ariaLabel, text, ...imageAlts, title))
+        .find((value) => Boolean(normalize(value)))
+      const anchorIdentity = element instanceof HTMLAnchorElement
+        ? firstNonBlank(boundedNodeText(element), ...safetyCapture.anchorImageAlts, element.title)
+        : ''
+      const associatedLabelIdentity = safetyCapture.labelEntries
+        .map(({ text: labelText, imageAlts, ariaLabel, title }) =>
+          firstNonBlank(ariaLabel, labelText, ...imageAlts, title))
+        .find((value) => Boolean(normalize(value)))
+      const explicitLabel = firstNonBlank(
+        element.getAttribute('aria-label'),
+        ariaLabelledIdentity,
+        anchorIdentity,
+        associatedLabelIdentity,
+        element.getAttribute('placeholder'),
+        element.getAttribute('name'),
+        element.getAttribute('id'),
+      )
       const label = normalize(explicitLabel)
       const autocompleteSource = element.getAttribute('autocomplete') ?? ''
       const boundedAutocomplete = autocompleteSource.slice(0, maxSafetyEvidenceLength + 1)
@@ -1229,6 +1229,7 @@ function classifyDomInIsolatedWorld({
       }
       const safetyEvidenceSources = [
         element.getAttribute('aria-label') ?? '',
+        element.getAttribute('aria-description') ?? '',
         ariaLabelled.raw,
         ...ariaLabelled.ids,
         ...ariaLabelled.nodes.map(accessibleNodeText),
@@ -1245,13 +1246,18 @@ function classifyDomInIsolatedWorld({
           ariaLabel,
           title,
         ]),
-        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts }) => [labelText, ...imageAlts]),
+        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title }) => [
+          labelText,
+          ...imageAlts,
+          ariaLabel,
+          title,
+        ]),
         element.getAttribute('placeholder') ?? '',
         'name' in element ? element.name : '',
         element.id,
         element.getAttribute('title') ?? '',
         element instanceof HTMLAnchorElement ? boundedNodeText(element) : '',
-        element instanceof HTMLAnchorElement ? boundedImageAlt(element) : '',
+        ...safetyCapture.anchorImageAlts,
         element instanceof HTMLAnchorElement ? element.title : '',
         decodedLinkPath,
         ...safetyCapture.optionEntries.flatMap(({ labelAttribute, text: optionText, value: optionValue }) => [
@@ -1289,6 +1295,7 @@ function classifyDomInIsolatedWorld({
         || ariaLabelled.overflow
         || ariaDescribed.overflow
         || safetyCapture.overflow
+        || !label
         || hasSensitiveAutocomplete
         || hasUnsafeEvidence
         || hasUnsafeNavigationEvidence

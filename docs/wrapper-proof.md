@@ -73,11 +73,13 @@ instructions. Form parameters use neutral `field_1`, `field_2`, and similar
 wrapper-owned keys; CDP backend-node references and remote identifiers remain
 server-only.
 Every accessible-name and description source is safety evidence: `aria-label`,
-bounded `aria-labelledby` and `aria-describedby` references (including non-HTML
-elements), every bounded descendant image alt from every associated label,
-label text, placeholder, name, ID, and autocomplete. Reference, label, image,
-traversal, and aggregate text budgets fail closed on overflow. Public display
-labels remain bounded and do not determine whether a field is sensitive.
+`aria-description`, bounded `aria-labelledby` and `aria-describedby` references
+(including non-HTML elements), associated-label text/`aria-label`/`title` and
+descendant image alts, every bounded descendant image alt from a link,
+placeholder, name, ID, and autocomplete. Reference, label, image, traversal,
+and aggregate text budgets fail closed on overflow. Controls without a genuine
+bounded identifying source are excluded; public display labels remain bounded
+and do not determine whether a field is sensitive.
 Filter and navigation choices use numeric indices. Password, secret, token,
 email, phone, message, payment, account, upload, purchase, booking, publishing,
 deletion, and similar controls are excluded.

@@ -624,6 +624,100 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/aria-description-safety') {
+      response.end(`<!doctype html><title>ARIA description safety</title>
+        <form id="sensitive-description-form">
+          <input type="text" aria-label="Reference field" aria-description="Credit card number">
+          <input type="text" aria-label="Sensitive description detail">
+        </form>
+        <form id="late-description-form">
+          <input id="late-description-input" type="text" aria-label="Late description field" aria-description="Reference context">
+          <input id="late-description-detail" type="text" aria-label="Late description detail">
+        </form>
+        <form id="neutral-description-form">
+          <input type="text" aria-label="Neutral description field" aria-description="Helpful overview">
+          <input type="text" aria-label="Neutral description detail">
+        </form>
+        <form id="overflow-description-form">
+          <input id="overflow-description-input" type="text" aria-label="Overflow description field">
+          <input type="text" aria-label="Overflow description detail">
+        </form>
+        <script>
+          document.getElementById('overflow-description-input').setAttribute('aria-description', 'x'.repeat(4097));
+        </script>`)
+      return
+    }
+    if (requestUrl === '/label-attribute-safety') {
+      response.end(`<!doctype html><title>Label attribute safety</title>
+        <form id="sensitive-label-aria-form">
+          <label aria-label="Credit card number"><input type="text" name="reference"></label>
+          <input type="text" aria-label="Sensitive label aria detail">
+        </form>
+        <form id="sensitive-label-title-form">
+          <label title="User password">Reference title<input type="text" name="reference"></label>
+          <input type="text" aria-label="Sensitive label title detail">
+        </form>
+        <form id="late-label-attribute-form">
+          <label id="late-label-attribute" aria-label="Reference label" title="Overview">
+            <input id="late-label-attribute-input" type="text" name="reference">
+          </label>
+          <input id="late-label-attribute-detail" type="text" aria-label="Late label attribute detail">
+        </form>
+        <form id="neutral-label-attribute-form">
+          <label aria-label="Neutral reference" title="Helpful overview"><input type="text" name="reference"></label>
+          <input type="text" aria-label="Neutral label attribute detail">
+        </form>
+        <form id="overflow-label-attribute-form">
+          <label id="overflow-label-attribute"><input type="text" name="reference"></label>
+          <input type="text" aria-label="Overflow label attribute detail">
+        </form>
+        <script>
+          document.getElementById('overflow-label-attribute').setAttribute('title', 'x'.repeat(4097));
+        </script>`)
+      return
+    }
+    if (requestUrl === '/link-image-alt-safety') {
+      response.end(`<!doctype html><title>Link image alt safety</title>
+        <a id="sensitive-multi-image-link" href="/about#sensitive">
+          <img width="20" height="20" alt="Info"><img width="20" height="20" alt="Checkout">
+        </a>
+        <a id="late-multi-image-link" href="/about#late">
+          <img width="20" height="20" alt="Info"><img id="late-link-second-image" width="20" height="20" alt="Overview">
+        </a>
+        <a id="neutral-multi-image-link" href="/about#neutral">
+          <img width="20" height="20" alt="History"><img width="20" height="20" alt="Details">
+        </a>
+        <a id="overflow-multi-image-link" href="/about#overflow"></a>
+        <script>
+          const overflowLink = document.getElementById('overflow-multi-image-link');
+          for (let index = 0; index < 17; index += 1) {
+            const image = document.createElement('img');
+            image.width = 20;
+            image.height = 20;
+            image.alt = 'Reference image ' + index;
+            overflowLink.append(image);
+          }
+        </script>`)
+      return
+    }
+    if (requestUrl === '/unlabelled-controls') {
+      response.end(`<!doctype html><title>Unlabelled controls</title>
+        <form id="unlabelled-form">
+          <input id="" type="text">
+          <input id="" type="text">
+        </form>
+        <form id="labelled-control-form">
+          <input type="text" aria-label="Neutral value">
+          <input type="text" aria-label="Neutral detail">
+        </form>
+        <img id="referenced-image-label" alt="Referenced value">
+        <span id="referenced-attribute-label" aria-label="Referenced detail"></span>
+        <form id="referenced-control-form">
+          <input type="text" aria-labelledby="referenced-image-label">
+          <input type="text" aria-labelledby="referenced-attribute-label">
+        </form>`)
+      return
+    }
     if (requestUrl === '/unicode-safety-normalization') {
       response.end(`<!doctype html><title>Unicode safety normalization</title>
         <form id="zero-width-sensitive-form">
@@ -1731,6 +1825,207 @@ describe('WrapperProofService security boundaries', () => {
       neutralForm.sampleInput,
       undefined,
       neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('classifies bounded aria-description evidence and revalidates late mutations', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/aria-description-safety`)
+
+    expect(analysis.domEvidence.filter(({ sensitive }) => sensitive).map(({ label }) => label)).toEqual([
+      'Reference field',
+      'Overflow description field',
+    ])
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Late description field'))!
+    const page = internalSession(service, analysis.sessionId).page
+
+    await page.locator('#late-description-input').evaluate((input) => {
+      input.setAttribute('aria-description', 'User password')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-description-input').inputValue()).toBe('')
+    expect(await page.locator('#late-description-detail').inputValue()).toBe('')
+
+    await page.locator('#late-description-input').evaluate((input) => {
+      input.setAttribute('aria-description', 'Reference context')
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Neutral description field'))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('classifies associated-label attributes and revalidates late mutations', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/label-attribute-safety`)
+
+    expect(analysis.domEvidence.filter(({ sensitive }) => sensitive).map(({ label }) => label)).toEqual([
+      'Credit card number',
+      'Reference title',
+      'reference',
+    ])
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Reference label'))!
+    const page = internalSession(service, analysis.sessionId).page
+
+    await page.locator('#late-label-attribute').evaluate((label) => {
+      label.setAttribute('aria-label', 'Credit card number')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-label-attribute-input').inputValue()).toBe('')
+
+    await page.locator('#late-label-attribute').evaluate((label) => {
+      label.setAttribute('aria-label', 'Reference label')
+      label.setAttribute('title', 'User password')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-label-attribute-input').inputValue()).toBe('')
+    expect(await page.locator('#late-label-attribute-detail').inputValue()).toBe('')
+
+    await page.locator('#late-label-attribute').evaluate((label) => {
+      label.setAttribute('title', 'Overview')
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Neutral reference'))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('classifies every bounded descendant image alt on links and revalidates late mutations', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/link-image-alt-safety`)
+
+    expect(analysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))).toEqual([
+      { label: 'Info', sensitive: true },
+      { label: 'Info', sensitive: false },
+      { label: 'History', sensitive: false },
+      { label: 'overflow-multi-image-link', sensitive: true },
+    ])
+    const navigation = analysis.capabilities.find(({ kind }) => kind === 'navigation')!
+    expect(navigation.inputSchema).toMatchObject({
+      properties: { linkIndex: { minimum: 0, maximum: 1 } },
+    })
+    const page = internalSession(service, analysis.sessionId).page
+
+    await page.locator('#late-link-second-image').evaluate((image) => image.setAttribute('alt', 'Checkout'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      { linkIndex: 0 },
+      undefined,
+      navigation.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(page.url()).toBe(`${fixture.origin}/link-image-alt-safety`)
+
+    await page.locator('#late-link-second-image').evaluate((image) => image.setAttribute('alt', 'Overview'))
+    const result = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      { linkIndex: 0 },
+      undefined,
+      navigation.id,
+    )
+    expect(result.structuredContent.targetStateVerified).toBe(true)
+    expect(result.analysis.finalUrl).toBe(`${fixture.origin}/about#late`)
+  })
+
+  it('excludes controls without a genuine identifying label while preserving labelled controls', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/unlabelled-controls`)
+
+    expect(analysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))).toEqual([
+      { label: '', sensitive: true },
+      { label: '', sensitive: true },
+      { label: 'Neutral value', sensitive: false },
+      { label: 'Neutral detail', sensitive: false },
+      { label: 'Referenced value', sensitive: false },
+      { label: 'Referenced detail', sensitive: false },
+    ])
+    const forms = analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')
+    expect(forms).toHaveLength(2)
+    expect(forms.every(({ evidenceIds }) => evidenceIds.every((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label))).toBe(true)
+    const referencedForm = forms.find(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Referenced value'))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      referencedForm.name,
+      referencedForm.sampleInput,
+      undefined,
+      referencedForm.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
