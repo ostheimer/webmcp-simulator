@@ -1,5 +1,5 @@
 import { once } from 'node:events'
-import { createServer as createHttpServer } from 'node:http'
+import { createServer as createHttpServer, type ServerResponse } from 'node:http'
 import { createServer as createViteServer } from 'vite'
 import { describe, expect, it, vi } from 'vitest'
 import type { WrapperAnalysis } from '../../src/features/wrapper/types.ts'
@@ -11,6 +11,10 @@ import { localPublicError, wrapperProofPlugin } from './viteWrapperProofPlugin.t
 
 function activeSessionCount(service: WrapperProofService): number {
   return (service as unknown as { sessions: Map<string, unknown> }).sessions.size
+}
+
+function analysisReservationCount(service: WrapperProofService): number {
+  return (service as unknown as { analysisReservations: number }).analysisReservations
 }
 
 describe('local wrapper API error boundary', () => {
@@ -129,6 +133,7 @@ describe('local wrapper API error boundary', () => {
         controller.abort()
         await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
         await vi.waitFor(() => expect(activeSessionCount(service)).toBe(0), { timeout: 2_000 })
+        expect(analysisReservationCount(service)).toBe(0)
       }
 
       const normalResponse = await fetch(`${apiOrigin}/api/wrapper/analyze`, {
@@ -227,4 +232,112 @@ describe('local wrapper API error boundary', () => {
       await once(targetServer, 'close')
     }
   })
+
+  it('admits at most three concurrent analyses across distinct browser clients', async () => {
+    const heldResponses: ServerResponse[] = []
+    let slowRequests = 0
+    const targetServer = createHttpServer((request, response) => {
+      response.setHeader('Content-Type', 'text/html; charset=utf-8')
+      if (request.url === '/slow-capacity') {
+        slowRequests += 1
+        response.write('<!doctype html><title>Reserved capacity</title>')
+        heldResponses.push(response)
+        return
+      }
+      response.end('<!doctype html><title>Capacity recovered</title><input type="search" aria-label="Recovered search">')
+    })
+    targetServer.listen(0, '127.0.0.1')
+    await once(targetServer, 'listening')
+    const targetAddress = targetServer.address()
+    if (!targetAddress || typeof targetAddress === 'string') throw new Error('Target fixture did not expose a port.')
+    const targetOrigin = `http://proof.example.at:${targetAddress.port}`
+    const resolveTarget = async (value: string): Promise<PublicTarget> => {
+      const url = new URL(value)
+      return {
+        url: url.toString(),
+        origin: url.origin,
+        hostname: url.hostname,
+        pinnedAddress: '127.0.0.1',
+        addresses: [{ address: '127.0.0.1', family: 4 }],
+      }
+    }
+    const service = new WrapperProofService({ resolveTarget, actionSettleMs: 20 })
+    const vite = await createViteServer({
+      appType: 'custom',
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [wrapperProofPlugin(service)],
+      server: { host: '127.0.0.1', port: 0 },
+    })
+    await vite.listen()
+    const viteAddress = vite.httpServer?.address()
+    if (!viteAddress || typeof viteAddress === 'string') throw new Error('Vite fixture did not expose a port.')
+    const apiOrigin = `http://127.0.0.1:${viteAddress.port}`
+    const settled: Array<{ status: number, body: Record<string, unknown> }> = []
+    const pending = Array.from({ length: 4 }, (_unused, index) => fetch(`${apiOrigin}/api/wrapper/analyze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-WebMCP-Client': `capacity-client-${String(index + 1).padStart(2, '0')}`,
+      },
+      body: JSON.stringify({ url: `${targetOrigin}/slow-capacity` }),
+    }).then(async (response) => {
+      const result = { status: response.status, body: await response.json() as Record<string, unknown> }
+      settled.push(result)
+      return result
+    }))
+
+    try {
+      await vi.waitFor(() => {
+        expect(slowRequests).toBe(3)
+        expect(settled).toContainEqual({
+          status: 503,
+          body: expect.objectContaining({ code: 'sandbox_capacity' }),
+        })
+      }, { timeout: 5_000 })
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 3, reservations: 0 })
+      heldResponses.splice(0).forEach((response) => response.end('<input type="search" aria-label="Capacity search">'))
+      const results = await Promise.all(pending)
+      expect(results.filter(({ status }) => status === 200)).toHaveLength(3)
+      expect(results.filter(({ status }) => status === 503)).toHaveLength(1)
+
+      const analyses = results.filter(({ status }) => status === 200).map(({ body }) => body as unknown as WrapperAnalysis)
+      const first = analyses[0]
+      const closeResponse = await fetch(`${apiOrigin}/api/wrapper/session`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-WebMCP-Client': 'capacity-client-close-01',
+        },
+        body: JSON.stringify({ sessionId: first.sessionId, sessionToken: first.sessionToken }),
+      })
+      expect(closeResponse.status).toBe(200)
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 2, reservations: 0 })
+
+      const recovered = await fetch(`${apiOrigin}/api/wrapper/analyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-WebMCP-Client': 'capacity-client-recovered-01',
+        },
+        body: JSON.stringify({ url: `${targetOrigin}/` }),
+      })
+      expect(recovered.status).toBe(200)
+      expect((await recovered.json() as WrapperAnalysis).title).toBe('Capacity recovered')
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 3, reservations: 0 })
+    } finally {
+      heldResponses.splice(0).forEach((response) => response.end())
+      await vite.close()
+      await service.close()
+      targetServer.close()
+      await once(targetServer, 'close')
+    }
+  })
 })
+
+function internalServiceCapacity(service: WrapperProofService): { sessions: number, reservations: number } {
+  return {
+    sessions: activeSessionCount(service),
+    reservations: analysisReservationCount(service),
+  }
+}

@@ -89,7 +89,7 @@ deletion, and similar controls are excluded.
 
 ### Reused conceptually from `stash@{0}` / Issue #2
 
-- inspect only visible, enabled, named controls;
+- inspect only visible, effectively enabled, writable, named controls and options;
 - derive bounded schemas from native control types;
 - use native setters/events for React-compatible preparation;
 - never call `submit()`, `requestSubmit()`, or a submit button;
@@ -111,8 +111,10 @@ metadata.
 - Each successful navigation returns the current final URL, re-collects DOM and
   accessibility evidence, replaces the server capability map, and re-registers
   the destination tool catalog before the updated page is shown.
-- Ephemeral sessions live in memory for five minutes, are capped at three local
-  sessions, and disappear when the dev server stops. There is no durable queue,
+- Ephemeral sessions live in memory for five minutes. Atomic reservations cap
+  active plus launching local sessions at three; a fourth client receives a
+  capacity error instead of evicting or racing an existing browser. Sessions
+  disappear when the dev server stops. There is no durable queue,
   persistence, account, or multi-tenant layer.
 - Browser automation detection, CSP, consent walls, or rendering failures are
   reported as unsupported. The wrapper does not bypass them.

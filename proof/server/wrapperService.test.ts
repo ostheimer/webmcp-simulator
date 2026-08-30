@@ -1,8 +1,10 @@
 import { createServer, type Server } from 'node:http'
 import { once } from 'node:events'
 import { gzipSync } from 'node:zlib'
+import type { Page } from 'playwright'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { PublicTarget } from './publicTarget.ts'
+import { WRAPPER_SESSION_TTL_MS } from './wrapperLimits.ts'
 import { isSameOriginHttpUrl, WrapperProofService } from './wrapperService.ts'
 
 interface Fixture {
@@ -295,6 +297,47 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/disabled-optgroup-selects') {
+      response.end(`<!doctype html><title>Disabled optgroup selects</title>
+        <select id="effective-options-filter" aria-label="Category filter" onchange="document.title=this.value">
+          <optgroup label="Unavailable" disabled><option value="locked-filter">Locked filter</option></optgroup>
+          <optgroup id="enabled-filter-group" label="Available">
+            <option value="enabled-filter-one">Enabled filter one</option>
+            <option value="enabled-filter-two">Enabled filter two</option>
+          </optgroup>
+        </select>
+        <form>
+          <select name="building_choice" aria-label="Building choice">
+            <optgroup label="Unavailable" disabled><option value="locked-form">Locked form option</option></optgroup>
+            <option value="enabled-form-one">Enabled form one</option>
+            <option value="enabled-form-two">Enabled form two</option>
+          </select>
+          <input type="text" name="details" aria-label="Details">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/action-operability') {
+      response.end(`<!doctype html><title>Action operability</title>
+        <input id="search-control" type="search" aria-label="Operability search">
+        <select id="select-control" aria-label="Category filter">
+          <option value="initial">Initial</option><option value="prepared">Prepared</option>
+        </select>
+        <form id="readonly-form">
+          <input id="readonly-control" type="text" aria-label="Readonly value">
+          <input type="text" aria-label="Readonly detail">
+        </form>
+        <form id="fieldset-form">
+          <fieldset id="disabled-fieldset">
+            <input id="fieldset-control" type="text" aria-label="Fieldset value">
+            <input type="text" aria-label="Fieldset detail">
+          </fieldset>
+        </form>
+        <form id="enabled-form">
+          <input id="enabled-control" type="text" aria-label="Enabled value">
+          <input type="text" aria-label="Enabled detail">
+        </form>`)
+      return
+    }
     if (requestUrl === '/date-like-forms') {
       response.end(`<!doctype html><title>Date-like forms</title>
         <form><input type="date" name="start_date" aria-label="Start date"><input type="text" name="date_details" aria-label="Date details"></form>
@@ -504,6 +547,27 @@ function createBudgetedService() {
   })
 }
 
+interface InternalProofSession {
+  page: Page
+  expiresAt: number
+  createdAtMs: number
+}
+
+function internalSession(service: WrapperProofService, sessionId: string): InternalProofSession {
+  const sessions = (service as unknown as { sessions: Map<string, InternalProofSession> }).sessions
+  const session = sessions.get(sessionId)
+  if (!session) throw new Error('Expected an active internal proof session.')
+  return session
+}
+
+function internalServiceState(service: WrapperProofService): { sessions: number, reservations: number } {
+  const state = service as unknown as {
+    sessions: Map<string, InternalProofSession>
+    analysisReservations: number
+  }
+  return { sessions: state.sessions.size, reservations: state.analysisReservations }
+}
+
 const fixtures: Fixture[] = []
 const services: WrapperProofService[] = []
 
@@ -525,6 +589,35 @@ describe('isSameOriginHttpUrl', () => {
 })
 
 describe('WrapperProofService security boundaries', () => {
+  it('releases analysis reservations after target-resolution failures', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let rejectTarget = true
+    const service = new WrapperProofService({
+      resolveTarget: async (value) => {
+        if (rejectTarget) throw new Error('fixture resolver failure')
+        const url = new URL(value)
+        return {
+          url: url.toString(),
+          origin: url.origin,
+          hostname: url.hostname,
+          pinnedAddress: '127.0.0.1',
+          addresses: [{ address: '127.0.0.1', family: 4 }],
+        }
+      },
+      actionSettleMs: 20,
+    })
+    services.push(service)
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await expect(service.analyze(`${fixture.origin}/`)).rejects.toThrow('fixture resolver failure')
+      expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+    }
+    rejectTarget = false
+    await expect(service.analyze(`${fixture.origin}/`)).resolves.toMatchObject({ title: 'Hostile fixture' })
+    expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
+  })
+
   it('requires the separate capability for action and close without affecting the session', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -647,6 +740,187 @@ describe('WrapperProofService security boundaries', () => {
       selectForm.sampleInput,
     )
     expect(selectResult.structuredContent.targetStateVerified).toBe(true)
+  })
+
+  it('excludes options disabled through an optgroup from every public select mapping', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/disabled-optgroup-selects`)
+    expect(analysis.capabilities.map(({ name }) => name)).toEqual([
+      'set_page_filter',
+      'prepare_visible_form',
+    ])
+
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    expect(filter.inputSchema).toMatchObject({
+      properties: { optionIndex: { minimum: 0, maximum: 1 } },
+    })
+    expect(filter.sampleInput).toEqual({ optionIndex: 1 })
+    const filterResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )
+    expect(filterResult.analysis.title).toBe('enabled-filter-two')
+    analysis = filterResult.analysis
+
+    const firstEnabledFilter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    const firstEnabledResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      firstEnabledFilter.name,
+      { optionIndex: 0 },
+      undefined,
+      firstEnabledFilter.id,
+    )
+    expect(firstEnabledResult.analysis.title).toBe('enabled-filter-one')
+    analysis = firstEnabledResult.analysis
+
+    const form = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(form.inputSchema).toMatchObject({
+      properties: { field_1: { minimum: 0, maximum: 1 } },
+    })
+    expect(form.sampleInput).toEqual({ field_1: 1, field_2: 'Sample' })
+    const formResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )
+    expect(formResult.structuredContent.targetStateVerified).toBe(true)
+    expect(await internalSession(service, analysis.sessionId).page.locator('form select').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(2)
+
+    const currentFilter = formResult.analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      currentFilter.name,
+      { optionIndex: 2 },
+      undefined,
+      currentFilter.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    const currentForm = formResult.analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      currentForm.name,
+      { field_1: 2 },
+      undefined,
+      currentForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+  })
+
+  it('invalidates when a selected option becomes effectively disabled before verification', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/disabled-optgroup-selects`)
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#effective-options-filter').evaluate((select) => {
+      select.addEventListener('change', () => {
+        (document.querySelector('#enabled-filter-group') as HTMLOptGroupElement).disabled = true
+      }, { once: true })
+    })
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it.each([
+    ['disabled input', '#search-control', 'disabled', 'prepare_page_search', { query: 'prepared' }, ''],
+    ['disabled select', '#select-control', 'disabled', 'set_page_filter', { optionIndex: 1 }, 'initial'],
+    ['readonly input', '#readonly-control', 'readOnly', 'prepare_visible_form', { field_1: 'prepared' }, ''],
+    ['disabled fieldset', '#disabled-fieldset', 'disabled', 'prepare_visible_form_2', { field_1: 'prepared' }, ''],
+  ])('rejects a %s before mutation and preserves the pre-action session', async (
+    _label,
+    selector,
+    property,
+    toolName,
+    input,
+    initialValue,
+  ) => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const capability = analysis.capabilities.find(({ name }) => name === toolName)!
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator(selector).evaluate((element, propertyName) => {
+      Reflect.set(element, String(propertyName), true)
+    }, property)
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      capability.name,
+      input,
+      undefined,
+      capability.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409, sessionInvalidated: false })
+    expect(await page.locator(selector === '#disabled-fieldset' ? '#fieldset-control' : selector).inputValue()).toBe(initialValue)
+
+    await page.locator(selector).evaluate((element, propertyName) => {
+      Reflect.set(element, String(propertyName), false)
+    }, property)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      capability.name,
+      input,
+      undefined,
+      capability.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('invalidates the session when a control becomes disabled after the pre-action read', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionStartDelayMs: 200 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const page = internalSession(service, analysis.sessionId).page
+    const pending = service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'must-not-mutate' },
+      undefined,
+      search.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await page.locator('#search-control').evaluate((input) => {
+      (input as HTMLInputElement).disabled = true
+    })
+
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'stale' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
   it('validates and retains date, month, time, and ISO week values before mutation', async () => {
@@ -1418,6 +1692,46 @@ describe('WrapperProofService security boundaries', () => {
       navigation!.name,
       { linkIndex: 0 },
     )).rejects.toThrow('session expired')
+  })
+
+  it('expires a queued action after it acquires the queue without applying a second mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionStartDelayMs: 650, actionSettleMs: 20 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const first = service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'first queued value' },
+      undefined,
+      search.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    const session = internalSession(service, analysis.sessionId)
+    const admittedAt = Date.now()
+    session.createdAtMs = admittedAt - WRAPPER_SESSION_TTL_MS + 500
+    session.expiresAt = admittedAt + 500
+    const second = service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'second queued value' },
+      undefined,
+      search.id,
+    )
+    const secondExpectation = expect(second).rejects.toMatchObject({
+      code: 'session_expired',
+      status: 410,
+      sessionInvalidated: true,
+    })
+
+    const firstResult = await first
+    expect(firstResult.activity.summary).toContain('Agent prepared visible state')
+    await secondExpectation
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('caps a session at ten analyzed pages', async () => {

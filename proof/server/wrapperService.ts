@@ -396,11 +396,23 @@ function classifyDomInIsolatedWorld({
       const numeric = Number(normalized)
       return Number.isFinite(numeric) ? numeric : undefined
     }
+    const matches = Element.prototype.matches
+    const isReadOnlyControl = (element: Element): boolean => {
+      if (element instanceof HTMLInputElement) {
+        const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'readOnly')?.get
+        return getter ? Boolean(getter.call(element)) : true
+      }
+      if (element instanceof HTMLTextAreaElement) {
+        const getter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'readOnly')?.get
+        return getter ? Boolean(getter.call(element)) : true
+      }
+      return false
+    }
     const controls = Array.from(document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLAnchorElement>(
       'input, select, textarea, a[href]',
     )).filter((element) => isElementScreenshotVisible(element, viewportWidth, viewportHeight)
-      && !('disabled' in element && element.disabled)
-      && !('readOnly' in element && element.readOnly))
+      && !matches.call(element, ':disabled')
+      && !isReadOnlyControl(element))
 
     const forms = new Map<HTMLFormElement, string>()
     const elements = controls.slice(0, maxControls)
@@ -464,7 +476,7 @@ function classifyDomInIsolatedWorld({
       const enabledOptions = element instanceof HTMLSelectElement
         ? Array.from(element.options)
           .map((option, optionIndex) => ({ option, optionIndex }))
-          .filter(({ option }) => !option.disabled)
+          .filter(({ option }) => !matches.call(option, ':disabled'))
           .slice(0, 30)
         : undefined
       const optionValues = enabledOptions
@@ -672,12 +684,39 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
 
 type IsolatedControlState = string | number | boolean
 
+function assertIsolatedControlOperable(
+  element: Element,
+  expectedOptionIndex: number,
+): void {
+  const matches = Element.prototype.matches
+  if (matches.call(element, ':disabled')) {
+    throw new Error('The isolated control is disabled.')
+  }
+  if (element instanceof HTMLInputElement) {
+    const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'readOnly')?.get
+    if (!getter || getter.call(element)) throw new Error('The isolated control is read-only.')
+  } else if (element instanceof HTMLTextAreaElement) {
+    const getter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'readOnly')?.get
+    if (!getter || getter.call(element)) throw new Error('The isolated control is read-only.')
+  }
+  if (expectedOptionIndex >= 0) {
+    if (!(element instanceof HTMLSelectElement)) throw new Error('The isolated control type changed.')
+    const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
+    const options = optionsGetter?.call(element) as HTMLOptionsCollection | undefined
+    const option = options?.item(expectedOptionIndex)
+    if (!(option instanceof HTMLOptionElement) || matches.call(option, ':disabled')) {
+      throw new Error('The isolated select option is disabled.')
+    }
+  }
+}
+
 function readIsolatedControlState(
   this: Element,
   expectedType: string,
   requireVisible: boolean,
   viewportWidth: number,
   viewportHeight: number,
+  expectedOptionIndex: number,
 ): IsolatedControlState {
   if (
     !(this instanceof HTMLElement)
@@ -686,6 +725,7 @@ function readIsolatedControlState(
   ) {
     throw new Error('The isolated control is no longer available.')
   }
+  assertIsolatedControlOperable(this, expectedOptionIndex)
   if (expectedType === 'select-one') {
     if (!(this instanceof HTMLSelectElement)) throw new Error('The isolated control type changed.')
     return this.selectedIndex
@@ -706,6 +746,7 @@ function writeIsolatedControlState(
   value: IsolatedControlState,
   viewportWidth: number,
   viewportHeight: number,
+  expectedOptionIndex: number,
 ): void {
   if (!(this instanceof HTMLElement) || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)) {
     throw new Error('The isolated control is no longer available.')
@@ -722,6 +763,7 @@ function writeIsolatedControlState(
   ) {
     throw new Error('The isolated control type changed.')
   }
+  assertIsolatedControlOperable(this, expectedOptionIndex)
   if (expectedType === 'select-one') {
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.set
     if (!setter) throw new Error('The isolated select setter is unavailable.')
@@ -778,7 +820,7 @@ async function callOnIsolatedNode<T>(
     const objectId = resolved.object?.objectId
     if (!objectId) throw new Error('The isolated browser element identity expired.')
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); return (${functionDeclaration}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
       arguments: args.map((value) => ({ value })),
       objectGroup,
@@ -799,13 +841,14 @@ function readControlState(
   backendNodeId: number,
   expectedType: string,
   requireVisible: boolean,
+  expectedOptionIndex = -1,
 ): Promise<IsolatedControlState> {
   return callOnIsolatedNode<IsolatedControlState>(
     context,
     page,
     backendNodeId,
     readIsolatedControlState.toString(),
-    [expectedType, requireVisible, CAPTURE_VIEWPORT_WIDTH, CAPTURE_VIEWPORT_HEIGHT],
+    [expectedType, requireVisible, CAPTURE_VIEWPORT_WIDTH, CAPTURE_VIEWPORT_HEIGHT, expectedOptionIndex],
   )
 }
 
@@ -815,13 +858,14 @@ function writeControlState(
   backendNodeId: number,
   expectedType: string,
   value: IsolatedControlState,
+  expectedOptionIndex = -1,
 ): Promise<void> {
   return callOnIsolatedNode<void>(
     context,
     page,
     backendNodeId,
     writeIsolatedControlState.toString(),
-    [expectedType, value, CAPTURE_VIEWPORT_WIDTH, CAPTURE_VIEWPORT_HEIGHT],
+    [expectedType, value, CAPTURE_VIEWPORT_WIDTH, CAPTURE_VIEWPORT_HEIGHT, expectedOptionIndex],
   )
 }
 
@@ -976,14 +1020,21 @@ async function applyAction(
   if (action.kind === 'filter' && action.backendNodeId) {
     const optionIndex = action.optionIndices?.[Number(input.optionIndex)]
     if (optionIndex === undefined) throw new Error('The requested filter option is no longer available.')
-    const before = await readControlState(context, page, action.backendNodeId, 'select-one', true)
-    await writeControlState(context, page, action.backendNodeId, 'select-one', optionIndex)
+    const before = await readControlState(context, page, action.backendNodeId, 'select-one', true, optionIndex)
+    await writeControlState(context, page, action.backendNodeId, 'select-one', optionIndex, optionIndex)
     return {
       navigationOccurred: false,
       stateChanged: async () =>
-        await readControlState(context, page, action.backendNodeId as number, 'select-one', true) !== before,
+        await readControlState(context, page, action.backendNodeId as number, 'select-one', true, optionIndex) !== before,
       verify: async () => {
-        const selectedIndex = await readControlState(context, page, action.backendNodeId as number, 'select-one', true)
+        const selectedIndex = await readControlState(
+          context,
+          page,
+          action.backendNodeId as number,
+          'select-one',
+          true,
+          optionIndex,
+        )
         if (selectedIndex !== optionIndex) throw actionVerificationError('The page did not retain the selected filter option.')
       },
     }
@@ -1012,12 +1063,19 @@ async function applyAction(
     if (field.type === 'select-one') {
       const optionIndex = field.optionIndices?.[Number(value)]
       if (optionIndex === undefined) throw new Error(`${field.key} no longer references a visible option.`)
-      const before = await readControlState(context, page, field.backendNodeId, field.type, true)
-      await writeControlState(context, page, field.backendNodeId, field.type, optionIndex)
+      const before = await readControlState(context, page, field.backendNodeId, field.type, true, optionIndex)
+      await writeControlState(context, page, field.backendNodeId, field.type, optionIndex, optionIndex)
       changeChecks.push(async () =>
-        await readControlState(context, page, field.backendNodeId, field.type, true) !== before)
+        await readControlState(context, page, field.backendNodeId, field.type, true, optionIndex) !== before)
       verifications.push(async () => {
-        const selectedIndex = await readControlState(context, page, field.backendNodeId, field.type, true)
+        const selectedIndex = await readControlState(
+          context,
+          page,
+          field.backendNodeId,
+          field.type,
+          true,
+          optionIndex,
+        )
         if (selectedIndex !== optionIndex) throw actionVerificationError(`${field.key} did not retain the selected option.`)
       })
     } else if (field.type === 'radio-group') {
@@ -1090,7 +1148,7 @@ async function actionWouldChange(
   if (action.kind === 'filter' && action.backendNodeId) {
     const optionIndex = action.optionIndices?.[Number(input.optionIndex)]
     if (optionIndex === undefined) return true
-    return await readControlState(context, page, action.backendNodeId, 'select-one', true) !== optionIndex
+    return await readControlState(context, page, action.backendNodeId, 'select-one', true, optionIndex) !== optionIndex
   }
   if (action.kind === 'navigation') {
     const url = action.urls?.[Number(input.linkIndex)]
@@ -1105,7 +1163,7 @@ async function actionWouldChange(
     if (field.type === 'select-one') {
       const optionIndex = field.optionIndices?.[Number(value)]
       if (optionIndex === undefined) return true
-      if (await readControlState(context, page, field.backendNodeId, field.type, true) !== optionIndex) return true
+      if (await readControlState(context, page, field.backendNodeId, field.type, true, optionIndex) !== optionIndex) return true
     } else if (field.type === 'radio-group') {
       const selectedBackendNodeId = field.backendNodeIds?.[Number(value)]
       if (!selectedBackendNodeId || !await readControlState(context, page, selectedBackendNodeId, 'radio', true)) return true
@@ -1120,6 +1178,7 @@ async function actionWouldChange(
 
 export class WrapperProofService {
   private sessions = new Map<string, ProofSession>()
+  private analysisReservations = 0
   private readonly resolveTarget: (value: string) => Promise<PublicTarget>
   private readonly actionStartDelayMs: number
   private readonly actionSettleMs: number
@@ -1132,6 +1191,17 @@ export class WrapperProofService {
     this.actionSettleMs = options.actionSettleMs ?? ACTION_SETTLE_MS
     this.maxTargetResourceBytes = options.maxTargetResourceBytes ?? WRAPPER_MAX_TARGET_RESOURCE_BYTES
     this.maxTargetSessionBytes = options.maxTargetSessionBytes ?? WRAPPER_MAX_TARGET_SESSION_BYTES
+  }
+
+  private reserveAnalysisSlot(): void {
+    if (this.sessions.size + this.analysisReservations >= MAX_CONCURRENT_SESSIONS) {
+      throw new WrapperServiceError(
+        'sandbox_capacity',
+        'The local isolated browser capacity is temporarily unavailable.',
+        503,
+      )
+    }
+    this.analysisReservations += 1
   }
 
   private stopForPolicyFailure(session: ProofSession): void {
@@ -1347,43 +1417,47 @@ export class WrapperProofService {
     throwIfAborted(signal)
     await raceWithSignal(this.closeExpiredSessions(), signal)
     throwIfAborted(signal)
-    if (this.sessions.size >= MAX_CONCURRENT_SESSIONS) {
-      const oldestSessionId = this.sessions.keys().next().value as string | undefined
-      if (oldestSessionId) await this.destroySession(oldestSessionId)
+    this.reserveAnalysisSlot()
+    let reservationActive = true
+    const releaseAnalysisReservation = () => {
+      if (!reservationActive) return
+      reservationActive = false
+      this.analysisReservations -= 1
     }
-    throwIfAborted(signal)
-    const target = await raceWithSignal(this.resolveTarget(value), signal)
-    const pinnedAddress = target.pinnedAddress.includes(':') ? `[${target.pinnedAddress}]` : target.pinnedAddress
-    const browserLaunch = chromium.launch({
-      headless: true,
-      chromiumSandbox: true,
-      args: [
-        `--host-resolver-rules=MAP ${target.hostname} ${pinnedAddress}, EXCLUDE localhost`,
-        '--disable-background-networking',
-        '--disable-breakpad',
-        '--disable-component-update',
-        '--disable-sync',
-        '--no-first-run',
-      ],
-    })
-    let browser: Browser
     try {
-      browser = await raceWithSignal(browserLaunch, signal)
-    } catch (error) {
+      throwIfAborted(signal)
+      const target = await raceWithSignal(this.resolveTarget(value), signal)
+      const pinnedAddress = target.pinnedAddress.includes(':') ? `[${target.pinnedAddress}]` : target.pinnedAddress
+      const browserLaunch = chromium.launch({
+        headless: true,
+        chromiumSandbox: true,
+        args: [
+          `--host-resolver-rules=MAP ${target.hostname} ${pinnedAddress}, EXCLUDE localhost`,
+          '--disable-background-networking',
+          '--disable-breakpad',
+          '--disable-component-update',
+          '--disable-sync',
+          '--no-first-run',
+        ],
+      })
+      let browser: Browser
+      try {
+        browser = await raceWithSignal(browserLaunch, signal)
+      } catch (error) {
+        if (signal?.aborted) {
+          void browserLaunch.then((launchedBrowser) => launchedBrowser.close()).catch(() => undefined)
+          throw analysisAbortError()
+        }
+        throw error
+      }
       if (signal?.aborted) {
-        void browserLaunch.then((launchedBrowser) => launchedBrowser.close()).catch(() => undefined)
+        await browser.close().catch(() => undefined)
         throw analysisAbortError()
       }
-      throw error
-    }
-    if (signal?.aborted) {
-      await browser.close().catch(() => undefined)
-      throw analysisAbortError()
-    }
-    let context: BrowserContext | undefined
-    let createdSessionId: string | undefined
-    try {
-      context = await raceWithSignal(browser.newContext({
+      let context: BrowserContext | undefined
+      let createdSessionId: string | undefined
+      try {
+        context = await raceWithSignal(browser.newContext({
         acceptDownloads: false,
         javaScriptEnabled: true,
         serviceWorkers: 'block',
@@ -1470,8 +1544,9 @@ export class WrapperProofService {
         navigationPolicyError: null,
         mainFrameId,
       }
-      this.sessions.set(id, session)
-      createdSessionId = id
+        releaseAnalysisReservation()
+        this.sessions.set(id, session)
+        createdSessionId = id
       this.installTargetTrafficMonitor(session)
       this.installNavigationDocumentGuard(session)
       cdp.on('Page.frameNavigated', (rawEvent: unknown) => {
@@ -1562,15 +1637,18 @@ export class WrapperProofService {
           422,
         )
       }
-    } catch (error) {
-      if (createdSessionId) {
-        await this.destroySession(createdSessionId)
-      } else {
-        await context?.close().catch(() => undefined)
-        await browser.close().catch(() => undefined)
+      } catch (error) {
+        if (createdSessionId) {
+          await this.destroySession(createdSessionId)
+        } else {
+          await context?.close().catch(() => undefined)
+          await browser.close().catch(() => undefined)
+        }
+        if (signal?.aborted) throw analysisAbortError()
+        throw error
       }
-      if (signal?.aborted) throw analysisAbortError()
-      throw error
+    } finally {
+      releaseAnalysisReservation()
     }
   }
 
@@ -1628,6 +1706,15 @@ export class WrapperProofService {
           { sessionInvalidated: true },
         )
       }
+      if (Date.now() >= session.expiresAt) {
+        await this.destroySession(sessionId)
+        throw new WrapperServiceError(
+          'session_expired',
+          'The isolated browser session expired. Analyze the site again.',
+          410,
+          { sessionInvalidated: true },
+        )
+      }
       if (session.capabilities.get(toolName) !== acceptedCapability) {
         throw new WrapperServiceError(
           'invalid_action',
@@ -1644,11 +1731,21 @@ export class WrapperProofService {
           422,
         )
       }
-      const wouldChange = await raceWithSessionPolicy(
-        session,
-        actionWouldChange(session.context, session.page, capability.action, acceptedInput),
-        signal,
-      )
+      let wouldChange: boolean
+      try {
+        wouldChange = await raceWithSessionPolicy(
+          session,
+          actionWouldChange(session.context, session.page, capability.action, acceptedInput),
+          signal,
+        )
+      } catch (error) {
+        if (signal?.aborted || error instanceof WrapperServiceError) throw error
+        throw preActionError(
+          'invalid_action',
+          'The analyzed control is no longer safely actionable.',
+          409,
+        )
+      }
       throwIfAborted(signal)
       if (!wouldChange) {
         throw preActionError(
