@@ -31,6 +31,7 @@ export interface ProductionWrapperBackend {
     toolName: string,
     input: Record<string, unknown>,
     signal?: AbortSignal,
+    capabilityId?: string,
   ): Promise<unknown>
   closeSession(sessionId: string, sessionToken: string, signal?: AbortSignal): Promise<boolean>
 }
@@ -38,15 +39,18 @@ export interface ProductionWrapperBackend {
 class HttpError extends Error {
   readonly status: number
   readonly code: string
+  readonly sessionInvalidated: boolean | undefined
 
   constructor(
     message: string,
     status: number,
     code: string,
+    options: { sessionInvalidated?: boolean } = {},
   ) {
     super(message)
     this.status = status
     this.code = code
+    this.sessionInvalidated = options.sessionInvalidated
   }
 }
 
@@ -155,7 +159,9 @@ function consumeRateLimit(
 function publicError(error: unknown): HttpError {
   if (error instanceof HttpError) return error
   if (error instanceof WrapperServiceError) {
-    return new HttpError(error.message, error.status, error.code)
+    return new HttpError(error.message, error.status, error.code, {
+      sessionInvalidated: error.sessionInvalidated,
+    })
   }
   if (error instanceof DOMException && error.name === 'AbortError') {
     return new HttpError('The isolated browser operation was cancelled.', 499, 'cancelled')
@@ -173,7 +179,13 @@ async function handle(operation: () => Promise<unknown>): Promise<Response> {
     return jsonResponse(200, await operation())
   } catch (error) {
     const safe = publicError(error)
-    return jsonResponse(safe.status, { error: safe.message, code: safe.code })
+    return jsonResponse(safe.status, {
+      error: safe.message,
+      code: safe.code,
+      ...(typeof safe.sessionInvalidated === 'boolean'
+        ? { sessionInvalidated: safe.sessionInvalidated }
+        : {}),
+    })
   }
 }
 
@@ -210,16 +222,18 @@ export function handleActionRequest(
       typeof body.sessionId !== 'string'
       || typeof body.sessionToken !== 'string'
       || typeof body.toolName !== 'string'
+      || typeof body.capabilityId !== 'string'
       || !body.input
       || typeof body.input !== 'object'
       || Array.isArray(body.input)
-    ) throw new HttpError('sessionId, sessionToken, toolName, and input are required.', 400, 'invalid_action')
+    ) throw new HttpError('sessionId, sessionToken, capabilityId, toolName, and input are required.', 400, 'invalid_action')
     return backend.execute(
       body.sessionId,
       body.sessionToken,
       body.toolName,
       body.input as Record<string, unknown>,
       request.signal,
+      body.capabilityId,
     )
   })
 }

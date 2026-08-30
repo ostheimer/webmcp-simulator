@@ -54,14 +54,31 @@ async function startFixture(): Promise<Fixture> {
       response.end(`<!doctype html><title>Catalog shift fixture</title>
         <input id="initial-search" data-webmcp-proof-id="copied-marker" type="search" aria-label="Initial search">
         <input id="replacement-search" data-webmcp-proof-id="copied-marker" type="search" aria-label="Replacement search" hidden>
+        <select aria-label="Category filter">
+          <option value="initial">Initial</option><option value="shift">Shift catalog</option>
+        </select>
         <script>
           initialSearch = document.getElementById('initial-search');
           replacementSearch = document.getElementById('replacement-search');
-          initialSearch.addEventListener('input', () => {
+          document.querySelector('select').addEventListener('change', () => {
             initialSearch.hidden = true;
             replacementSearch.hidden = false;
           });
         </script>`)
+      return
+    }
+    if (requestUrl === '/viewport-visibility') {
+      response.end(`<!doctype html><title>Viewport visibility fixture</title>
+        <input type="search" aria-label="Partially visible search" style="position:absolute;left:-40px;top:40px;width:140px;height:32px">
+        <input type="search" aria-label="Below fold search" style="position:absolute;left:20px;top:1200px;width:140px;height:32px">
+        <input type="search" aria-label="Far right search" style="position:absolute;left:1700px;top:40px;width:140px;height:32px">
+        <input type="search" aria-label="Transformed away search" style="position:absolute;left:20px;top:100px;width:140px;height:32px;transform:translateX(2000px)">`)
+      return
+    }
+    if (requestUrl === '/viewport-action') {
+      response.end(`<!doctype html><title>Viewport action fixture</title>
+        <input type="search" aria-label="Moving search" style="position:absolute;left:20px;top:40px;width:140px;height:32px"
+          oninput="this.style.transform='translateX(2000px)'">`)
       return
     }
     if (requestUrl === '/next') {
@@ -131,6 +148,44 @@ async function startFixture(): Promise<Fixture> {
           <input type="text" id="creditCard" aria-label="Neutral field K">
           <input type="text" id="userCredential" aria-label="Neutral field L">
           <input type="text" id="apiToken" aria-label="Neutral field M">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/accessible-sensitive-labels') {
+      response.end(`<!doctype html><title>Accessible label safety</title>
+        <span id="neutral-description">Reference</span>
+        <span id="payment-description">Credit card</span>
+        <svg aria-hidden="true"><text id="svg-payment-description">Payment card</text></svg>
+        <form>
+          <input type="text" name="safe_one" aria-label="First neutral field">
+          <input type="text" name="safe_two" aria-label="Second neutral field">
+          <input type="text" name="reference" id="reference" aria-label="Neutral aria label"
+            aria-labelledby="neutral-description payment-description">
+          <input type="text" name="secondary_reference" id="secondary-reference" aria-label="Second neutral aria label">
+          <label for="secondary-reference">Reference</label>
+          <label for="secondary-reference">User password</label>
+          <input type="text" name="svg_reference" id="svg-reference" aria-label="SVG neutral aria label"
+            aria-labelledby="svg-payment-description">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/queued-capabilities') {
+      response.end(`<!doctype html><title>Queued capability fixture</title>
+        <form id="first-form">
+          <input type="text" aria-label="First form value" oninput="
+            if (!document.getElementById('replacement-form')) {
+              document.getElementById('second-form')?.remove();
+              const replacement = document.createElement('form');
+              replacement.id = 'replacement-form';
+              replacement.innerHTML = '<input type=&quot;text&quot; aria-label=&quot;Replacement value one&quot;><input type=&quot;text&quot; aria-label=&quot;Replacement value two&quot;>';
+              document.body.insertBefore(replacement, document.getElementById('first-form'));
+            }
+          ">
+          <input type="text" aria-label="First form detail">
+        </form>
+        <form id="second-form">
+          <input type="text" aria-label="Second form value">
+          <input type="text" aria-label="Second form detail">
         </form>`)
       return
     }
@@ -500,14 +555,17 @@ describe('WrapperProofService security boundaries', () => {
     const service = createService()
     services.push(service)
     const analysis = await service.analyze(`${fixture.origin}/catalog-shift`)
-    const firstSearch = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
     const shifted = await service.execute(
       analysis.sessionId,
       analysis.sessionToken,
-      firstSearch.name,
-      { query: 'first' },
+      filter.name,
+      { optionIndex: 1 },
     )
-    expect(shifted.analysis.domEvidence.map(({ label }) => label)).toEqual(['Replacement search'])
+    expect(shifted.analysis.domEvidence.map(({ label }) => label)).toEqual([
+      'Replacement search',
+      'Category filter',
+    ])
     expect(JSON.stringify(shifted.analysis)).not.toContain('data-webmcp-proof-id')
 
     const replacementSearch = shifted.analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
@@ -519,6 +577,50 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({
       structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
     })
+  })
+
+  it('publishes and mutates only controls intersecting the captured viewport', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/viewport-visibility`)
+
+    expect(analysis.domEvidence.map(({ label }) => label)).toEqual(['Partially visible search'])
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'visible state' },
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
+  })
+
+  it('fails closed when a visible control leaves the captured viewport before verification', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/viewport-action`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'move away' },
+    )).rejects.toMatchObject({
+      code: 'action_failed',
+      sessionInvalidated: true,
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'stale' },
+    )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
   it('excludes transparent and zero-geometry controls from visible evidence and capabilities', async () => {
@@ -563,6 +665,81 @@ describe('WrapperProofService security boundaries', () => {
     const safeLink = linkAnalysis.domEvidence.find(({ id }) => navigation.evidenceIds.includes(id))
     expect(safeLink?.label).toBe('History')
     expect(linkAnalysis.domEvidence.filter(({ type, sensitive }) => type === 'link' && sensitive)).toHaveLength(6)
+  })
+
+  it('checks every aria-labelledby reference and associated label for sensitive evidence', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/accessible-sensitive-labels`)
+
+    expect(analysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))).toEqual([
+      { label: 'First neutral field', sensitive: false },
+      { label: 'Second neutral field', sensitive: false },
+      { label: 'Neutral aria label', sensitive: true },
+      { label: 'Second neutral aria label', sensitive: true },
+      { label: 'SVG neutral aria label', sensitive: true },
+    ])
+    const form = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(Object.keys((form.inputSchema.properties ?? {}) as object)).toEqual(['field_1', 'field_2'])
+  })
+
+  it('rejects a queued stale capability binding before mutation and preserves the session', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionStartDelayMs: 120 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/queued-capabilities`)
+    const firstForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const secondForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+
+    const first = service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      firstForm.name,
+      { field_1: 'first action' },
+      undefined,
+      firstForm.id,
+    )
+    const stale = service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      secondForm.name,
+      { field_1: 'must not be applied' },
+      undefined,
+      secondForm.id,
+    )
+    const firstResult = await first
+
+    await expect(stale).rejects.toMatchObject({
+      code: 'invalid_action',
+      sessionInvalidated: false,
+      message: 'The requested tool belongs to a stale page analysis. Analyze the current page again.',
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      secondForm.name,
+      { field_1: 'arrived after reanalysis' },
+      undefined,
+      secondForm.id,
+    )).rejects.toMatchObject({
+      code: 'invalid_action',
+      sessionInvalidated: false,
+    })
+    const currentSecondForm = firstResult.analysis.capabilities
+      .find(({ name }) => name === 'prepare_visible_form_2')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      currentSecondForm.name,
+      currentSecondForm.sampleInput,
+      undefined,
+      currentSecondForm.id,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
   })
 
   it('classifies DOM evidence in an isolated realm and keeps backend node identities server-only', async () => {

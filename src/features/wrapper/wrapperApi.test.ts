@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { closeWrapperSession } from './wrapperApi'
+import {
+  closeWrapperSession,
+  executeWrapperAction,
+} from './wrapperApi'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -21,5 +24,52 @@ describe('closeWrapperSession', () => {
       keepalive: true,
     }))
     expect(catchSpy).toHaveBeenCalledOnce()
+  })
+
+  it('parses only a literal true invalidation flag from failed action responses', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: 'The isolated browser operation failed.',
+        code: 'action_failed',
+        sessionInvalidated: true,
+      }), { status: 500 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: 'The requested input is invalid.',
+        code: 'invalid_action',
+        sessionInvalidated: false,
+      }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        error: 'Malformed invalidation marker.',
+        sessionInvalidated: 'true',
+      }), { status: 500 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(executeWrapperAction(
+      'session',
+      'token',
+      'capability-current',
+      'prepare_page_search',
+      { query: 'x' },
+    )).rejects.toMatchObject({
+      code: 'action_failed',
+      sessionInvalidated: true,
+    })
+    await expect(executeWrapperAction(
+      'session',
+      'token',
+      'capability-current',
+      'prepare_page_search',
+      { query: 'x' },
+    )).rejects.toMatchObject({
+      code: 'invalid_action',
+      sessionInvalidated: false,
+    })
+    await expect(executeWrapperAction(
+      'session',
+      'token',
+      'capability-current',
+      'prepare_page_search',
+      { query: 'x' },
+    )).rejects.toMatchObject({ sessionInvalidated: undefined })
   })
 })

@@ -1,10 +1,15 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createWrapperTools } from '../../webmcp/createWrapperTools'
 import { registerTools } from '../../webmcp/registerTools'
 import {
   closeWrapperSession,
   executeWrapperAction,
+  WrapperApiError,
 } from './wrapperApi'
+import {
+  retireWrapperSessionResources,
+  type WrapperSessionCredentials,
+} from './wrapperSessionLifecycle'
 import type {
   WrapperActionResult,
   WrapperActivity,
@@ -18,6 +23,33 @@ interface WrapperProofWorkspaceProps {
 }
 
 type RegistrationState = 'checking' | 'connected' | 'unavailable' | 'error'
+
+export function WrapperSessionRetiredNotice({
+  message,
+  onBack,
+}: {
+  message: string
+  onBack: () => void
+}) {
+  return (
+    <div className="workspace-shell wrapper-proof-shell">
+      <header className="workspace-header wrapper-proof-header">
+        <button className="workspace-brand" type="button" onClick={onBack}>
+          <span className="brand-mark" aria-hidden="true"><span /><span /></span>
+          <span>WebMCP Simulator</span>
+        </button>
+      </header>
+      <main className="wrapper-proof-layout">
+        <section className="wrapper-browser-panel support-message error" role="alert">
+          <strong>Browser-Sitzung beendet</strong>
+          <p>{message}</p>
+          <p>Die bisherige Analyse und ihre WebMCP-Tools wurden entfernt. Analysiere die Website erneut, um mit einer frischen isolierten Sitzung fortzufahren.</p>
+          <button className="primary-button" type="button" onClick={onBack}>Website erneut analysieren</button>
+        </section>
+      </main>
+    </div>
+  )
+}
 
 function registrationLabel(state: RegistrationState): string {
   if (state === 'connected') return 'WEBMCP CONNECTED'
@@ -35,24 +67,36 @@ function formatCost(lowerBound: number, upperBound: number): string {
 }
 
 export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspaceProps) {
-  const [currentAnalysis, setCurrentAnalysis] = useState(analysis)
+  const [currentAnalysis, setCurrentAnalysis] = useState<WrapperAnalysis | null>(analysis)
   const [activities, setActivities] = useState<WrapperActivity[]>([])
   const [registration, setRegistration] = useState<RegistrationState>('checking')
   const [registrationError, setRegistrationError] = useState('')
   const [actionError, setActionError] = useState('')
   const [busyTool, setBusyTool] = useState('')
+  const registrationControllerRef = useRef<AbortController | null>(null)
+  const credentialsRef = useRef<WrapperSessionCredentials | null>({
+    sessionId: analysis.sessionId,
+    sessionToken: analysis.sessionToken,
+  })
 
   const runCapability = useCallback(async (
     capability: WrapperCapability,
     input: Record<string, unknown>,
     signal: AbortSignal,
   ): Promise<WrapperActionResult> => {
+    if (!currentAnalysis) {
+      throw new WrapperApiError('The isolated browser session is no longer active.', {
+        code: 'session_expired',
+        sessionInvalidated: true,
+      })
+    }
     setBusyTool(capability.name)
     setActionError('')
     try {
       const result = await executeWrapperAction(
         currentAnalysis.sessionId,
         currentAnalysis.sessionToken,
+        capability.id,
         capability.name,
         input,
         signal,
@@ -63,17 +107,39 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
       setActivities((current) => [result.activity, ...current])
       return result
     } catch (error) {
-      if (!signal.aborted) {
-        setActionError(error instanceof Error ? error.message : 'The isolated tool call failed.')
+      const aborted = signal.aborted
+        || (error instanceof DOMException && error.name === 'AbortError')
+      const message = aborted
+        ? 'Der Wrapper-Tool-Aufruf wurde abgebrochen. Der Zustand der isolierten Sitzung ist nicht mehr eindeutig.'
+        : error instanceof Error ? error.message : 'The isolated tool call failed.'
+      setActionError(message)
+      const shouldRetire = aborted || (error instanceof WrapperApiError
+        ? error.sessionInvalidated !== false
+        : true)
+      if (shouldRetire) {
+        retireWrapperSessionResources(
+          registrationControllerRef.current,
+          credentialsRef,
+          closeWrapperSession,
+        )
+        registrationControllerRef.current = null
+        setCurrentAnalysis(null)
+        setRegistration('error')
       }
       throw error
     } finally {
       setBusyTool('')
     }
-  }, [currentAnalysis.sessionId, currentAnalysis.sessionToken])
+  }, [currentAnalysis])
 
   useLayoutEffect(() => {
+    if (!currentAnalysis) {
+      registrationControllerRef.current?.abort()
+      registrationControllerRef.current = null
+      return
+    }
     const controller = new AbortController()
+    registrationControllerRef.current = controller
     let active = true
     const tools = createWrapperTools(currentAnalysis, { execute: runCapability })
     registerTools(tools, { controller })
@@ -88,17 +154,25 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
     return () => {
       active = false
       controller.abort()
+      if (registrationControllerRef.current === controller) {
+        registrationControllerRef.current = null
+      }
     }
   }, [currentAnalysis, runCapability])
 
-  useEffect(() => () => closeWrapperSession(
-    analysis.sessionId,
-    analysis.sessionToken,
-  ), [analysis.sessionId, analysis.sessionToken])
+  useEffect(() => () => {
+    const credentials = credentialsRef.current
+    credentialsRef.current = null
+    if (credentials) closeWrapperSession(credentials.sessionId, credentials.sessionToken)
+  }, [])
 
   function invokeSample(capability: WrapperCapability) {
     const controller = new AbortController()
     void runCapability(capability, capability.sampleInput, controller.signal).catch(() => undefined)
+  }
+
+  if (!currentAnalysis) {
+    return <WrapperSessionRetiredNotice message={actionError} onBack={onBack} />
   }
 
   return (

@@ -1,5 +1,19 @@
 import type { WrapperActionResult, WrapperAnalysis } from './types'
 
+export class WrapperApiError extends Error {
+  readonly code: string | undefined
+  readonly sessionInvalidated: boolean | undefined
+
+  constructor(message: string, options: { code?: string, sessionInvalidated?: boolean } = {}) {
+    super(message)
+    this.name = 'WrapperApiError'
+    this.code = options.code
+    this.sessionInvalidated = typeof options.sessionInvalidated === 'boolean'
+      ? options.sessionInvalidated
+      : undefined
+  }
+}
+
 const CLIENT_STORAGE_KEY = 'webmcp-wrapper-client-id'
 let fallbackClientId = ''
 
@@ -23,8 +37,22 @@ function wrapperHeaders(): HeadersInit {
 }
 
 async function readResponse<T>(response: Response): Promise<T> {
-  const body = await response.json() as T & { error?: string }
-  if (!response.ok) throw new Error(body.error || `Wrapper request failed (${response.status}).`)
+  const body = await response.json() as T & {
+    error?: unknown
+    code?: unknown
+    sessionInvalidated?: unknown
+  }
+  if (!response.ok) {
+    throw new WrapperApiError(
+      typeof body.error === 'string' ? body.error : `Wrapper request failed (${response.status}).`,
+      {
+        code: typeof body.code === 'string' ? body.code : undefined,
+        sessionInvalidated: typeof body.sessionInvalidated === 'boolean'
+          ? body.sessionInvalidated
+          : undefined,
+      },
+    )
+  }
   return body
 }
 
@@ -39,6 +67,7 @@ export async function analyzeWebsiteInWrapper(url: string): Promise<WrapperAnaly
 export async function executeWrapperAction(
   sessionId: string,
   sessionToken: string,
+  capabilityId: string,
   toolName: string,
   input: Record<string, unknown>,
   signal?: AbortSignal,
@@ -46,7 +75,7 @@ export async function executeWrapperAction(
   return readResponse(await fetch('/api/wrapper/action', {
     method: 'POST',
     headers: wrapperHeaders(),
-    body: JSON.stringify({ sessionId, sessionToken, toolName, input }),
+    body: JSON.stringify({ sessionId, sessionToken, capabilityId, toolName, input }),
     signal,
   }))
 }

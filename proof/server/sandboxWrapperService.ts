@@ -187,11 +187,12 @@ function isSandboxUnavailableError(error: unknown): boolean {
   return error instanceof APIError && [404, 410].includes(error.response.status)
 }
 
-function sandboxCapacityError(): WrapperServiceError {
+function sandboxCapacityError(sessionInvalidated?: boolean): WrapperServiceError {
   return new WrapperServiceError(
     'sandbox_capacity',
     'The isolated browser capacity is temporarily unavailable.',
     503,
+    { sessionInvalidated },
   )
 }
 
@@ -384,6 +385,7 @@ export class SandboxWrapperService {
     toolName: string,
     input: Record<string, unknown>,
     signal?: AbortSignal,
+    capabilityId?: string,
   ): Promise<WrapperActionResult> {
     const sandbox = await this.getExisting(sessionId, sessionToken, signal)
     const startedAtMs = this.now()
@@ -392,7 +394,7 @@ export class SandboxWrapperService {
         sandbox,
         sessionToken,
         'action',
-        { toolName, input },
+        { toolName, capabilityId, input },
         signal,
       )
       const expiresAtMs = Date.parse(result.analysis.expiresAt)
@@ -407,12 +409,24 @@ export class SandboxWrapperService {
       )
       return { ...result, analysis, finalUrl: analysis.finalUrl, screenshotDataUrl: analysis.screenshotDataUrl }
     } catch (error) {
-      if (!isNonMutatingActionRejection(error)) {
+      const nonMutating = isNonMutatingActionRejection(error)
+      if (!nonMutating) {
         await sandbox.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
       }
       if (signal?.aborted) throw new DOMException('The isolated tool call was cancelled.', 'AbortError')
-      if (isSandboxCapacityError(error)) throw sandboxCapacityError()
-      throw error
+      if (nonMutating) throw error
+      if (isSandboxCapacityError(error)) throw sandboxCapacityError(true)
+      if (error instanceof WrapperServiceError) {
+        throw new WrapperServiceError(error.code, error.message, error.status, {
+          sessionInvalidated: true,
+        })
+      }
+      throw new WrapperServiceError(
+        'action_failed',
+        'The isolated browser operation failed.',
+        500,
+        { sessionInvalidated: true },
+      )
     }
   }
 

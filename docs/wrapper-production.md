@@ -10,7 +10,7 @@ The production path keeps the wrapper UI on Vercel and runs each inspected websi
 4. `Sandbox.create` uses `persistent: false`, a hard five-minute timeout, 2 vCPU/4 GB, a reviewed Chromium snapshot, and a fail-closed network policy.
 5. A bundled worker starts on a Unix-domain socket. No browser-control port is exposed publicly.
 6. Follow-up calls use only `Sandbox.get({ name, resume: false })`. Unknown and expired names fail closed. The code never calls `getOrCreate` and never creates a replacement during reconnect.
-7. `POST /api/wrapper/action` forwards the WebMCP AbortSignal through the Vercel Function, Sandbox command, worker request, and Playwright action. A begun failing or aborted action deletes the Sandbox; input, unavailable-tool, and page-limit rejections that happen before mutation preserve it.
+7. `POST /api/wrapper/action` requires the wrapper-generated capability ID alongside the public tool name, then forwards the WebMCP AbortSignal through the Vercel Function, Sandbox command, worker request, and Playwright action. A stale queued capability fails before mutation. A begun, unknown, or aborted action deletes the Sandbox and returns a sanitized invalidation signal when a response remains possible; only an explicit worker-trusted non-mutating rejection preserves it.
 8. `DELETE /api/wrapper/session` closes the worker and deletes the non-persistent Sandbox. The worker also stops on expiry, function abort, browser failure, or explicit close.
 
 ## Enforced boundaries
@@ -19,12 +19,14 @@ The production path keeps the wrapper UI on Vercel and runs each inspected websi
 - DNS answers must all be public. Chromium pins the validated address. Private, local, reserved, documentation, multicast, IPv4-mapped IPv6, and NAT64 ranges are denied again at the Sandbox firewall.
 - Cross-origin redirects, subframes, popups, downloads, uploads, service workers, WebSockets, EventSource, WebRTC, Beacon, form submission, and non-reading methods are blocked.
 - Preparation actions set the context offline before page mutation. They never submit and allow zero page network requests.
-- DOM safety classification and native control operations run in a CDP isolated world. Server-only backend-node identities bind actions and verification to the classified element; page-visible marker attributes and mutable main-realm prototypes are not trust anchors.
+- DOM safety classification and native control operations run in a CDP isolated world. Server-only backend-node identities bind actions and verification to the classified element; page-visible marker attributes and mutable main-realm prototypes are not trust anchors. Controls and links must intersect the fixed 1365×900 screenshot viewport both during classification and immediately before state reads, writes, or verification.
+- Sensitive-field classification independently checks every accessible naming source, including all `aria-labelledby` targets (HTML, SVG, and other elements), every associated label, aria-label, placeholder, name, ID, and relevant link evidence. No bounded public-label fallback can hide a sensitive source.
 - Remote names and labels stay evidence only. Public schemas use wrapper-owned names such as `field_1`, index-based links, and index-based options. Sensitive and consequential fields are excluded.
 - One current page is analyzed by default. Only explicit safe same-origin navigation adds another page; the hard cap is ten pages per session.
 - Request bodies are capped at 32 KiB, serialized responses at 2 MiB, screenshots at 900 KiB, DOM evidence at 80 controls, AX evidence at 40 nodes, analysis at 35 seconds, and actions at 15 seconds.
 - No page content, screenshots, or form values are written to application storage. `persistent: false` prevents automatic Sandbox filesystem snapshots.
 - `GET /api/wrapper/health` reports liveness separately from readiness. `alive` remains true for the Function while `ready` is false until either a reviewed snapshot ID or explicit browser image is configured.
+- The UI keeps tools only after a literal worker-trusted `sessionInvalidated: false`. True, missing, malformed, aborted, or otherwise uncertain action outcomes unregister tools, clear the local analysis and credentials, show a reanalysis notice, and attempt an idempotent best-effort session close.
 
 ## Snapshot path
 

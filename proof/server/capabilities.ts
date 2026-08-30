@@ -68,6 +68,7 @@ export interface ActionField {
 export interface CapabilityAction {
   kind: WrapperInteractionKind
   backendNodeId?: number
+  backendNodeIds?: number[]
   controlType?: string
   urls?: string[]
   optionValues?: string[]
@@ -256,6 +257,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       sampleInput: { linkIndex: 0 },
       action: {
         kind: 'navigation',
+        backendNodeIds: links.map(({ backendNodeId }) => backendNodeId),
         urls: links.map(({ optionValues }) => optionValues?.[0] as string),
       },
     })

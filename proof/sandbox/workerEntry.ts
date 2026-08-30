@@ -125,16 +125,18 @@ const server = createServer(async (request, response) => {
       const body = await readBody(request)
       if (
         typeof body.toolName !== 'string'
+        || typeof body.capabilityId !== 'string'
         || !body.input
         || typeof body.input !== 'object'
         || Array.isArray(body.input)
-      ) throw new WrapperServiceError('invalid_action', 'toolName and input are required.', 400)
+      ) throw new WrapperServiceError('invalid_action', 'capabilityId, toolName, and input are required.', 400)
       const result = await service.execute(
         internalSessionId,
         internalSessionToken,
         body.toolName,
         body.input as Record<string, unknown>,
         abortController.signal,
+        body.capabilityId,
       )
       sendJson(response, 200, result)
       return

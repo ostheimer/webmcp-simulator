@@ -26,6 +26,7 @@ try {
   const action = await post('/api/wrapper/action', {
     sessionId: analysis.sessionId,
     sessionToken: analysis.sessionToken,
+    capabilityId: capability.id,
     toolName: capability.name,
     input: capability.sampleInput,
   })

@@ -267,6 +267,7 @@ describe('production wrapper API boundaries', () => {
     const action = await handleActionRequest(request('/api/wrapper/action', {
       sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
       sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-test-action',
       toolName: 'prepare_page_search',
       input: { query: 'heat pump' },
     }, { clientId: 'action_client_00000001' }), target)
@@ -277,6 +278,7 @@ describe('production wrapper API boundaries', () => {
       'prepare_page_search',
       { query: 'heat pump' },
       expect.any(AbortSignal),
+      'capability-test-action',
     )
 
     const close = await handleCloseRequest(request('/api/wrapper/session', {
@@ -300,6 +302,7 @@ describe('production wrapper API boundaries', () => {
     const responsePromise = handleActionRequest(request('/api/wrapper/action', {
       sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
       sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-test-abort',
       toolName: 'prepare_page_search',
       input: { query: 'x' },
     }, { clientId: 'abort_client_000000001', signal: controller.signal }), aborting)
@@ -335,6 +338,7 @@ describe('production wrapper API boundaries', () => {
     const response = await handleActionRequest(request('/api/wrapper/action', {
       sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
       sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-test-limit',
       toolName: 'open_page_link',
       input: { linkIndex: 0 },
     }, { clientId: 'page_limit_client_000001' }), target)
@@ -343,6 +347,55 @@ describe('production wrapper API boundaries', () => {
     expect(await response.json()).toEqual({
       error: 'This session reached its 10-page analysis limit.',
       code: 'page_limit',
+    })
+  })
+
+  it('exposes only the trusted session invalidation boolean from action errors', async () => {
+    const invalidated = backend({
+      execute: vi.fn(async () => {
+        throw new WrapperServiceError(
+          'action_failed',
+          'The isolated browser operation failed.',
+          500,
+          { sessionInvalidated: true },
+        )
+      }),
+    })
+    const invalidatedResponse = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-invalidated',
+      toolName: 'prepare_page_search',
+      input: { query: 'x' },
+    }, { clientId: 'invalidated_client_0001' }), invalidated)
+    expect(invalidatedResponse.status).toBe(500)
+    expect(await invalidatedResponse.json()).toEqual({
+      error: 'The isolated browser operation failed.',
+      code: 'action_failed',
+      sessionInvalidated: true,
+    })
+
+    const preserved = backend({
+      execute: vi.fn(async () => {
+        throw new WrapperServiceError(
+          'invalid_action',
+          'The requested input is invalid.',
+          400,
+          { sessionInvalidated: false },
+        )
+      }),
+    })
+    const preservedResponse = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-preserved',
+      toolName: 'prepare_page_search',
+      input: { query: 'x' },
+    }, { clientId: 'preserved_client_00001' }), preserved)
+    expect(await preservedResponse.json()).toEqual({
+      error: 'The requested input is invalid.',
+      code: 'invalid_action',
+      sessionInvalidated: false,
     })
   })
 

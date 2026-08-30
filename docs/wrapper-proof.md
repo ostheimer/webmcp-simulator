@@ -24,7 +24,8 @@ React wrapper page
         origin (scheme, host, port); block XHR/fetch even during observation
      -> block frames, popups, downloads, WebSocket, EventSource, WebRTC,
         sendBeacon, service workers, uploads, and non-read HTTP methods
-     -> collect visible DOM controls/links, CDP accessibility nodes, screenshot
+     -> collect only DOM controls/links that intersect the fixed screenshot
+        viewport, plus CDP accessibility nodes and the viewport screenshot
      -> put Chromium offline at the capture boundary, then require all
         already-started requests to terminate before exposing any tool
      -> infer fixed-metadata search preparation, filter, safe form preparation,
@@ -33,6 +34,8 @@ React wrapper page
   -> register wrapper-owned tools through document.modelContext
   -> POST /api/wrapper/action
      -> validate the inferred tool input
+     -> bind the call to a wrapper-generated capability ID before queueing;
+        stale queued calls fail before mutation instead of reusing a tool name
      -> serialize mutations and propagate cancellation into the browser queue
      -> block every network request during and after preparation
      -> treat explicit same-origin navigation as a separate read-network policy
@@ -58,6 +61,10 @@ copied into tool titles, descriptions, parameter names, or parameter
 instructions. Form parameters use neutral `field_1`, `field_2`, and similar
 wrapper-owned keys; CDP backend-node references and remote identifiers remain
 server-only.
+Every accessible-name source is safety evidence: `aria-label`, every
+`aria-labelledby` reference (including non-HTML elements), every associated
+label, placeholder, name, and ID. Public display labels remain bounded and do
+not determine whether a field is sensitive.
 Filter and navigation choices use numeric indices. Password, secret, token,
 email, phone, message, payment, account, upload, purchase, booking, publishing,
 deletion, and similar controls are excluded.
@@ -108,7 +115,10 @@ metadata.
   needs a network-level egress firewall and site-specific abuse review because
   HTTP method semantics cannot prove business safety.
 - Cancellation closes any session whose browser mutation has begun; callers
-  must analyze again instead of continuing from a partially mutated page.
+  must analyze again instead of continuing from a partially mutated page. The
+  wrapper also retires its local analysis, credentials, and registered tools
+  after an abort or any error that lacks an explicit trusted non-mutating
+  `sessionInvalidated: false`, then sends a best-effort idempotent close.
 
 ## Hosting options and operational boundaries
 

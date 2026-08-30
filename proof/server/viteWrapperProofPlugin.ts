@@ -87,11 +87,12 @@ export function wrapperProofPlugin(): Plugin {
               typeof body.sessionId !== 'string'
               || typeof body.sessionToken !== 'string'
               || typeof body.toolName !== 'string'
+              || typeof body.capabilityId !== 'string'
               || !body.input
               || typeof body.input !== 'object'
               || Array.isArray(body.input)
             ) {
-              throw new Error('sessionId, toolName, and input are required.')
+              throw new Error('sessionId, capabilityId, toolName, and input are required.')
             }
             const controller = new AbortController()
             const abort = () => controller.abort()
@@ -107,6 +108,7 @@ export function wrapperProofPlugin(): Plugin {
                 body.toolName,
                 body.input as Record<string, unknown>,
                 controller.signal,
+                body.capabilityId,
               )
               if (controller.signal.aborted) {
                 await service.closeSession(body.sessionId, body.sessionToken)

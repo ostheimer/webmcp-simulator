@@ -366,6 +366,41 @@ describe('SandboxWrapperService session boundaries', () => {
     expect(harness.sandbox.deleted).toBe(1)
   })
 
+  it('marks every deleted action sandbox invalid even for capacity and unknown command failures', async () => {
+    const capacity = createHarness()
+    const capacityAnalysis = await capacity.service.analyze('https://public.example.at')
+    capacity.sandbox.forceError = {
+      code: 'sandbox_capacity',
+      status: 503,
+      error: 'Capacity is unavailable.',
+    }
+    await expect(capacity.service.execute(
+      capacityAnalysis.sessionId,
+      capacityAnalysis.sessionToken,
+      'prepare_page_search',
+      { query: 'x' },
+    )).rejects.toMatchObject({
+      code: 'sandbox_capacity',
+      sessionInvalidated: true,
+    })
+    expect(capacity.sandbox.deleted).toBe(1)
+
+    const unknown = createHarness()
+    const unknownAnalysis = await unknown.service.analyze('https://public.example.at')
+    unknown.sandbox.commandError = new Error('provider secret at /opt/sandbox')
+    await expect(unknown.service.execute(
+      unknownAnalysis.sessionId,
+      unknownAnalysis.sessionToken,
+      'prepare_page_search',
+      { query: 'x' },
+    )).rejects.toMatchObject({
+      code: 'action_failed',
+      message: 'The isolated browser operation failed.',
+      sessionInvalidated: true,
+    })
+    expect(unknown.sandbox.deleted).toBe(1)
+  })
+
   it('keeps cumulative worker runtime and cost monotonic when reconnect metrics are stale or absent', async () => {
     const harness = createHarness()
     harness.sandbox.totalDurationMs = 500
@@ -425,7 +460,11 @@ describe('SandboxWrapperService session boundaries', () => {
       analysis.sessionToken,
       'prepare_page_search',
       { query: 'x' },
-    )).rejects.toThrow('provider auth failed')
+    )).rejects.toMatchObject({
+      code: 'action_failed',
+      message: 'The isolated browser operation failed.',
+      sessionInvalidated: true,
+    })
     expect(actionHarness.sandbox.deleted).toBe(1)
 
     const closeHarness = createHarness()
