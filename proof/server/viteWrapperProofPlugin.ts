@@ -77,8 +77,7 @@ function assertLocalApiRequest(request: IncomingMessage): void {
   }
 }
 
-export function wrapperProofPlugin(): Plugin {
-  const service = new WrapperProofService()
+export function wrapperProofPlugin(service = new WrapperProofService()): Plugin {
   const activeAnalyses = new Set<string>()
   return {
     name: 'webmcp-wrapper-proof',
@@ -101,15 +100,34 @@ export function wrapperProofPlugin(): Plugin {
             return
           }
           if (request.method === 'POST' && request.url === '/analyze') {
-            const body = await readJson(request)
-            if (typeof body.url !== 'string') throw new Error('url must be a string.')
-            const clientId = request.headers['x-webmcp-client'] as string
-            if (activeAnalyses.has(clientId)) throw new Error('Only one website analysis may run per browser tab.')
-            activeAnalyses.add(clientId)
+            const controller = new AbortController()
+            const abort = () => controller.abort()
+            const abortOnClosedResponse = () => {
+              if (!response.writableEnded) controller.abort()
+            }
+            request.once('aborted', abort)
+            response.once('close', abortOnClosedResponse)
             try {
-              sendJson(response, 200, await service.analyze(body.url))
+              const body = await readJson(request)
+              if (typeof body.url !== 'string') throw new Error('url must be a string.')
+              const clientId = request.headers['x-webmcp-client'] as string
+              if (activeAnalyses.has(clientId)) throw new Error('Only one website analysis may run per browser tab.')
+              activeAnalyses.add(clientId)
+              try {
+                const analysis = await service.analyze(body.url, controller.signal)
+                if (controller.signal.aborted) {
+                  await service.closeSession(analysis.sessionId, analysis.sessionToken)
+                  return
+                }
+                sendJson(response, 200, analysis)
+              } finally {
+                activeAnalyses.delete(clientId)
+              }
+            } catch (error) {
+              if (!controller.signal.aborted) throw error
             } finally {
-              activeAnalyses.delete(clientId)
+              request.off('aborted', abort)
+              response.off('close', abortOnClosedResponse)
             }
             return
           }

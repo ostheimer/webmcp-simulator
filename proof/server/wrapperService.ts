@@ -159,6 +159,10 @@ function abortError(): DOMException {
   return new DOMException('The isolated tool call was cancelled.', 'AbortError')
 }
 
+function analysisAbortError(): DOMException {
+  return new DOMException('The isolated analysis was cancelled.', 'AbortError')
+}
+
 function actionVerificationError(message: string): WrapperServiceError {
   return new WrapperServiceError('invalid_action', message, 409)
 }
@@ -1329,15 +1333,18 @@ export class WrapperProofService {
     }
   }
 
-  async analyze(value: string): Promise<WrapperAnalysis> {
-    await this.closeExpiredSessions()
+  async analyze(value: string, signal?: AbortSignal): Promise<WrapperAnalysis> {
+    throwIfAborted(signal)
+    await raceWithSignal(this.closeExpiredSessions(), signal)
+    throwIfAborted(signal)
     if (this.sessions.size >= MAX_CONCURRENT_SESSIONS) {
       const oldestSessionId = this.sessions.keys().next().value as string | undefined
       if (oldestSessionId) await this.destroySession(oldestSessionId)
     }
-    const target = await this.resolveTarget(value)
+    throwIfAborted(signal)
+    const target = await raceWithSignal(this.resolveTarget(value), signal)
     const pinnedAddress = target.pinnedAddress.includes(':') ? `[${target.pinnedAddress}]` : target.pinnedAddress
-    const browser = await chromium.launch({
+    const browserLaunch = chromium.launch({
       headless: true,
       chromiumSandbox: true,
       args: [
@@ -1349,170 +1356,201 @@ export class WrapperProofService {
         '--no-first-run',
       ],
     })
-    const context = await browser.newContext({
-      acceptDownloads: false,
-      javaScriptEnabled: true,
-      serviceWorkers: 'block',
-      viewport: { width: CAPTURE_VIEWPORT_WIDTH, height: CAPTURE_VIEWPORT_HEIGHT },
-    })
-    await context.addInitScript(() => {
-      Object.defineProperty(window, 'WebSocket', {
-        configurable: false,
-        value: class BlockedWebSocket {
-          constructor() {
-            throw new DOMException('WebSockets are disabled in the isolated proof.', 'SecurityError')
-          }
-        },
-      })
-      Object.defineProperty(window, 'EventSource', {
-        configurable: false,
-        value: class BlockedEventSource {
-          constructor() {
-            throw new DOMException('EventSource is disabled in the isolated proof.', 'SecurityError')
-          }
-        },
-      })
-      Object.defineProperty(window, 'RTCPeerConnection', { configurable: false, value: undefined })
-      Object.defineProperty(navigator, 'sendBeacon', { configurable: false, value: () => false })
-      document.addEventListener('submit', (event) => {
-        event.preventDefault()
-        event.stopImmediatePropagation()
-      }, true)
-      Object.defineProperty(HTMLFormElement.prototype, 'submit', {
-        configurable: false,
-        value() {
-          throw new DOMException('Form submission is disabled in the isolated proof.', 'SecurityError')
-        },
-      })
-      Object.defineProperty(HTMLFormElement.prototype, 'requestSubmit', {
-        configurable: false,
-        value() {
-          throw new DOMException('Form submission is disabled in the isolated proof.', 'SecurityError')
-        },
-      })
-    })
-    await context.routeWebSocket(/.*/, (webSocket) => webSocket.close())
-    const page = await context.newPage()
-    const cdp = await context.newCDPSession(page)
-    await cdp.send('Page.enable')
-    await cdp.send('Network.enable')
-    const id = randomUUID()
-    const token = createSessionCapability()
-    const createdAtMs = Date.now()
-    let resolveTargetTrafficFailure!: (error: WrapperServiceError) => void
-    const targetTrafficFailure = new Promise<WrapperServiceError>((resolve) => {
-      resolveTargetTrafficFailure = resolve
-    })
-    const session: ProofSession = {
-      id,
-      token,
-      browser,
-      context,
-      page,
-      requestedUrl: target.url,
-      targetOrigin: target.origin,
-      capabilities: new Map(),
-      queue: Promise.resolve(),
-      expiresAt: createdAtMs + WRAPPER_SESSION_TTL_MS,
-      blockedRequests: 0,
-      allowedRequests: 0,
-      analyzedPages: 1,
-      createdAtMs,
-      networkLocked: false,
-      networkMode: 'observing',
-      activeNetworkMetrics: null,
-      inFlightRequests: new Set(),
-      cdp,
-      targetResourceTransfers: new Map(),
-      targetTrafficBytes: 0,
-      targetTrafficError: null,
-      targetTrafficFailure,
-      resolveTargetTrafficFailure,
-      navigationPolicyError: null,
-    }
-    this.sessions.set(id, session)
-    this.installTargetTrafficMonitor(session)
-    this.installNavigationDocumentGuard(session)
-    await cdp.send('Fetch.enable', {
-      patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Request' }],
-    })
-
-    await context.route('**/*', async (route) => {
-      const request = route.request()
-      const resourceUrl = request.url()
-      if (resourceUrl.startsWith('data:') || resourceUrl.startsWith('blob:') || resourceUrl === 'about:blank') {
-        await route.continue()
-        return
-      }
-      const method = request.method().toUpperCase()
-      const resourceType = request.resourceType()
-      const isSubframe = request.isNavigationRequest() && request.frame() !== page.mainFrame()
-      const isMainFrameDocument = resourceType === 'document' && !isSubframe
-      const consequentialNavigation = session.networkMode === 'navigation'
-        && isMainFrameDocument
-        && isConsequentialNavigationUrl(resourceUrl)
-      if (consequentialNavigation) {
-        session.blockedRequests += 1
-        if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
-        this.failConsequentialNavigation(session)
-        await route.abort('blockedbyclient')
-        return
-      }
-      const allowedByOrigin = isSameOriginHttpUrl(resourceUrl, session.targetOrigin)
-        && ['GET', 'HEAD'].includes(method)
-        && ['document', 'stylesheet', 'image', 'font', 'script'].includes(resourceType)
-        && !isSubframe
-      const blockForFrozenSession = session.networkMode === 'blocked'
-        || session.networkLocked
-        || Boolean(session.targetTrafficError)
-      if (blockForFrozenSession || !allowedByOrigin) {
-        session.blockedRequests += 1
-        if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
-        await route.abort('blockedbyclient')
-        return
-      }
-      if (session.activeNetworkMetrics) session.activeNetworkMetrics.allowed += 1
-      session.allowedRequests += 1
-      session.inFlightRequests.add(request)
-      try {
-        await route.continue()
-      } catch (error) {
-        session.inFlightRequests.delete(request)
-        throw error
-      }
-    })
-    context.on('page', (popup) => {
-      if (popup !== page) void popup.close()
-    })
-    page.on('dialog', (dialog) => void dialog.dismiss())
-    page.on('download', (download) => void download.cancel())
-    page.on('requestfinished', (request) => session.inFlightRequests.delete(request))
-    page.on('requestfailed', (request) => session.inFlightRequests.delete(request))
-
+    let browser: Browser
     try {
-      await raceWithSessionPolicy(
-        session,
-        page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }),
-      )
-      await raceWithSessionPolicy(session, page.waitForTimeout(600))
-      if (!isSameOriginHttpUrl(page.url(), session.targetOrigin)) {
-        throw new Error('The page redirected outside its validated origin.')
-      }
-      session.networkMode = 'blocked'
-      await raceWithSessionPolicy(session, context.setOffline(true))
-      await waitForNetworkQuiescence(session)
-      const analysis = await raceWithSessionPolicy(session, this.collectAnalysis(session))
-      return analysis
+      browser = await raceWithSignal(browserLaunch, signal)
     } catch (error) {
-      await this.destroySession(id)
-      if (session.targetTrafficError) throw session.targetTrafficError
-      if (session.navigationPolicyError) throw session.navigationPolicyError
-      if (error instanceof WrapperServiceError) throw error
-      throw new WrapperServiceError(
-        'unsupported_page',
-        'This page could not be loaded safely in the isolated browser.',
-        422,
-      )
+      if (signal?.aborted) {
+        void browserLaunch.then((launchedBrowser) => launchedBrowser.close()).catch(() => undefined)
+        throw analysisAbortError()
+      }
+      throw error
+    }
+    if (signal?.aborted) {
+      await browser.close().catch(() => undefined)
+      throw analysisAbortError()
+    }
+    let context: BrowserContext | undefined
+    let createdSessionId: string | undefined
+    try {
+      context = await raceWithSignal(browser.newContext({
+        acceptDownloads: false,
+        javaScriptEnabled: true,
+        serviceWorkers: 'block',
+        viewport: { width: CAPTURE_VIEWPORT_WIDTH, height: CAPTURE_VIEWPORT_HEIGHT },
+      }), signal)
+      await raceWithSignal(context.addInitScript(() => {
+        Object.defineProperty(window, 'WebSocket', {
+          configurable: false,
+          value: class BlockedWebSocket {
+            constructor() {
+              throw new DOMException('WebSockets are disabled in the isolated proof.', 'SecurityError')
+            }
+          },
+        })
+        Object.defineProperty(window, 'EventSource', {
+          configurable: false,
+          value: class BlockedEventSource {
+            constructor() {
+              throw new DOMException('EventSource is disabled in the isolated proof.', 'SecurityError')
+            }
+          },
+        })
+        Object.defineProperty(window, 'RTCPeerConnection', { configurable: false, value: undefined })
+        Object.defineProperty(navigator, 'sendBeacon', { configurable: false, value: () => false })
+        document.addEventListener('submit', (event) => {
+          event.preventDefault()
+          event.stopImmediatePropagation()
+        }, true)
+        Object.defineProperty(HTMLFormElement.prototype, 'submit', {
+          configurable: false,
+          value() {
+            throw new DOMException('Form submission is disabled in the isolated proof.', 'SecurityError')
+          },
+        })
+        Object.defineProperty(HTMLFormElement.prototype, 'requestSubmit', {
+          configurable: false,
+          value() {
+            throw new DOMException('Form submission is disabled in the isolated proof.', 'SecurityError')
+          },
+        })
+      }), signal)
+      await raceWithSignal(context.routeWebSocket(/.*/, (webSocket) => webSocket.close()), signal)
+      const page = await raceWithSignal(context.newPage(), signal)
+      const cdp = await raceWithSignal(context.newCDPSession(page), signal)
+      await raceWithSignal(cdp.send('Page.enable'), signal)
+      await raceWithSignal(cdp.send('Network.enable'), signal)
+      const id = randomUUID()
+      const token = createSessionCapability()
+      const createdAtMs = Date.now()
+      let resolveTargetTrafficFailure!: (error: WrapperServiceError) => void
+      const targetTrafficFailure = new Promise<WrapperServiceError>((resolve) => {
+        resolveTargetTrafficFailure = resolve
+      })
+      const session: ProofSession = {
+        id,
+        token,
+        browser,
+        context,
+        page,
+        requestedUrl: target.url,
+        targetOrigin: target.origin,
+        capabilities: new Map(),
+        queue: Promise.resolve(),
+        expiresAt: createdAtMs + WRAPPER_SESSION_TTL_MS,
+        blockedRequests: 0,
+        allowedRequests: 0,
+        analyzedPages: 1,
+        createdAtMs,
+        networkLocked: false,
+        networkMode: 'observing',
+        activeNetworkMetrics: null,
+        inFlightRequests: new Set(),
+        cdp,
+        targetResourceTransfers: new Map(),
+        targetTrafficBytes: 0,
+        targetTrafficError: null,
+        targetTrafficFailure,
+        resolveTargetTrafficFailure,
+        navigationPolicyError: null,
+      }
+      this.sessions.set(id, session)
+      createdSessionId = id
+      this.installTargetTrafficMonitor(session)
+      this.installNavigationDocumentGuard(session)
+      await raceWithSignal(cdp.send('Fetch.enable', {
+        patterns: [{ urlPattern: '*', resourceType: 'Document', requestStage: 'Request' }],
+      }), signal)
+
+      await raceWithSignal(context.route('**/*', async (route) => {
+        const request = route.request()
+        const resourceUrl = request.url()
+        if (resourceUrl.startsWith('data:') || resourceUrl.startsWith('blob:') || resourceUrl === 'about:blank') {
+          await route.continue()
+          return
+        }
+        const method = request.method().toUpperCase()
+        const resourceType = request.resourceType()
+        const isSubframe = request.isNavigationRequest() && request.frame() !== page.mainFrame()
+        const isMainFrameDocument = resourceType === 'document' && !isSubframe
+        const consequentialNavigation = session.networkMode === 'navigation'
+          && isMainFrameDocument
+          && isConsequentialNavigationUrl(resourceUrl)
+        if (consequentialNavigation) {
+          session.blockedRequests += 1
+          if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
+          this.failConsequentialNavigation(session)
+          await route.abort('blockedbyclient')
+          return
+        }
+        const allowedByOrigin = isSameOriginHttpUrl(resourceUrl, session.targetOrigin)
+          && ['GET', 'HEAD'].includes(method)
+          && ['document', 'stylesheet', 'image', 'font', 'script'].includes(resourceType)
+          && !isSubframe
+        const blockForFrozenSession = session.networkMode === 'blocked'
+          || session.networkLocked
+          || Boolean(session.targetTrafficError)
+        if (blockForFrozenSession || !allowedByOrigin) {
+          session.blockedRequests += 1
+          if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
+          await route.abort('blockedbyclient')
+          return
+        }
+        if (session.activeNetworkMetrics) session.activeNetworkMetrics.allowed += 1
+        session.allowedRequests += 1
+        session.inFlightRequests.add(request)
+        try {
+          await route.continue()
+        } catch (error) {
+          session.inFlightRequests.delete(request)
+          throw error
+        }
+      }), signal)
+      context.on('page', (popup) => {
+        if (popup !== page) void popup.close()
+      })
+      page.on('dialog', (dialog) => void dialog.dismiss())
+      page.on('download', (download) => void download.cancel())
+      page.on('requestfinished', (request) => session.inFlightRequests.delete(request))
+      page.on('requestfailed', (request) => session.inFlightRequests.delete(request))
+
+      try {
+        throwIfAborted(signal)
+        await raceWithSessionPolicy(
+          session,
+          page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS }),
+          signal,
+        )
+        await raceWithSessionPolicy(session, page.waitForTimeout(600), signal)
+        if (!isSameOriginHttpUrl(page.url(), session.targetOrigin)) {
+          throw new Error('The page redirected outside its validated origin.')
+        }
+        session.networkMode = 'blocked'
+        await raceWithSessionPolicy(session, context.setOffline(true), signal)
+        await waitForNetworkQuiescence(session, signal)
+        const analysis = await raceWithSessionPolicy(session, this.collectAnalysis(session), signal)
+        return analysis
+      } catch (error) {
+        await this.destroySession(id)
+        if (session.targetTrafficError) throw session.targetTrafficError
+        if (session.navigationPolicyError) throw session.navigationPolicyError
+        if (signal?.aborted) throw analysisAbortError()
+        if (error instanceof WrapperServiceError) throw error
+        throw new WrapperServiceError(
+          'unsupported_page',
+          'This page could not be loaded safely in the isolated browser.',
+          422,
+        )
+      }
+    } catch (error) {
+      if (createdSessionId) {
+        await this.destroySession(createdSessionId)
+      } else {
+        await context?.close().catch(() => undefined)
+        await browser.close().catch(() => undefined)
+      }
+      if (signal?.aborted) throw analysisAbortError()
+      throw error
     }
   }
 

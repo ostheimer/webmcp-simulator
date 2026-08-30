@@ -41,6 +41,8 @@ React wrapper page
      -> bind the call to a wrapper-generated capability ID before queueing;
         stale queued calls fail before mutation instead of reusing a tool name
      -> serialize mutations and propagate cancellation into the browser queue
+     -> propagate abandoned analysis requests into local/worker Chromium setup,
+        navigation, capture, and immediate session teardown
      -> block every network request during and after preparation
      -> treat explicit same-origin navigation as a separate read-network policy
         and inspect every main-document redirect hop before network continuation

@@ -106,7 +106,12 @@ const server = createServer(async (request, response) => {
         })
         return
       }
-      const analysis = await service.analyze(config.target.url)
+      const analysis = await service.analyze(config.target.url, abortController.signal)
+      if (abortController.signal.aborted) {
+        await service.closeSession(analysis.sessionId, analysis.sessionToken)
+        await closeWorker()
+        return
+      }
       internalSessionId = analysis.sessionId
       internalSessionToken = analysis.sessionToken
       sendJson(response, 200, analysis)
