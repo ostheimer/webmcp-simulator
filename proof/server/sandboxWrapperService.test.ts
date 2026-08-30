@@ -11,7 +11,7 @@ import {
 import { WRAPPER_SESSION_TTL_MS } from './wrapperLimits.ts'
 import { WrapperServiceError } from './wrapperErrors.ts'
 
-function analysisFixture(): WrapperAnalysis {
+function analysisFixture(runtimeMs = 20): WrapperAnalysis {
   return {
     sessionId: 'internal-session',
     sessionToken: 'internal-token',
@@ -29,7 +29,7 @@ function analysisFixture(): WrapperAnalysis {
     expiresAt: '2026-08-30T10:05:00.000Z',
     runtime: {
       provider: 'local-playwright',
-      runtimeMs: 20,
+      runtimeMs,
       vcpus: 2,
       memoryMb: 4096,
       allowedNetworkRequests: 1,
@@ -45,8 +45,8 @@ function analysisFixture(): WrapperAnalysis {
   }
 }
 
-function actionFixture(): WrapperActionResult {
-  const analysis = analysisFixture()
+function actionFixture(runtimeMs = 20): WrapperActionResult {
+  const analysis = analysisFixture(runtimeMs)
   return {
     finalUrl: analysis.finalUrl,
     screenshotDataUrl: analysis.screenshotDataUrl,
@@ -81,8 +81,9 @@ class FakeSandbox {
   forceError?: { status: number, code: string, error: string, sessionInvalidated?: boolean }
   delayAction = false
   commandError?: Error
-  totalDurationMs = 1_000
-  totalActiveCpuDurationMs = 100
+  totalDurationMs: number | undefined = 1_000
+  workerRuntimeMs = 20
+  totalActiveCpuDurationMs: number | undefined = 100
   totalIngressBytes = 2_000
   totalEgressBytes = 1_000
 
@@ -121,9 +122,9 @@ class FakeSandbox {
         }
       : status === 200
       ? operation === 'analyze'
-        ? analysisFixture()
+        ? analysisFixture(this.workerRuntimeMs)
         : operation === 'action'
-          ? actionFixture()
+          ? actionFixture(this.workerRuntimeMs)
           : { ready: true, closed: true }
       : status === 410
         ? { error: 'The isolated browser session expired.', code: 'session_expired' }
@@ -317,6 +318,38 @@ describe('SandboxWrapperService session boundaries', () => {
       sessionInvalidated: true,
     })
     expect(harness.sandbox.deleted).toBe(1)
+  })
+
+  it('keeps cumulative worker runtime and cost monotonic when reconnect metrics are stale or absent', async () => {
+    const harness = createHarness()
+    harness.sandbox.totalDurationMs = 500
+    harness.sandbox.totalActiveCpuDurationMs = undefined
+    harness.sandbox.workerRuntimeMs = 1_200
+    const analysis = await harness.service.analyze('https://public.example.at')
+    expect(analysis.runtime.runtimeMs).toBe(1_200)
+
+    harness.sandbox.totalDurationMs = undefined
+    harness.sandbox.workerRuntimeMs = 2_500
+    const first = await harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'first' },
+    )
+    harness.sandbox.workerRuntimeMs = 4_200
+    const second = await harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'second' },
+    )
+
+    expect([analysis.runtime.runtimeMs, first.analysis.runtime.runtimeMs, second.analysis.runtime.runtimeMs])
+      .toEqual([1_200, 2_500, 4_200])
+    expect(second.analysis.runtime.estimatedCost.lowerBound)
+      .toBeGreaterThanOrEqual(first.analysis.runtime.estimatedCost.lowerBound)
+    expect(second.analysis.runtime.estimatedCost.upperBound)
+      .toBeGreaterThanOrEqual(first.analysis.runtime.estimatedCost.upperBound)
   })
 
   it('propagates abort to the command and deletes the partially mutable sandbox', async () => {

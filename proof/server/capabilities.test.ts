@@ -151,4 +151,27 @@ describe('inferSafeCapabilities', () => {
     })
     expect(form.sampleInput).toEqual({ field_1: 0, field_2: 'Sample' })
   })
+
+  it.each([
+    ['date', '2026-01-15', '^[1-9]', 'date'],
+    ['month', '2026-01', '^[1-9]', undefined],
+    ['time', '12:00', '^(?:', undefined],
+    ['week', '2026-W01', '^[1-9]', undefined],
+  ])('publishes a format-valid sample and bounded schema for %s controls', (type, sample, patternStart, format) => {
+    const capabilities = inferSafeCapabilities([
+      control({ id: `${type}-1`, fieldKey: type, formId: 'form-1', type }),
+      control({ id: 'text-1', fieldKey: 'details', formId: 'form-1', type: 'text' }),
+    ])
+
+    const form = capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const fieldSchema = (form.inputSchema.properties as Record<string, Record<string, unknown>>).field_1
+    expect(form.sampleInput).toMatchObject({ field_1: sample })
+    expect(fieldSchema).toMatchObject({
+      type: 'string',
+      pattern: expect.stringContaining(patternStart),
+      minLength: sample.length,
+      maxLength: sample.length,
+      ...(format ? { format } : {}),
+    })
+  })
 })

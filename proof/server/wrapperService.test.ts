@@ -35,6 +35,21 @@ async function startFixture(): Promise<Fixture> {
           oninput="setTimeout(() => { this.value = 'reset-by-page' }, 40)">`)
       return
     }
+    if (requestUrl === '/reorder-verification') {
+      response.end(`<!doctype html><title>Reorder fixture</title>
+        <input type="search" aria-label="Original search" oninput="
+          if (!this.dataset.reordered) {
+            this.dataset.reordered = 'true';
+            const decoy = document.createElement('input');
+            decoy.type = 'search';
+            decoy.setAttribute('aria-label', 'Inserted decoy');
+            decoy.value = this.value;
+            this.before(decoy);
+            this.value = 'reset-by-page';
+          }
+        ">`)
+      return
+    }
     if (requestUrl === '/next') {
       response.end(`<!doctype html><title>Second page</title>
         <main><h1>Second page</h1><input type="search" aria-label="Search destination"></main>`)
@@ -59,6 +74,14 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/date-like-forms') {
+      response.end(`<!doctype html><title>Date-like forms</title>
+        <form><input type="date" name="start_date" aria-label="Start date"><input type="text" name="date_details" aria-label="Date details"></form>
+        <form><input type="month" name="start_month" aria-label="Start month"><input type="text" name="month_details" aria-label="Month details"></form>
+        <form><input type="time" name="start_time" aria-label="Start time"><input type="text" name="time_details" aria-label="Time details"></form>
+        <form><input type="week" name="start_week" aria-label="Start week"><input type="text" name="week_details" aria-label="Week details"></form>`)
+      return
+    }
     if (requestUrl === '/visibility') {
       response.end(`<!doctype html><title>Visibility fixture</title>
         <input type="search" aria-label="Visible search">
@@ -79,6 +102,10 @@ async function startFixture(): Promise<Fixture> {
           <input type="text" name="neutral_mail" aria-label="Neutral field D" autocomplete="EMAIL">
           <input type="text" name="neutral_card" aria-label="Neutral field E" autocomplete="section-x billing cc-number">
           <input type="text" name="neutral_passcode" aria-label="Neutral field F" autocomplete="SMS-OTP">
+          <input type="text" name="creditCard" aria-label="Neutral field G">
+          <input type="text" name="billingAddress" aria-label="Neutral field H">
+          <input type="text" name="userPassword" aria-label="Neutral field I">
+          <input type="text" name="userSSNValue" aria-label="Neutral field J">
         </form>`)
       return
     }
@@ -302,6 +329,54 @@ describe('WrapperProofService security boundaries', () => {
     expect(selectResult.structuredContent.targetStateVerified).toBe(true)
   })
 
+  it('validates and retains date, month, time, and ISO week values before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/date-like-forms`)
+    const initialDate = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      initialDate.name,
+      { field_1: '2026-02-31' },
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400 })
+
+    const expectedSamples = ['2026-01-15', '2026-01', '12:00', '2026-W01']
+    for (let index = 0; index < expectedSamples.length; index += 1) {
+      const toolName = index === 0 ? 'prepare_visible_form' : `prepare_visible_form_${index + 1}`
+      const capability = analysis.capabilities.find(({ name }) => name === toolName)!
+      expect(capability.sampleInput.field_1).toBe(expectedSamples[index])
+      const result = await service.execute(
+        analysis.sessionId,
+        analysis.sessionToken,
+        capability.name,
+        capability.sampleInput,
+      )
+      expect(result.structuredContent).toMatchObject({
+        isolatedStateChanged: true,
+        targetStateVerified: true,
+      })
+      analysis = result.analysis
+    }
+
+    const week = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_4')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      week.name,
+      { field_1: '2025-W53' },
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400 })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      week.name,
+      { field_1: '2026-W53' },
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
   it('excludes transparent and zero-geometry controls from visible evidence and capabilities', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -329,6 +404,10 @@ describe('WrapperProofService security boundaries', () => {
       'Neutral field D',
       'Neutral field E',
       'Neutral field F',
+      'Neutral field G',
+      'Neutral field H',
+      'Neutral field I',
+      'Neutral field J',
     ])
 
     const linkAnalysis = await service.analyze(`${fixture.origin}/unsafe-links`)
@@ -404,6 +483,32 @@ describe('WrapperProofService security boundaries', () => {
       analysis.sessionId,
       analysis.sessionToken,
       search!.name,
+      { query: 'second-value' },
+    )).rejects.toThrow('session expired')
+  })
+
+  it('verifies the original marked control before hostile DOM reordering can rewrite selectors', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/reorder-verification`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'agent-value' },
+    )).rejects.toMatchObject({
+      code: 'invalid_action',
+      sessionInvalidated: true,
+      message: 'The page did not retain the prepared search value.',
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
       { query: 'second-value' },
     )).rejects.toThrow('session expired')
   })

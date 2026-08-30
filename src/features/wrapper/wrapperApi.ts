@@ -57,5 +57,5 @@ export function closeWrapperSession(sessionId: string, sessionToken: string): vo
     headers: wrapperHeaders(),
     body: JSON.stringify({ sessionId, sessionToken }),
     keepalive: true,
-  })
+  }).catch(() => undefined)
 }

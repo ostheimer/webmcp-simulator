@@ -79,19 +79,9 @@ function isNonPublicIpv4(parts: number[]): boolean {
     || first >= 224
 }
 
-// Source: IANA IPv6 Special-Purpose Address Space registry.
-// The broad 2001::/23 allocation is not globally reachable except for these
-// more-specific assignments. ORCHID ranges intentionally remain excluded
-// because they are identifiers, not public website endpoints.
-const globallyReachableIetfExceptions = [
-  ['2001:1::1', 128],
-  ['2001:1::2', 128],
-  ['2001:1::3', 128],
-  ['2001:3::', 32],
-  ['2001:4:112::', 48],
-  ['2001:30::', 28],
-] as const
-
+// Source: IANA IPv6 Special-Purpose Address Space registry. These broad ranges
+// deliberately match the Sandbox firewall deny list. Even more-specific public
+// exceptions remain unsupported until the network policy can carve them out.
 const nonPublicGlobalUnicastRanges = [
   ['2001::', 23],
   ['2001:db8::', 32],
@@ -128,23 +118,11 @@ function isNonPublicIpv6(value: string): boolean {
   const address = parseIpv6(value)
   if (address === null) return true
 
-  // RFC 6052 well-known NAT64 addresses carry an IPv4 destination in their
-  // final 32 bits. Reject every non-public embedded destination before the
-  // prefix is considered globally reachable, independent of translator policy.
+  // The Sandbox firewall denies this entire translator range. Reject it here
+  // as well so every accepted target is reachable under the generated policy.
   if (isInIpv6Cidr(address, '64:ff9b::', 96)) {
-    const embedded = Number(address & 0xffff_ffffn)
-    const ipv4 = [
-      (embedded >>> 24) & 0xff,
-      (embedded >>> 16) & 0xff,
-      (embedded >>> 8) & 0xff,
-      embedded & 0xff,
-    ]
-    return isNonPublicIpv4(ipv4)
+    return true
   }
-
-  if (globallyReachableIetfExceptions.some(
-    ([block, prefix]) => isInIpv6Cidr(address, block, prefix),
-  )) return false
 
   const isGlobalUnicast = isInIpv6Cidr(address, '2000::', 3)
   return !isGlobalUnicast || nonPublicGlobalUnicastRanges.some(

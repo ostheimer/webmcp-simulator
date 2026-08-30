@@ -26,6 +26,12 @@ describe('resolvePublicTarget', () => {
     '64:ff9b::7f00:1',
     '64:ff9b::a00:1',
     '64:ff9b::a9fe:a9fe',
+    '64:ff9b::0808:0808',
+    '64:ff9b::5db8:d822',
+    '2001:1::1',
+    '2001:3::1',
+    '2001:4:112::1',
+    '2001:30::1',
   ])('rejects a hostname that resolves to %s', async (address) => {
     await expect(resolvePublicTarget('https://public.example.at', async () => [
       { address, family: address.includes(':') ? 6 : 4 },
@@ -37,6 +43,16 @@ describe('resolvePublicTarget', () => {
       { address: '93.184.216.34', family: 4 },
       { address: '127.0.0.1', family: 4 },
     ])).rejects.toThrow('private, local, or reserved')
+  })
+
+  it.each([
+    'https://[64:ff9b::5db8:d822]/',
+    'https://[2001:1::1]/',
+    'https://[2001:30::1]/',
+  ])('rejects the direct literal %s when the Sandbox firewall denies its range', async (value) => {
+    await expect(resolvePublicTarget(value, async () => {
+      throw new Error('Literal addresses must not perform DNS resolution.')
+    })).rejects.toMatchObject({ code: 'invalid_target', status: 400 })
   })
 
   it('maps DNS resolver failures to a safe invalid_target client error', async () => {

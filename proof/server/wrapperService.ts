@@ -6,6 +6,7 @@ import type {
   WrapperAxEvidence,
 } from '../../src/features/wrapper/types.ts'
 import {
+  DATE_LIKE_FIELD_SPECS,
   inferSafeCapabilities,
   publicCapability,
   type CapabilityAction,
@@ -142,6 +143,25 @@ function actionVerificationError(message: string): WrapperServiceError {
   return new WrapperServiceError('invalid_action', message, 409)
 }
 
+function isValidDateLikeInput(type: keyof typeof DATE_LIKE_FIELD_SPECS, value: unknown): value is string {
+  if (typeof value !== 'string' || !new RegExp(DATE_LIKE_FIELD_SPECS[type].pattern).test(value)) return false
+  if (type === 'date') {
+    const [year, month, day] = value.split('-').map(Number)
+    const date = new Date(Date.UTC(year, month - 1, day))
+    return date.getUTCFullYear() === year
+      && date.getUTCMonth() === month - 1
+      && date.getUTCDate() === day
+  }
+  if (type === 'week') {
+    const [yearValue, weekValue] = value.split('-W').map(Number)
+    if (weekValue < 53) return true
+    const januaryFirst = new Date(Date.UTC(yearValue, 0, 1)).getUTCDay()
+    const leapYear = yearValue % 4 === 0 && (yearValue % 100 !== 0 || yearValue % 400 === 0)
+    return januaryFirst === 4 || (januaryFirst === 3 && leapYear)
+  }
+  return true
+}
+
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortError()
 }
@@ -198,6 +218,10 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, limit)
+    const tokenizeEvidence = (value: unknown) => String(value ?? '')
+      .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
+      .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, '$1 $2')
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
     const visible = (element: HTMLElement) => {
       const rects = Array.from(element.getClientRects())
       if (element.hidden || !rects.some(({ width, height }) => width > 0 && height > 0)) return false
@@ -282,8 +306,9 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
       } catch {
         // A malformed encoded path remains untrusted evidence in its raw form.
       }
-      const unsafeEvidence = `${label} ${'name' in element ? element.name : ''} ${decodedLinkPath}`
-        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      const unsafeEvidence = tokenizeEvidence(
+        `${label} ${'name' in element ? element.name : ''} ${decodedLinkPath}`,
+      )
       const hasSensitiveAutocomplete = autocompleteTokens.some((token) =>
         sensitiveAutocomplete.has(token)
         || token.startsWith('cc-')
@@ -396,6 +421,10 @@ function validateActionInput(
     } else if (field.type === 'number' || field.type === 'range') {
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         throw new WrapperServiceError('invalid_action', `${key} must be a finite number.`, 400)
+      }
+    } else if (Object.hasOwn(DATE_LIKE_FIELD_SPECS, field.type)) {
+      if (!isValidDateLikeInput(field.type as keyof typeof DATE_LIKE_FIELD_SPECS, value)) {
+        throw new WrapperServiceError('invalid_action', `${key} must match the visible ${field.type} format.`, 400)
       }
     } else if (typeof value !== 'string' || Array.from(value).length > 200) {
       throw new WrapperServiceError('invalid_action', `${key} must be a string of at most 200 characters.`, 400)
@@ -864,9 +893,6 @@ export class WrapperProofService {
       if (!isSameOriginHttpUrl(session.page.url(), session.targetOrigin)) {
         throw new Error('The action attempted to leave the validated origin.')
       }
-      if (evidence.navigationOccurred) session.analyzedPages += 1
-      const analysis = await raceWithSignal(this.collectAnalysis(session), signal)
-      throwIfAborted(signal)
       await raceWithSignal(evidence.verify(), signal)
       throwIfAborted(signal)
       const isolatedStateChanged = await raceWithSignal(evidence.stateChanged(), signal)
@@ -874,6 +900,9 @@ export class WrapperProofService {
       if (!isolatedStateChanged) {
         throw actionVerificationError('The requested action did not change the isolated page state.')
       }
+      if (evidence.navigationOccurred) session.analyzedPages += 1
+      const analysis = await raceWithSignal(this.collectAnalysis(session), signal)
+      throwIfAborted(signal)
       session.expiresAt = Math.min(
         session.createdAtMs + WRAPPER_SESSION_TTL_MS,
         Date.now() + WRAPPER_SESSION_TTL_MS,

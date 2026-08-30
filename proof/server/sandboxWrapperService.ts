@@ -205,7 +205,12 @@ function decorateAnalysis(
   startedAtMs: number,
   now: () => number,
 ): WrapperAnalysis {
-  const runtimeMs = Math.max(0, sandbox.totalDurationMs ?? now() - startedAtMs)
+  const runtimeMs = Math.max(
+    0,
+    sandbox.totalDurationMs ?? 0,
+    analysis.runtime.runtimeMs,
+    now() - startedAtMs,
+  )
   const usage = {
     runtimeMs,
     activeCpuMs: sandbox.totalActiveCpuDurationMs,

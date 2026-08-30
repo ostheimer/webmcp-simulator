@@ -8,6 +8,34 @@ const SEARCH_HINT = /\b(search|find|query|suche|suchen)\b/i
 const FILTER_HINT = /\b(filter|category|sort|type|status|kategorie|filtern|sortieren)\b/i
 const UNSAFE_HINT = /\b(account|address|book|buy|card|checkout|comment|contact|delete|email|login|message|order|password|pay|phone|publish|register|remove|secrets?|security|send|signin|signup|ssn|subscribe|tokens?|upload|username|konto|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 
+export const DATE_LIKE_FIELD_SPECS = {
+  date: {
+    sample: '2026-01-15',
+    pattern: '^[1-9]\\d{3}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])$',
+    minLength: 10,
+    maxLength: 10,
+    format: 'date',
+  },
+  month: {
+    sample: '2026-01',
+    pattern: '^[1-9]\\d{3}-(?:0[1-9]|1[0-2])$',
+    minLength: 7,
+    maxLength: 7,
+  },
+  time: {
+    sample: '12:00',
+    pattern: '^(?:[01]\\d|2[0-3]):[0-5]\\d$',
+    minLength: 5,
+    maxLength: 5,
+  },
+  week: {
+    sample: '2026-W01',
+    pattern: '^[1-9]\\d{3}-W(?:0[1-9]|[1-4]\\d|5[0-3])$',
+    minLength: 8,
+    maxLength: 8,
+  },
+} as const
+
 export interface DetectedControl extends WrapperDomEvidence {
   optionValues?: string[]
   optionIndices?: number[]
@@ -62,6 +90,15 @@ function schemaForField(control: DetectedControl): Record<string, unknown> {
   if (['checkbox', 'radio'].includes(control.type)) {
     return { type: 'boolean', description: 'Checked state for the visible control.' }
   }
+  const dateLikeSpec = DATE_LIKE_FIELD_SPECS[control.type as keyof typeof DATE_LIKE_FIELD_SPECS]
+  if (dateLikeSpec) {
+    const { sample: _sample, ...schema } = dateLikeSpec
+    return {
+      type: 'string',
+      ...schema,
+      description: `Value for the visible ${control.type} control.`,
+    }
+  }
   return {
     type: 'string',
     maxLength: 200,
@@ -93,6 +130,8 @@ function sampleForActionField(field: ActionField): unknown {
   }
   if (field.type === 'number' || field.type === 'range') return 1
   if (field.type === 'checkbox' || field.type === 'radio') return true
+  const dateLikeSpec = DATE_LIKE_FIELD_SPECS[field.type as keyof typeof DATE_LIKE_FIELD_SPECS]
+  if (dateLikeSpec) return dateLikeSpec.sample
   return 'Sample'
 }
 
