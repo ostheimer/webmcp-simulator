@@ -86,6 +86,23 @@ function pendingAnalyzeRequest(options: { clientId: string, sourceIp: string }) 
   }
 }
 
+function observeBodyAccess(targetRequest: Request): { request: Request, count: () => number } {
+  const body = targetRequest.body
+  let accesses = 0
+  Object.defineProperty(targetRequest, 'body', {
+    configurable: true,
+    get() {
+      accesses += 1
+      return body
+    },
+  })
+  return { request: targetRequest, count: () => accesses }
+}
+
+function healthRequest(method = 'GET'): Request {
+  return new Request('https://wrapper.example/api/wrapper/health', { method })
+}
+
 function backend(overrides: Partial<ProductionWrapperBackend> = {}): ProductionWrapperBackend {
   return {
     analyze: vi.fn(async () => ({ ok: true })),
@@ -116,7 +133,7 @@ describe('production wrapper API boundaries', () => {
   })
 
   it('separates liveness from Sandbox readiness and reflects browser-source configuration', async () => {
-    const unconfigured = handleHealthRequest({})
+    const unconfigured = handleHealthRequest(healthRequest(), {})
     expect(unconfigured.status).toBe(200)
     expect(await unconfigured.json()).toMatchObject({
       alive: true,
@@ -124,10 +141,127 @@ describe('production wrapper API boundaries', () => {
       configuration: 'missing-browser-source',
     })
 
-    const snapshot = handleHealthRequest({ snapshotId: 'snap_reviewed' })
+    const snapshot = handleHealthRequest(healthRequest(), { snapshotId: 'snap_reviewed' })
     expect(await snapshot.json()).toMatchObject({ alive: true, ready: true, configuration: 'configured' })
-    const image = handleHealthRequest({ image: 'docker.io/reviewed/browser:1' })
+    const image = handleHealthRequest(healthRequest(), { image: 'docker.io/reviewed/browser:1' })
     expect(await image.json()).toMatchObject({ alive: true, ready: true, configuration: 'configured' })
+  })
+
+  it('enforces endpoint methods before source, rate, body, concurrency, or backend work', async () => {
+    const analyze = vi.fn(async () => ({ ok: true }))
+    const analyzeTarget = backend({ analyze })
+    const analyzeBody = { url: 'https://public.example.at' }
+    const analyzeOptions = {
+      clientId: 'method_analyze_client_001',
+      sourceIp: '198.51.100.241',
+    }
+    for (const method of ['DELETE', 'PATCH', 'PUT']) {
+      const observed = observeBodyAccess(request('/api/wrapper/analyze', analyzeBody, {
+        ...analyzeOptions,
+        method,
+      }))
+      observed.request.headers.delete('X-Vercel-Forwarded-For')
+      const response = await handleAnalyzeRequest(observed.request, analyzeTarget)
+      expect(response.status).toBe(405)
+      expect(response.headers.get('Allow')).toBe('POST')
+      expect(await response.json()).toEqual({
+        error: 'This wrapper API endpoint does not support the requested method.',
+        code: 'method_not_allowed',
+      })
+      expect(observed.count()).toBe(0)
+    }
+    for (let index = 0; index < 4; index += 1) {
+      expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', analyzeBody, analyzeOptions), analyzeTarget)).status)
+        .toBe(200)
+    }
+    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', analyzeBody, analyzeOptions), analyzeTarget)).status)
+      .toBe(429)
+    expect(analyze).toHaveBeenCalledTimes(4)
+
+    const execute = vi.fn(async () => ({ ok: true }))
+    const actionTarget = backend({ execute })
+    const actionBody = {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-method-boundary',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }
+    const actionOptions = {
+      clientId: 'method_action_client_0001',
+      sourceIp: '198.51.100.242',
+    }
+    for (const method of ['DELETE', 'PATCH', 'PUT']) {
+      const observed = observeBodyAccess(request('/api/wrapper/action', actionBody, {
+        ...actionOptions,
+        method,
+      }))
+      observed.request.headers.delete('X-Vercel-Forwarded-For')
+      const response = await handleActionRequest(observed.request, actionTarget)
+      expect(response.status).toBe(405)
+      expect(response.headers.get('Allow')).toBe('POST')
+      expect(await response.json()).toEqual({
+        error: 'This wrapper API endpoint does not support the requested method.',
+        code: 'method_not_allowed',
+        sessionInvalidated: false,
+      })
+      expect(observed.count()).toBe(0)
+    }
+    for (let index = 0; index < 30; index += 1) {
+      expect((await handleActionRequest(request('/api/wrapper/action', actionBody, actionOptions), actionTarget)).status)
+        .toBe(200)
+    }
+    expect((await handleActionRequest(request('/api/wrapper/action', actionBody, actionOptions), actionTarget)).status)
+      .toBe(429)
+    expect(execute).toHaveBeenCalledTimes(30)
+
+    const closeSession = vi.fn(async () => true)
+    const closeTarget = backend({ closeSession })
+    const closeBody = {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'B'.repeat(43),
+    }
+    const closeOptions = {
+      clientId: 'method_close_client_00001',
+      sourceIp: '198.51.100.243',
+    }
+    for (const method of ['PATCH', 'POST', 'PUT']) {
+      const observed = observeBodyAccess(request('/api/wrapper/session', closeBody, {
+        ...closeOptions,
+        method,
+      }))
+      observed.request.headers.delete('X-Vercel-Forwarded-For')
+      const response = await handleCloseRequest(observed.request, closeTarget)
+      expect(response.status).toBe(405)
+      expect(response.headers.get('Allow')).toBe('DELETE')
+      expect(await response.json()).toEqual({
+        error: 'This wrapper API endpoint does not support the requested method.',
+        code: 'method_not_allowed',
+      })
+      expect(observed.count()).toBe(0)
+    }
+    for (let index = 0; index < 30; index += 1) {
+      expect((await handleCloseRequest(request('/api/wrapper/session', closeBody, {
+        ...closeOptions,
+        method: 'DELETE',
+      }), closeTarget)).status).toBe(200)
+    }
+    expect((await handleCloseRequest(request('/api/wrapper/session', closeBody, {
+      ...closeOptions,
+      method: 'DELETE',
+    }), closeTarget)).status).toBe(429)
+    expect(closeSession).toHaveBeenCalledTimes(30)
+
+    for (const method of ['OPTIONS', 'POST', 'PUT']) {
+      const response = handleHealthRequest(healthRequest(method), {})
+      expect(response.status).toBe(405)
+      expect(response.headers.get('Allow')).toBe('GET')
+      expect(await response.json()).toEqual({
+        error: 'This wrapper API endpoint does not support the requested method.',
+        code: 'method_not_allowed',
+      })
+    }
+    expect(handleHealthRequest(healthRequest(), {}).status).toBe(200)
   })
 
   it('rejects cross-origin requests before invoking the browser backend', async () => {
@@ -459,6 +593,35 @@ describe('production wrapper API boundaries', () => {
     expect(await response.json()).toEqual({
       error: 'The isolated website analysis exceeded its fixed time limit.',
       code: 'analysis_timeout',
+    })
+  })
+
+  it('returns a sanitized invalidating production action timeout', async () => {
+    const target = backend({
+      execute: vi.fn(async () => {
+        throw new WrapperServiceError(
+          'action_timeout',
+          'The isolated browser action exceeded its fixed time limit.',
+          504,
+          { sessionInvalidated: true },
+        )
+      }),
+    })
+    const response = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-action-timeout',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, {
+      clientId: 'action_timeout_client_001',
+      sourceIp: '198.51.100.244',
+    }), target)
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser action exceeded its fixed time limit.',
+      code: 'action_timeout',
+      sessionInvalidated: true,
     })
   })
 

@@ -698,6 +698,32 @@ async function startFixture(): Promise<Fixture> {
         <script>document.getElementById('overflow-native-value').value = 'x'.repeat(4097)</script>`)
       return
     }
+    if (requestUrl === '/aria-reference-image-input-alt-safety') {
+      response.end(`<!doctype html><title>ARIA image input alt safety</title>
+        <style>.reference-source{position:absolute;left:-10000px;top:0}</style>
+        <input class="reference-source" id="sensitive-image-alt" type="image" alt="Credit card number" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+        <input class="reference-source" id="late-image-alt" type="image" alt="Reference image action" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+        <input class="reference-source" id="neutral-image-alt" type="image" alt="Reference image option" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+        <input class="reference-source" id="overflow-image-alt" type="image" alt="Overflow" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+        <form id="sensitive-image-alt-form">
+          <input type="text" name="sensitive_image_reference" aria-labelledby="sensitive-image-alt">
+          <input type="text" aria-label="Sensitive image detail">
+        </form>
+        <form id="late-image-alt-form">
+          <input id="late-image-alt-input" type="text" name="late_image_reference" aria-labelledby="late-image-alt">
+          <input id="late-image-alt-detail" type="text" aria-label="Late image detail">
+        </form>
+        <form id="neutral-image-alt-form">
+          <input id="neutral-image-alt-input" type="text" name="neutral_image_reference" aria-labelledby="neutral-image-alt">
+          <input type="text" aria-label="Neutral image detail">
+        </form>
+        <form id="overflow-image-alt-form">
+          <input type="text" name="overflow_image_reference" aria-labelledby="overflow-image-alt">
+          <input type="text" aria-label="Overflow image detail">
+        </form>
+        <script>document.getElementById('overflow-image-alt').alt = 'x'.repeat(4097)</script>`)
+      return
+    }
     if (requestUrl === '/aria-description-safety') {
       response.end(`<!doctype html><title>ARIA description safety</title>
         <form id="sensitive-description-form">
@@ -2255,6 +2281,68 @@ describe('WrapperProofService security boundaries', () => {
     analysis = lateResult.analysis
 
     const neutralEvidenceId = analysis.domEvidence.find(({ label }) => label === 'neutral_reference')!.id
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidenceId))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('keeps referenced image-input alt text private while classifying and revalidating it', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/aria-reference-image-input-alt-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(await page.getByRole('textbox', { name: 'Credit card number' }).count()).toBe(1)
+    expect(analysis.domEvidence.find(({ label }) => label === 'sensitive_image_reference'))
+      .toMatchObject({ sensitive: true })
+    expect(analysis.domEvidence.find(({ label }) => label === 'overflow_image_reference'))
+      .toMatchObject({ sensitive: true })
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    expect(JSON.stringify({
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+      capabilities: analysis.capabilities,
+    })).not.toMatch(/Credit card number/)
+
+    const lateEvidenceId = analysis.domEvidence.find(({ label }) => label === 'late_image_reference')!.id
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidenceId))!
+    await page.locator('#late-image-alt').evaluate((reference) => {
+      ;(reference as HTMLInputElement).alt = 'User password'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-image-alt-input').inputValue()).toBe('')
+    expect(await page.locator('#late-image-alt-detail').inputValue()).toBe('')
+
+    await page.locator('#late-image-alt').evaluate((reference) => {
+      ;(reference as HTMLInputElement).alt = 'Reference image action'
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+
+    const neutralEvidenceId = analysis.domEvidence.find(({ label }) => label === 'neutral_image_reference')!.id
     const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidenceId))!
     await expect(service.execute(
       analysis.sessionId,

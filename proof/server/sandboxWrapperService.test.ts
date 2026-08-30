@@ -80,6 +80,10 @@ class FakeSandbox {
   forceStatus?: number
   forceError?: { status: number, code: string, error: string, sessionInvalidated?: boolean }
   delayAction = false
+  getGate?: Promise<void>
+  actionCommandGate?: Promise<void>
+  actionOutputGate?: Promise<void>
+  deleteGate?: Promise<void>
   legacyActionScreenshot = false
   afterAnalyzeResult?: () => void
   commandError?: Error
@@ -107,6 +111,7 @@ class FakeSandbox {
     if (this.commandError) throw this.commandError
     const operation = params.env?.WEBMCP_WORKER_OPERATION
     const token = params.env?.WEBMCP_SESSION_CAPABILITY
+    if (operation === 'action' && this.actionCommandGate) await this.actionCommandGate
     if (operation === 'action' && this.delayAction) {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(resolve, 80)
@@ -139,18 +144,22 @@ class FakeSandbox {
         ? { error: 'The isolated browser session expired.', code: 'session_expired' }
         : { error: 'Invalid session capability.', code: 'invalid_capability', sessionInvalidated: false }
     if (status === 200 && operation === 'analyze') this.afterAnalyzeResult?.()
-    return commandResult(0, JSON.stringify({ status, body: JSON.stringify(body) }))
+    const output = JSON.stringify({ status, body: JSON.stringify(body) })
+    return commandResult(0, operation === 'action' && this.actionOutputGate
+      ? async () => { await this.actionOutputGate; return output }
+      : output)
   }
 
   async delete() {
     this.deleted += 1
+    if (this.deleteGate) await this.deleteGate
   }
 }
 
-function commandResult(exitCode: number, output: string) {
+function commandResult(exitCode: number, output: string | (() => Promise<string>)) {
   return {
     exitCode,
-    stdout: async () => output,
+    stdout: typeof output === 'function' ? output : async () => output,
     stderr: async () => '',
   }
 }
@@ -177,6 +186,10 @@ function testTarget(): PublicTarget {
 
 function createHarness(
   browserSource: { snapshotId?: string, image?: string } = { snapshotId: 'snap_reviewed' },
+  serviceOptions: {
+    actionTimeoutMs?: number
+    beforeActionReturn?: () => void | Promise<void>
+  } = {},
 ) {
   const sandbox = new FakeSandbox()
   let createCalls = 0
@@ -191,6 +204,7 @@ function createHarness(
     },
     async get({ name }) {
       getCalls += 1
+      if (sandbox.getGate) await sandbox.getGate
       if (name !== sandbox.name) {
         throw new WrapperServiceError(
           'session_expired',
@@ -207,6 +221,7 @@ function createHarness(
     resolveTarget: async () => testTarget(),
     loadWorkerAssets: async () => ({ worker: Buffer.from('worker'), client: Buffer.from('client') }),
     now: () => Date.parse('2026-08-30T10:00:00.000Z'),
+    ...serviceOptions,
   })
   return {
     sandbox,
@@ -551,6 +566,104 @@ describe('SandboxWrapperService session boundaries', () => {
     )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
+  it('enforces one absolute action deadline across reconnect, command, output, and return', async () => {
+    const reconnect = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      { actionTimeoutMs: 25 },
+    )
+    const reconnectAnalysis = await reconnect.service.analyze('https://public.example.at')
+    const reconnectGate = deferred<void>()
+    reconnect.sandbox.getGate = reconnectGate.promise
+    await expect(reconnect.service.execute(
+      reconnectAnalysis.sessionId,
+      reconnectAnalysis.sessionToken,
+      'prepare_page_search',
+      { query: 'must time out while reconnecting' },
+    )).rejects.toMatchObject({
+      code: 'action_timeout',
+      status: 504,
+      sessionInvalidated: true,
+      message: 'The isolated browser action exceeded its fixed time limit.',
+    })
+    expect(reconnect.sandbox.deleted).toBe(0)
+    reconnectGate.resolve()
+    await vi.waitFor(() => expect(reconnect.sandbox.deleted).toBe(1))
+
+    const command = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      { actionTimeoutMs: 25 },
+    )
+    const commandAnalysis = await command.service.analyze('https://public.example.at')
+    const commandGate = deferred<void>()
+    command.sandbox.actionCommandGate = commandGate.promise
+    await expect(command.service.execute(
+      commandAnalysis.sessionId,
+      commandAnalysis.sessionToken,
+      'prepare_page_search',
+      { query: 'must time out in command' },
+    )).rejects.toMatchObject({ code: 'action_timeout', sessionInvalidated: true })
+    expect(command.sandbox.deleted).toBe(1)
+    commandGate.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(command.sandbox.deleted).toBe(1)
+
+    const output = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      { actionTimeoutMs: 25 },
+    )
+    const outputAnalysis = await output.service.analyze('https://public.example.at')
+    const outputGate = deferred<void>()
+    output.sandbox.actionOutputGate = outputGate.promise
+    await expect(output.service.execute(
+      outputAnalysis.sessionId,
+      outputAnalysis.sessionToken,
+      'prepare_page_search',
+      { query: 'must time out reading output' },
+    )).rejects.toMatchObject({ code: 'action_timeout', sessionInvalidated: true })
+    expect(output.sandbox.deleted).toBe(1)
+    outputGate.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(output.sandbox.deleted).toBe(1)
+
+    const returnGate = deferred<void>()
+    const beforeReturn = vi.fn(() => returnGate.promise)
+    const postResult = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      { actionTimeoutMs: 25, beforeActionReturn: beforeReturn },
+    )
+    const postResultAnalysis = await postResult.service.analyze('https://public.example.at')
+    await expect(postResult.service.execute(
+      postResultAnalysis.sessionId,
+      postResultAnalysis.sessionToken,
+      'prepare_page_search',
+      { query: 'must not return activity or credentials' },
+    )).rejects.toMatchObject({ code: 'action_timeout', sessionInvalidated: true })
+    expect(beforeReturn).toHaveBeenCalledOnce()
+    expect(postResult.sandbox.deleted).toBe(1)
+    returnGate.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(postResult.sandbox.deleted).toBe(1)
+
+    const cleanup = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      { actionTimeoutMs: 25 },
+    )
+    const cleanupAnalysis = await cleanup.service.analyze('https://public.example.at')
+    const cleanupGate = deferred<void>()
+    cleanup.sandbox.commandError = new Error('unknown command failure')
+    cleanup.sandbox.deleteGate = cleanupGate.promise
+    await expect(cleanup.service.execute(
+      cleanupAnalysis.sessionId,
+      cleanupAnalysis.sessionToken,
+      'prepare_page_search',
+      { query: 'cleanup must share the deadline' },
+    )).rejects.toMatchObject({ code: 'action_timeout', sessionInvalidated: true })
+    expect(cleanup.sandbox.deleted).toBe(1)
+    cleanupGate.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(cleanup.sandbox.deleted).toBe(1)
+  })
+
   it('propagates abort to the command and deletes the partially mutable sandbox', async () => {
     const harness = createHarness()
     const analysis = await harness.service.analyze('https://public.example.at')
@@ -564,7 +677,12 @@ describe('SandboxWrapperService session boundaries', () => {
       controller.signal,
     )
     setTimeout(() => controller.abort(), 10)
-    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    await expect(pending).rejects.toMatchObject({
+      code: 'action_failed',
+      status: 499,
+      sessionInvalidated: true,
+      message: 'The isolated browser action was cancelled.',
+    })
     expect(harness.sandbox.deleted).toBe(1)
   })
 

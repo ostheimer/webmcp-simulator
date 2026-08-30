@@ -1,5 +1,6 @@
 export type WrapperErrorCode =
   | 'action_failed'
+  | 'action_timeout'
   | 'analysis_timeout'
   | 'body_limit'
   | 'internal_error'
@@ -15,6 +16,7 @@ export type WrapperErrorCode =
 
 const PUBLIC_ERROR_CODES = new Set<WrapperErrorCode>([
   'action_failed',
+  'action_timeout',
   'analysis_timeout',
   'body_limit',
   'invalid_action',

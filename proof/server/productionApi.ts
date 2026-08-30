@@ -80,18 +80,30 @@ class HttpError extends Error {
   readonly status: number
   readonly code: string
   readonly sessionInvalidated: boolean | undefined
+  readonly headers: Record<string, string> | undefined
 
   constructor(
     message: string,
     status: number,
     code: string,
-    options: { sessionInvalidated?: boolean } = {},
+    options: { sessionInvalidated?: boolean, headers?: Record<string, string> } = {},
   ) {
     super(message)
     this.status = status
     this.code = code
     this.sessionInvalidated = options.sessionInvalidated
+    this.headers = options.headers
   }
+}
+
+function assertRequestMethod(request: Request, expectedMethod: 'DELETE' | 'GET' | 'POST'): void {
+  if (request.method === expectedMethod) return
+  throw new HttpError(
+    'This wrapper API endpoint does not support the requested method.',
+    405,
+    'method_not_allowed',
+    { headers: { Allow: expectedMethod } },
+  )
 }
 
 function trustedSourceIdentity(request: Request): string {
@@ -222,7 +234,7 @@ async function handle(operation: () => Promise<unknown>): Promise<Response> {
       ...(typeof safe.sessionInvalidated === 'boolean'
         ? { sessionInvalidated: safe.sessionInvalidated }
         : {}),
-    })
+    }, safe.headers)
   }
 }
 
@@ -231,6 +243,7 @@ export function handleAnalyzeRequest(
   backend: ProductionWrapperBackend = service,
 ): Promise<Response> {
   return handle(async () => {
+    assertRequestMethod(request, 'POST')
     const { sourceId } = assertRequestBoundary(request)
     consumeRateLimit(analysisRates, sourceId, MAX_ANALYSES_PER_WINDOW, ANALYSIS_RATE_WINDOW_MS)
     if (activeAnalyses.has(sourceId)) {
@@ -254,6 +267,7 @@ export function handleActionRequest(
   return handle(async () => {
     let body: Record<string, unknown>
     try {
+      assertRequestMethod(request, 'POST')
       const { sourceId } = assertRequestBoundary(request)
       consumeRateLimit(actionRates, sourceId, MAX_ACTIONS_PER_WINDOW, ACTION_RATE_WINDOW_MS)
       body = await readJson(request)
@@ -268,7 +282,10 @@ export function handleActionRequest(
       ) throw new HttpError('sessionId, sessionToken, capabilityId, toolName, and input are required.', 400, 'invalid_action')
     } catch (error) {
       if (error instanceof HttpError) {
-        throw new HttpError(error.message, error.status, error.code, { sessionInvalidated: false })
+        throw new HttpError(error.message, error.status, error.code, {
+          sessionInvalidated: false,
+          headers: error.headers,
+        })
       }
       throw error
     }
@@ -288,6 +305,7 @@ export function handleCloseRequest(
   backend: ProductionWrapperBackend = service,
 ): Promise<Response> {
   return handle(async () => {
+    assertRequestMethod(request, 'DELETE')
     const { sourceId } = assertRequestBoundary(request)
     const body = await readJson(request)
     if (typeof body.sessionId !== 'string' || typeof body.sessionToken !== 'string') {
@@ -300,21 +318,30 @@ export function handleCloseRequest(
   })
 }
 
-export function handleHealthRequest(configuration: {
-  snapshotId?: string
-  image?: string
-} = {
-  snapshotId: process.env.WEBMCP_SANDBOX_SNAPSHOT_ID,
-  image: process.env.WEBMCP_SANDBOX_IMAGE,
-}): Response {
-  const ready = Boolean(configuration.snapshotId?.trim() || configuration.image?.trim())
-  return jsonResponse(200, {
-    alive: true,
-    ready,
-    mode: 'vercel-sandbox',
-    configuration: ready ? 'configured' : 'missing-browser-source',
-    persistence: false,
-    sessionTtlSeconds: 300,
-    maxPages: 10,
-  })
+export function handleHealthRequest(
+  request: Request,
+  configuration: { snapshotId?: string, image?: string } = {
+    snapshotId: process.env.WEBMCP_SANDBOX_SNAPSHOT_ID,
+    image: process.env.WEBMCP_SANDBOX_IMAGE,
+  },
+): Response {
+  try {
+    assertRequestMethod(request, 'GET')
+    const ready = Boolean(configuration.snapshotId?.trim() || configuration.image?.trim())
+    return jsonResponse(200, {
+      alive: true,
+      ready,
+      mode: 'vercel-sandbox',
+      configuration: ready ? 'configured' : 'missing-browser-source',
+      persistence: false,
+      sessionTtlSeconds: 300,
+      maxPages: 10,
+    })
+  } catch (error) {
+    const safe = publicError(error)
+    return jsonResponse(safe.status, {
+      error: safe.message,
+      code: safe.code,
+    }, safe.headers)
+  }
 }

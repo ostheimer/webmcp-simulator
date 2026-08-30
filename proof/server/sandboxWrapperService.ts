@@ -97,6 +97,10 @@ export interface SandboxWrapperServiceOptions {
   now?: () => number
   /** Test-only override; production uses the absolute configured analysis deadline. */
   analysisTimeoutMs?: number
+  /** Test-only override; production uses the absolute configured action deadline. */
+  actionTimeoutMs?: number
+  /** Test-only boundary hook for the post-decoration/pre-return deadline race. */
+  beforeActionReturn?: () => void | Promise<void>
 }
 
 interface WorkerResponse {
@@ -214,6 +218,24 @@ function sandboxAnalysisAbortError(): DOMException {
   return new DOMException('The isolated analysis was cancelled.', 'AbortError')
 }
 
+function sandboxActionTimeoutError(): WrapperServiceError {
+  return new WrapperServiceError(
+    'action_timeout',
+    'The isolated browser action exceeded its fixed time limit.',
+    504,
+    { sessionInvalidated: true },
+  )
+}
+
+function sandboxActionAbortError(): WrapperServiceError {
+  return new WrapperServiceError(
+    'action_failed',
+    'The isolated browser action was cancelled.',
+    499,
+    { sessionInvalidated: true },
+  )
+}
+
 async function raceSandboxOperation<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) {
     void promise.catch(() => undefined)
@@ -284,6 +306,8 @@ export class SandboxWrapperService {
   private readonly loadWorkerAssets: () => Promise<{ worker: Buffer, client: Buffer }>
   private readonly now: () => number
   private readonly analysisTimeoutMs: number
+  private readonly actionTimeoutMs: number
+  private readonly beforeActionReturn?: () => void | Promise<void>
 
   constructor(options: SandboxWrapperServiceOptions = {}) {
     this.factory = options.factory ?? defaultFactory()
@@ -297,6 +321,8 @@ export class SandboxWrapperService {
     this.loadWorkerAssets = options.loadWorkerAssets ?? defaultLoadWorkerAssets
     this.now = options.now ?? Date.now
     this.analysisTimeoutMs = options.analysisTimeoutMs ?? WRAPPER_ANALYSIS_TIMEOUT_MS
+    this.actionTimeoutMs = options.actionTimeoutMs ?? WRAPPER_ACTION_TIMEOUT_MS
+    this.beforeActionReturn = options.beforeActionReturn
   }
 
   private async callWorker<T>(
@@ -476,16 +502,55 @@ export class SandboxWrapperService {
     signal?: AbortSignal,
     capabilityId?: string,
   ): Promise<WrapperActionResult> {
-    const sandbox = await this.getExisting(sessionId, sessionToken, signal)
     const startedAtMs = this.now()
+    const deadlineAtMs = Date.now() + Math.max(0, this.actionTimeoutMs)
+    let deadlineExpired = false
+    const operationController = new AbortController()
+    const onExternalAbort = () => operationController.abort()
+    signal?.addEventListener('abort', onExternalAbort, { once: true })
+    if (signal?.aborted) operationController.abort()
+    const deadlineTimer = setTimeout(() => {
+      deadlineExpired = true
+      operationController.abort()
+    }, Math.max(0, this.actionTimeoutMs))
+    deadlineTimer.unref?.()
+    const deadlineReached = () => deadlineExpired || Date.now() >= deadlineAtMs
+    let sandbox: SandboxHandle | undefined
+    const deleted = new WeakSet<object>()
+    const deleteSandboxOnce = async (handle: SandboxHandle | undefined): Promise<void> => {
+      if (!handle || deleted.has(handle)) return
+      deleted.add(handle)
+      await handle.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
+    }
     try {
-      const workerResult = await this.callWorker<WorkerActionEnvelope>(
-        sandbox,
+      const reconnectPromise = this.getExisting(
+        sessionId,
         sessionToken,
-        'action',
-        { toolName, capabilityId, input },
-        signal,
+        operationController.signal,
       )
+      try {
+        sandbox = await raceSandboxOperation(reconnectPromise, operationController.signal)
+      } catch (error) {
+        if (operationController.signal.aborted) {
+          void reconnectPromise.then(deleteSandboxOnce).catch(() => undefined)
+        }
+        throw error
+      }
+      const workerResult = await raceSandboxOperation(
+        this.callWorker<WorkerActionEnvelope>(
+          sandbox,
+          sessionToken,
+          'action',
+          { toolName, capabilityId, input },
+          operationController.signal,
+        ),
+        operationController.signal,
+      )
+      if (deadlineReached()) {
+        deadlineExpired = true
+        operationController.abort()
+        throw sandboxAnalysisAbortError()
+      }
       if (
         !workerResult
         || typeof workerResult !== 'object'
@@ -506,18 +571,44 @@ export class SandboxWrapperService {
         startedAtMs,
         this.now,
       )
-      return {
+      const response = {
         finalUrl: analysis.finalUrl,
         analysis,
         activity: result.activity,
         structuredContent: result.structuredContent,
       }
-    } catch (error) {
-      const nonMutating = isNonMutatingActionRejection(error)
-      if (!nonMutating) {
-        await sandbox.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
+      if (this.beforeActionReturn) {
+        await raceSandboxOperation(
+          Promise.resolve(this.beforeActionReturn()),
+          operationController.signal,
+        )
       }
-      if (signal?.aborted) throw new DOMException('The isolated tool call was cancelled.', 'AbortError')
+      if (deadlineReached()) {
+        deadlineExpired = true
+        operationController.abort()
+        throw sandboxAnalysisAbortError()
+      }
+      return response
+    } catch (error) {
+      let timedOut = deadlineReached()
+      if (timedOut) {
+        deadlineExpired = true
+        operationController.abort()
+      }
+      let externallyAborted = signal?.aborted === true
+      const nonMutating = !timedOut
+        && !externallyAborted
+        && isNonMutatingActionRejection(error)
+      if (!nonMutating) {
+        const cleanup = deleteSandboxOnce(sandbox)
+        if (!operationController.signal.aborted) {
+          await raceSandboxOperation(cleanup, operationController.signal).catch(() => undefined)
+        }
+      }
+      timedOut = deadlineReached()
+      externallyAborted = signal?.aborted === true
+      if (timedOut) throw sandboxActionTimeoutError()
+      if (externallyAborted || operationController.signal.aborted) throw sandboxActionAbortError()
       if (nonMutating) throw error
       if (isSandboxCapacityError(error)) throw sandboxCapacityError(true)
       if (error instanceof WrapperServiceError) {
@@ -531,6 +622,9 @@ export class SandboxWrapperService {
         500,
         { sessionInvalidated: true },
       )
+    } finally {
+      clearTimeout(deadlineTimer)
+      signal?.removeEventListener('abort', onExternalAbort)
     }
   }
 
