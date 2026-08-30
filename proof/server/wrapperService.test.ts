@@ -845,6 +845,55 @@ async function startFixture(): Promise<Fixture> {
         <script>document.getElementById('overflow-textbox-value').value = 'x'.repeat(4097)</script>`)
       return
     }
+    if (requestUrl === '/aria-reference-descendant-source-safety') {
+      response.end(`<!doctype html><title>ARIA descendant source safety</title>
+        <style>.reference-source{position:absolute;left:-10000px;top:0}</style>
+        <span id="sensitive-descendant-reference"><span><input class="reference-source" value="Credit card number"></span></span>
+        <span id="late-descendant-reference"><span><input id="late-descendant-source" class="reference-source" value="Reference note"></span></span>
+        <span id="neutral-descendant-reference"><span><textarea class="reference-source">Reference overview</textarea></span></span>
+        <span id="count-overflow-descendant-reference"></span>
+        <span id="traversal-overflow-descendant-reference"></span>
+        <form id="sensitive-descendant-reference-form">
+          <input type="text" name="sensitive_descendant_reference" aria-labelledby="sensitive-descendant-reference">
+          <input type="text" aria-label="Sensitive descendant detail">
+        </form>
+        <form id="late-descendant-reference-form">
+          <input id="late-descendant-target" type="text" name="late_descendant_reference" aria-labelledby="late-descendant-reference">
+          <input id="late-descendant-detail" type="text" aria-label="Late descendant detail">
+        </form>
+        <form id="neutral-descendant-reference-form">
+          <input id="neutral-descendant-target" type="text" name="neutral_descendant_reference" aria-labelledby="neutral-descendant-reference">
+          <input type="text" aria-label="Neutral descendant detail">
+        </form>
+        <form id="wrapped-descendant-reference-form">
+          <span id="wrapped-descendant-reference">Wrapped reference <input id="wrapped-descendant-target" type="text" aria-labelledby="wrapped-descendant-reference"></span>
+          <input type="text" aria-label="Wrapped descendant detail">
+        </form>
+        <form id="count-overflow-descendant-reference-form">
+          <input type="text" name="count_overflow_descendant_reference" aria-labelledby="count-overflow-descendant-reference">
+          <input type="text" aria-label="Count overflow descendant detail">
+        </form>
+        <form id="traversal-overflow-descendant-reference-form">
+          <input type="text" name="traversal_overflow_descendant_reference" aria-labelledby="traversal-overflow-descendant-reference">
+          <input type="text" aria-label="Traversal overflow descendant detail">
+        </form>
+        <script>
+          const countRoot = document.getElementById('count-overflow-descendant-reference');
+          for (let index = 0; index < 17; index += 1) {
+            const source = document.createElement('span');
+            source.setAttribute('aria-label', 'Bounded source ' + index);
+            countRoot.append(source);
+          }
+          let traversalRoot = document.getElementById('traversal-overflow-descendant-reference');
+          for (let index = 0; index < 257; index += 1) {
+            const wrapper = document.createElement('span');
+            traversalRoot.append(wrapper);
+            traversalRoot = wrapper;
+          }
+          traversalRoot.setAttribute('aria-label', 'Reference after traversal budget');
+        </script>`)
+      return
+    }
     if (requestUrl === '/label-embedded-control-safety') {
       response.end(`<!doctype html><title>Label embedded control safety</title>
         <style>.embedded-source{position:absolute;left:-10000px;top:0}</style>
@@ -888,6 +937,46 @@ async function startFixture(): Promise<Fixture> {
           <input type="text" aria-label="Overflow label native detail">
         </form>
         <script>document.getElementById('overflow-label-native-source').value = 'x'.repeat(4097)</script>`)
+      return
+    }
+    if (requestUrl === '/label-descendant-source-safety') {
+      response.end(`<!doctype html><title>Label descendant source safety</title>
+        <form id="sensitive-label-descendant-form">
+          <label for="sensitive-label-descendant-target">Reference <img alt="Reference" aria-label="Credit card number"></label>
+          <input id="sensitive-label-descendant-target" type="text" aria-label="Sensitive label descendant field">
+          <input type="text" aria-label="Sensitive label descendant detail">
+        </form>
+        <form id="late-label-descendant-form">
+          <label for="late-label-descendant-target">Reference <img id="late-label-descendant-source" alt="Reference" aria-label="Reference image"></label>
+          <input id="late-label-descendant-target" type="text" aria-label="Late label descendant field">
+          <input id="late-label-descendant-detail" type="text" aria-label="Late label descendant detail">
+        </form>
+        <form id="neutral-label-descendant-form">
+          <label for="neutral-label-descendant-target">Reference <img alt="Reference" aria-label="Helpful image"></label>
+          <input id="neutral-label-descendant-target" type="text" aria-label="Neutral label descendant field">
+          <input type="text" aria-label="Neutral label descendant detail">
+        </form>
+        <form id="aggregate-overflow-label-descendant-form">
+          <label id="aggregate-overflow-label" for="aggregate-overflow-label-descendant-target">Reference</label>
+          <input id="aggregate-overflow-label-descendant-target" type="text" aria-label="Aggregate overflow label field">
+          <input type="text" aria-label="Aggregate overflow label detail">
+        </form>
+        <form id="individual-overflow-label-descendant-form">
+          <label id="individual-overflow-label" for="individual-overflow-label-descendant-target">Reference</label>
+          <input id="individual-overflow-label-descendant-target" type="text" aria-label="Individual overflow label field">
+          <input type="text" aria-label="Individual overflow label detail">
+        </form>
+        <script>
+          const aggregateLabel = document.getElementById('aggregate-overflow-label');
+          for (let index = 0; index < 7; index += 1) {
+            const source = document.createElement('span');
+            source.setAttribute('aria-label', 'x'.repeat(4000));
+            aggregateLabel.append(source);
+          }
+          const individualSource = document.createElement('span');
+          individualSource.setAttribute('aria-label', 'x'.repeat(4097));
+          document.getElementById('individual-overflow-label').append(individualSource);
+        </script>`)
       return
     }
     if (requestUrl === '/aria-description-safety') {
@@ -3164,6 +3253,108 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
+  it('classifies bounded descendant accessible sources on ARIA references and revalidates them', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/aria-reference-descendant-source-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    for (const label of [
+      'sensitive_descendant_reference',
+      'count_overflow_descendant_reference',
+      'traversal_overflow_descendant_reference',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label))
+        .toMatchObject({ sensitive: true })
+    }
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(3)
+    expect(JSON.stringify({
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+      capabilities: analysis.capabilities,
+    })).not.toMatch(/Credit card number/)
+
+    const capabilityFor = (snapshot: typeof analysis, label: string) => {
+      const evidenceId = snapshot.domEvidence.find((evidence) => evidence.label === label)!.id
+      return snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidenceId))!
+    }
+    const late = capabilityFor(analysis, 'late_descendant_reference')
+    await page.locator('#late-descendant-source').evaluate((source) => {
+      ;(source as HTMLInputElement).value = 'User password'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      late.name,
+      late.sampleInput,
+      undefined,
+      late.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-descendant-target, #late-descendant-detail').evaluateAll((controls) =>
+      controls.map((control) => (control as HTMLInputElement).value))).toEqual(['', ''])
+
+    await page.locator('#late-descendant-source').evaluate((source) => {
+      ;(source as HTMLInputElement).value = 'Reference note'
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      late.name,
+      late.sampleInput,
+      undefined,
+      late.id,
+    )
+    expect(lateResult).toMatchObject({ structuredContent: { targetStateVerified: true } })
+    analysis = lateResult.analysis
+
+    const neutral = capabilityFor(analysis, 'Reference overview')
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutral.name,
+      neutral.sampleInput,
+      undefined,
+      neutral.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const wrappedService = createService()
+    services.push(wrappedService)
+    const wrappedAnalysis = await wrappedService.analyze(`${fixture.origin}/aria-reference-descendant-source-safety`)
+    const wrapped = capabilityFor(wrappedAnalysis, 'Wrapped reference')
+    await expect(wrappedService.execute(
+      wrappedAnalysis.sessionId,
+      wrappedAnalysis.sessionToken,
+      wrapped.name,
+      wrapped.sampleInput,
+      undefined,
+      wrapped.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await internalSession(wrappedService, wrappedAnalysis.sessionId).page
+      .locator('#wrapped-descendant-target').inputValue()).not.toBe('')
+
+    const raceService = createService({ actionStartDelayMs: 200 })
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/aria-reference-descendant-source-safety`)
+    const racePage = internalSession(raceService, raceAnalysis.sessionId).page
+    const raceCapability = capabilityFor(raceAnalysis, 'late_descendant_reference')
+    const pending = raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceCapability.name,
+      raceCapability.sampleInput,
+      undefined,
+      raceCapability.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await racePage.locator('#late-descendant-source').evaluate((source) => {
+      ;(source as HTMLInputElement).value = 'Credit card number'
+    })
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
   it('keeps associated-label embedded native values private and revalidates them before mutation', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -3257,6 +3448,74 @@ describe('WrapperProofService security boundaries', () => {
     })
     await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('classifies bounded descendant accessible sources on associated labels and revalidates them', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/label-descendant-source-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    for (const label of [
+      'Sensitive label descendant field',
+      'Aggregate overflow label field',
+      'Individual overflow label field',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label))
+        .toMatchObject({ sensitive: true })
+    }
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    expect(JSON.stringify({
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+      capabilities: analysis.capabilities,
+    })).not.toMatch(/Credit card number/)
+
+    const capabilityFor = (snapshot: typeof analysis, label: string) => {
+      const evidenceId = snapshot.domEvidence.find((evidence) => evidence.label === label)!.id
+      return snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidenceId))!
+    }
+    const late = capabilityFor(analysis, 'Late label descendant field')
+    await page.locator('#late-label-descendant-source').evaluate((source) => {
+      source.setAttribute('aria-label', 'User password')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      late.name,
+      late.sampleInput,
+      undefined,
+      late.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-label-descendant-target, #late-label-descendant-detail')
+      .evaluateAll((controls) => controls.map((control) => (control as HTMLInputElement).value)))
+      .toEqual(['', ''])
+
+    await page.locator('#late-label-descendant-source').evaluate((source) => {
+      source.setAttribute('aria-label', 'Reference image')
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      late.name,
+      late.sampleInput,
+      undefined,
+      late.id,
+    )
+    expect(lateResult).toMatchObject({ structuredContent: { targetStateVerified: true } })
+    analysis = lateResult.analysis
+
+    const neutral = capabilityFor(analysis, 'Neutral label descendant field')
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutral.name,
+      neutral.sampleInput,
+      undefined,
+      neutral.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
   it('classifies bounded aria-description evidence and revalidates late mutations', async () => {

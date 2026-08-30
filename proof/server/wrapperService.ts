@@ -534,9 +534,9 @@ function captureIsolatedSafetyEvidence(
     value: string
     accessibleEvidence: string[]
   }>
-  labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControls: Array<{ kind: string, value: string, alt: string, accessibleValues: string[] }> }>
-  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
-  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
+  labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], descendantAccessibleEntries: Array<Array<[string, string]>>, descendantAccessibleEvidence: string[] }>
+  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[], descendantAccessibleEvidence: string[] }>
+  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[], descendantAccessibleEvidence: string[] }>
   anchorImageAlts: string[]
   generatedContent: string[]
   ownerContextEvidence: string[]
@@ -755,6 +755,90 @@ function captureIsolatedSafetyEvidence(
       overflow: kind.overflow || value.overflow || alt.overflow || accessibleOverflow,
     }
   }
+  const captureDescendantAccessibleSources = (root: Element, excludedNode?: Element) => {
+    const entries: Array<Array<[string, string]>> = []
+    const evidence: string[] = []
+    const walker = createTreeWalker.call(document, root, NodeFilter.SHOW_ELEMENT)
+    let nodesInspected = 0
+    let traversalComplete = false
+    let overflow = false
+    while (!overflow && !aggregateOverflow && nodesInspected < 256) {
+      const node = nextNode.call(walker) as Element | null
+      if (!node) {
+        traversalComplete = true
+        break
+      }
+      nodesInspected += 1
+      if (node === excludedNode) continue
+
+      const rawAriaLabel = getAttribute.call(node, 'aria-label')
+      const rawAriaDescription = getAttribute.call(node, 'aria-description')
+      const rawTitle = getAttribute.call(node, 'title')
+      const rawAriaLabelledBy = getAttribute.call(node, 'aria-labelledby')
+      const rawAriaDescribedBy = getAttribute.call(node, 'aria-describedby')
+      const possibleNativeControl = node instanceof HTMLInputElement
+        || node instanceof HTMLTextAreaElement
+        || node instanceof HTMLSelectElement
+        || Boolean(getAttribute.call(node, 'role'))
+      const nativeControl = possibleNativeControl
+        ? captureNativeControl(node, excludedNode)
+        : undefined
+      const hasSource = rawAriaLabel !== null
+        || rawAriaDescription !== null
+        || rawTitle !== null
+        || rawAriaLabelledBy !== null
+        || rawAriaDescribedBy !== null
+        || Boolean(nativeControl?.recognized)
+      if (!hasSource) continue
+      if (entries.length >= 16) {
+        overflow = true
+        break
+      }
+
+      const entry: Array<[string, string]> = []
+      const retain = (slot: string, rawValue: unknown) => {
+        const captured = bounded(rawValue)
+        entry.push([slot, captured.value])
+        evidence.push(captured.value)
+        overflow ||= captured.overflow
+      }
+      if (rawAriaLabel !== null) retain('aria-label', rawAriaLabel)
+      if (rawAriaDescription !== null) retain('aria-description', rawAriaDescription)
+      if (rawTitle !== null) retain('title', rawTitle)
+      if (rawAriaLabelledBy !== null) {
+        retain('aria-labelledby', rawAriaLabelledBy)
+        if (rawAriaLabelledBy.length > 0) overflow = true
+      }
+      if (rawAriaDescribedBy !== null) {
+        retain('aria-describedby', rawAriaDescribedBy)
+        if (rawAriaDescribedBy.length > 0) overflow = true
+      }
+      if (nativeControl?.recognized) {
+        entry.push(['native-kind', nativeControl.kind.value])
+        entry.push(['native-value', nativeControl.value.value])
+        entry.push(['native-alt', nativeControl.alt.value])
+        evidence.push(
+          nativeControl.kind.value,
+          nativeControl.value.value,
+          nativeControl.alt.value,
+        )
+        nativeControl.accessibleValues.forEach((value, index) => {
+          entry.push([`native-accessible:${index}`, value])
+          evidence.push(value)
+        })
+        overflow ||= nativeControl.overflow
+      }
+      entries.push(entry)
+    }
+    if (!traversalComplete && !overflow && !aggregateOverflow && nextNode.call(walker)) {
+      overflow = true
+    }
+    return {
+      entries,
+      evidence,
+      overflow: aggregateOverflow || overflow,
+    }
+  }
   const referenced = (root: Element, attribute: string) => {
     const rawSource = getAttribute.call(root, attribute) ?? ''
     const raw = bounded(rawSource)
@@ -784,6 +868,8 @@ function captureIsolatedSafetyEvidence(
       nativeControlValue: { value: string, overflow: boolean }
       nativeControlAlt: { value: string, overflow: boolean }
       nativeControlAccessibleValues: string[]
+      descendantAccessibleEntries: Array<Array<[string, string]>>
+      descendantAccessibleEvidence: string[]
       found: boolean
       overflow: boolean
     }> = []
@@ -805,6 +891,9 @@ function captureIsolatedSafetyEvidence(
       const nativeControl = node instanceof Element
         ? captureNativeControl(node)
         : captureNativeControl(root, root)
+      const descendantAccessible = node instanceof Element
+        ? captureDescendantAccessibleSources(node, root)
+        : { entries: [] as Array<Array<[string, string]>>, evidence: [] as string[], overflow: false }
       entries.push({
         text,
         imageAlts: imageAlts.values,
@@ -818,6 +907,8 @@ function captureIsolatedSafetyEvidence(
         nativeControlValue: nativeControl.value,
         nativeControlAlt: nativeControl.alt,
         nativeControlAccessibleValues: nativeControl.accessibleValues,
+        descendantAccessibleEntries: descendantAccessible.entries,
+        descendantAccessibleEvidence: descendantAccessible.evidence,
         found: node instanceof Element,
         overflow: text.overflow
           || imageAlts.overflow
@@ -827,7 +918,8 @@ function captureIsolatedSafetyEvidence(
           || ariaDescribedBy.overflow
           || title.overflow
           || generatedContent.overflow
-          || nativeControl.overflow,
+          || nativeControl.overflow
+          || descendantAccessible.overflow,
       })
     }
     return {
@@ -883,6 +975,8 @@ function captureIsolatedSafetyEvidence(
         retainExisting(`${attribute}:native-alt:${index}`, entry.nativeControlAlt.value)
         entry.nativeControlAccessibleValues.forEach((value, valueIndex) =>
           retainExisting(`${attribute}:native-accessible:${index}:${valueIndex}`, value))
+        entry.descendantAccessibleEvidence.forEach((value, valueIndex) =>
+          retainExisting(`${attribute}:descendant-accessible:${index}:${valueIndex}`, value))
         entry.generatedContent.forEach((content, contentIndex) =>
           retainExisting(`${attribute}:generated:${index}:${contentIndex}`, content))
       })
@@ -1011,12 +1105,8 @@ function captureIsolatedSafetyEvidence(
     ariaLabel: { value: string, overflow: boolean }
     title: { value: string, overflow: boolean }
     generatedContent: string[]
-    nativeControls: Array<{
-      kind: { value: string, overflow: boolean }
-      value: { value: string, overflow: boolean }
-      alt: { value: string, overflow: boolean }
-      accessibleValues: string[]
-    }>
+    descendantAccessibleEntries: Array<Array<[string, string]>>
+    descendantAccessibleEvidence: string[]
     overflow: boolean
   }> = []
   let labelsOverflow = false
@@ -1039,54 +1129,21 @@ function captureIsolatedSafetyEvidence(
         const ariaLabel = bounded(getAttribute.call(label, 'aria-label') ?? '')
         const title = bounded(getAttribute.call(label, 'title') ?? '')
         const generatedContent = boundedGeneratedContent(label)
-        const nativeControls: Array<{
-          kind: { value: string, overflow: boolean }
-          value: { value: string, overflow: boolean }
-          alt: { value: string, overflow: boolean }
-          accessibleValues: string[]
-        }> = []
-        const controlWalker = createTreeWalker.call(document, label, NodeFilter.SHOW_ELEMENT)
-        let controlNodesInspected = 0
-        let controlTraversalComplete = false
-        let nativeControlOverflow = false
-        while (controlNodesInspected < 256) {
-          const candidate = nextNode.call(controlWalker) as Element | null
-          if (!candidate) {
-            controlTraversalComplete = true
-            break
-          }
-          controlNodesInspected += 1
-          const nativeControl = captureNativeControl(candidate, element)
-          if (!nativeControl.recognized) continue
-          if (nativeControls.length >= 16) {
-            nativeControlOverflow = true
-            break
-          }
-          nativeControls.push({
-            kind: nativeControl.kind,
-            value: nativeControl.value,
-            alt: nativeControl.alt,
-            accessibleValues: nativeControl.accessibleValues,
-          })
-          nativeControlOverflow ||= nativeControl.overflow
-          if (nativeControlOverflow || aggregateOverflow) break
-        }
-        if (!controlTraversalComplete && !nativeControlOverflow && !aggregateOverflow && nextNode.call(controlWalker)) {
-          nativeControlOverflow = true
-        }
+        const descendantAccessible = captureDescendantAccessibleSources(label, element)
         labels.push({
           text,
           imageAlts: imageAlts.values,
           ariaLabel,
           title,
           generatedContent: generatedContent.values,
-          nativeControls,
+          descendantAccessibleEntries: descendantAccessible.entries,
+          descendantAccessibleEvidence: descendantAccessible.evidence,
           overflow: text.overflow
             || imageAlts.overflow
             || ariaLabel.overflow
             || title.overflow
             || generatedContent.overflow
-            || nativeControlOverflow,
+            || descendantAccessible.overflow,
         })
       }
     }
@@ -1196,6 +1253,7 @@ function captureIsolatedSafetyEvidence(
             entry.nativeControlValue.value,
             entry.nativeControlAlt.value,
             ...entry.nativeControlAccessibleValues,
+            ...entry.descendantAccessibleEvidence,
           ]),
           ariaDescribed.raw,
           ...ariaDescribed.ids,
@@ -1212,6 +1270,7 @@ function captureIsolatedSafetyEvidence(
             entry.nativeControlValue.value,
             entry.nativeControlAlt.value,
             ...entry.nativeControlAccessibleValues,
+            ...entry.descendantAccessibleEvidence,
           ]),
         ]
         const value = nativeValue
@@ -1266,21 +1325,17 @@ function captureIsolatedSafetyEvidence(
       ownerContextEvidence: [],
     }
   }
-  const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControls }) => ({
+  const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title, generatedContent, descendantAccessibleEntries, descendantAccessibleEvidence }) => ({
     text: text.value,
     imageAlts,
     ariaLabel: ariaLabel.value,
     title: title.value,
     generatedContent,
-    nativeControls: nativeControls.map(({ kind, value, alt, accessibleValues }) => ({
-      kind: kind.value,
-      value: value.value,
-      alt: alt.value,
-      accessibleValues,
-    })),
+    descendantAccessibleEntries,
+    descendantAccessibleEvidence,
   }))
   const ariaLabelledEntries = ariaLabelled.entries
-    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => ({
+    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
@@ -1293,9 +1348,10 @@ function captureIsolatedSafetyEvidence(
       nativeControlValue: nativeControlValue.value,
       nativeControlAlt: nativeControlAlt.value,
       nativeControlAccessibleValues,
+      descendantAccessibleEvidence,
     }))
   const ariaDescribedEntries = ariaDescribed.entries
-    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => ({
+    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
@@ -1308,6 +1364,7 @@ function captureIsolatedSafetyEvidence(
       nativeControlValue: nativeControlValue.value,
       nativeControlAlt: nativeControlAlt.value,
       nativeControlAccessibleValues,
+      descendantAccessibleEvidence,
     }))
   const snapshot = JSON.stringify({
       attributes: attributes.map(({ name, value }) => [name, value]),
@@ -1898,7 +1955,7 @@ function classifyDomInIsolatedWorld({
         ariaLabelled.raw,
         ...ariaLabelled.ids,
         ...ariaLabelled.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => [
+        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => [
           ...imageAlts,
           ariaLabel,
           ariaDescription,
@@ -1907,12 +1964,13 @@ function classifyDomInIsolatedWorld({
           nativeControlValue,
           nativeControlAlt,
           ...nativeControlAccessibleValues,
+          ...descendantAccessibleEvidence,
           ...generatedContent,
         ]),
         ariaDescribed.raw,
         ...ariaDescribed.ids,
         ...ariaDescribed.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => [
+        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => [
           ...imageAlts,
           ariaLabel,
           ariaDescription,
@@ -1921,20 +1979,16 @@ function classifyDomInIsolatedWorld({
           nativeControlValue,
           nativeControlAlt,
           ...nativeControlAccessibleValues,
+          ...descendantAccessibleEvidence,
           ...generatedContent,
         ]),
-        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title, generatedContent, nativeControls }) => [
+        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title, generatedContent, descendantAccessibleEvidence }) => [
           labelText,
           ...imageAlts,
           ariaLabel,
           title,
           ...generatedContent,
-          ...nativeControls.flatMap(({ kind, value, alt, accessibleValues }) => [
-            kind,
-            value,
-            alt,
-            ...accessibleValues,
-          ]),
+          ...descendantAccessibleEvidence,
         ]),
         element.getAttribute('placeholder') ?? '',
         'name' in element ? element.name : '',
