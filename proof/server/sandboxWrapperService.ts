@@ -102,6 +102,11 @@ interface WorkerResponse {
   body: string
 }
 
+interface WorkerActionEnvelope {
+  result: WrapperActionResult
+  outerExpiresAtMs: number
+}
+
 function sandboxConfigurationError(): WrapperServiceError {
   return new WrapperServiceError(
     'sandbox_not_configured',
@@ -391,20 +396,30 @@ export class SandboxWrapperService {
     const sandbox = await this.getExisting(sessionId, sessionToken, signal)
     const startedAtMs = this.now()
     try {
-      const result = await this.callWorker<WrapperActionResult>(
+      const workerResult = await this.callWorker<WorkerActionEnvelope>(
         sandbox,
         sessionToken,
         'action',
         { toolName, capabilityId, input },
         signal,
       )
-      const expiresAtMs = Date.parse(result.analysis.expiresAt)
+      if (
+        !workerResult
+        || typeof workerResult !== 'object'
+        || !workerResult.result
+        || !Number.isFinite(workerResult.outerExpiresAtMs)
+      ) throw new Error('The isolated worker returned invalid session lifetime metadata.')
+      const result = workerResult.result
+      const innerExpiresAtMs = Date.parse(result.analysis.expiresAt)
+      const expiresAtMs = Number.isFinite(innerExpiresAtMs)
+        ? Math.min(innerExpiresAtMs, workerResult.outerExpiresAtMs)
+        : workerResult.outerExpiresAtMs
       const analysis = decorateAnalysis(
         result.analysis,
         sandbox,
         sessionId,
         sessionToken,
-        Number.isFinite(expiresAtMs) ? expiresAtMs : startedAtMs + WRAPPER_SESSION_TTL_MS,
+        expiresAtMs,
         startedAtMs,
         this.now,
       )

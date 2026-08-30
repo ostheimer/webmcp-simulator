@@ -143,7 +143,12 @@ const server = createServer(async (request, response) => {
         abortController.signal,
         body.capabilityId,
       )
-      sendJson(response, 200, result)
+      sendJson(response, 200, {
+        result,
+        // This worker-owned value is the outer Sandbox/config deadline. The
+        // inner Playwright session starts later and must never extend it.
+        outerExpiresAtMs: config.expiresAtMs,
+      })
       return
     }
 

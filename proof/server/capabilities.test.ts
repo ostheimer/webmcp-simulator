@@ -206,25 +206,46 @@ describe('inferSafeCapabilities', () => {
   })
 
   it.each([
-    ['date', '2026-01-15', '^[1-9]', 'date'],
-    ['month', '2026-01', '^[1-9]', undefined],
-    ['time', '12:00', '^(?:', undefined],
-    ['week', '2026-W01', '^[1-9]', undefined],
-  ])('publishes a format-valid sample and bounded schema for %s controls', (type, sample, patternStart, format) => {
+    ['date', ['2026-01-14', '2026-01-15']],
+    ['month', ['2026-01', '2026-03']],
+    ['time', ['12:00:30', '12:01']],
+    ['week', ['2026-W52', '2026-W53']],
+  ])('publishes a browser-enumerated sample and schema for bounded %s controls', (type, values) => {
     const capabilities = inferSafeCapabilities([
-      control({ id: `${type}-1`, fieldKey: type, formId: 'form-1', type }),
+      control({
+        id: `${type}-1`,
+        fieldKey: type,
+        formId: 'form-1',
+        type,
+        dateLikeValues: values,
+        dateLikeSample: values[0],
+      }),
       control({ id: 'text-1', fieldKey: 'details', formId: 'form-1', type: 'text' }),
     ])
 
     const form = capabilities.find(({ name }) => name === 'prepare_visible_form')!
     const fieldSchema = (form.inputSchema.properties as Record<string, Record<string, unknown>>).field_1
-    expect(form.sampleInput).toMatchObject({ field_1: sample })
+    expect(form.sampleInput).toMatchObject({ field_1: values[0] })
     expect(fieldSchema).toMatchObject({
       type: 'string',
-      pattern: expect.stringContaining(patternStart),
-      minLength: sample.length,
-      maxLength: sample.length,
-      ...(format ? { format } : {}),
+      enum: values,
     })
+    expect(fieldSchema).not.toHaveProperty('pattern')
+    expect(fieldSchema).not.toHaveProperty('minLength')
+    expect(fieldSchema).not.toHaveProperty('maxLength')
+  })
+
+  it('samples checkboxes as the opposite of their browser-observed state', () => {
+    const checked = inferSafeCapabilities([
+      control({ id: 'checked-1', fieldKey: 'one', formId: 'form-1', type: 'checkbox', checked: true }),
+      control({ id: 'checked-2', fieldKey: 'two', formId: 'form-1', type: 'checkbox', checked: true }),
+    ])[0]
+    expect(checked.sampleInput).toEqual({ field_1: false, field_2: false })
+
+    const unchecked = inferSafeCapabilities([
+      control({ id: 'unchecked-1', fieldKey: 'one', formId: 'form-1', type: 'checkbox', checked: false }),
+      control({ id: 'unchecked-2', fieldKey: 'two', formId: 'form-1', type: 'checkbox', checked: false }),
+    ])[0]
+    expect(unchecked.sampleInput).toEqual({ field_1: true, field_2: true })
   })
 })

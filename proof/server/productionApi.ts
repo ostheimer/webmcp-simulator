@@ -249,18 +249,26 @@ export function handleActionRequest(
   backend: ProductionWrapperBackend = service,
 ): Promise<Response> {
   return handle(async () => {
-    const { sourceId } = assertRequestBoundary(request)
-    consumeRateLimit(actionRates, sourceId, MAX_ACTIONS_PER_WINDOW, ACTION_RATE_WINDOW_MS)
-    const body = await readJson(request)
-    if (
-      typeof body.sessionId !== 'string'
-      || typeof body.sessionToken !== 'string'
-      || typeof body.toolName !== 'string'
-      || typeof body.capabilityId !== 'string'
-      || !body.input
-      || typeof body.input !== 'object'
-      || Array.isArray(body.input)
-    ) throw new HttpError('sessionId, sessionToken, capabilityId, toolName, and input are required.', 400, 'invalid_action')
+    let body: Record<string, unknown>
+    try {
+      const { sourceId } = assertRequestBoundary(request)
+      consumeRateLimit(actionRates, sourceId, MAX_ACTIONS_PER_WINDOW, ACTION_RATE_WINDOW_MS)
+      body = await readJson(request)
+      if (
+        typeof body.sessionId !== 'string'
+        || typeof body.sessionToken !== 'string'
+        || typeof body.toolName !== 'string'
+        || typeof body.capabilityId !== 'string'
+        || !body.input
+        || typeof body.input !== 'object'
+        || Array.isArray(body.input)
+      ) throw new HttpError('sessionId, sessionToken, capabilityId, toolName, and input are required.', 400, 'invalid_action')
+    } catch (error) {
+      if (error instanceof HttpError) {
+        throw new HttpError(error.message, error.status, error.code, { sessionInvalidated: false })
+      }
+      throw error
+    }
     return backend.execute(
       body.sessionId,
       body.sessionToken,

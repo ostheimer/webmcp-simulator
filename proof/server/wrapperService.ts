@@ -19,9 +19,12 @@ import { WrapperServiceError } from './wrapperErrors.ts'
 import {
   estimateWrapperCost,
   WRAPPER_MAX_AX_EVIDENCE,
+  WRAPPER_MAX_DATE_LIKE_VALUES,
+  WRAPPER_MAX_DOM_ELEMENTS_INSPECTED,
   WRAPPER_MAX_DOM_EVIDENCE,
   WRAPPER_MAX_PAGES,
   WRAPPER_MAX_SCREENSHOT_BYTES,
+  WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
   WRAPPER_MAX_TARGET_RESOURCE_BYTES,
   WRAPPER_MAX_TARGET_SESSION_BYTES,
   WRAPPER_MEMORY_MB,
@@ -174,25 +177,6 @@ function preActionError(
   status: number,
 ): WrapperServiceError {
   return new WrapperServiceError(code, message, status, { sessionInvalidated: false })
-}
-
-function isValidDateLikeInput(type: keyof typeof DATE_LIKE_FIELD_SPECS, value: unknown): value is string {
-  if (typeof value !== 'string' || !new RegExp(DATE_LIKE_FIELD_SPECS[type].pattern).test(value)) return false
-  if (type === 'date') {
-    const [year, month, day] = value.split('-').map(Number)
-    const date = new Date(Date.UTC(year, month - 1, day))
-    return date.getUTCFullYear() === year
-      && date.getUTCMonth() === month - 1
-      && date.getUTCDate() === day
-  }
-  if (type === 'week') {
-    const [yearValue, weekValue] = value.split('-W').map(Number)
-    if (weekValue < 53) return true
-    const januaryFirst = new Date(Date.UTC(yearValue, 0, 1)).getUTCDay()
-    const leapYear = yearValue % 4 === 0 && (yearValue % 100 !== 0 || yearValue % 400 === 0)
-    return januaryFirst === 4 || (januaryFirst === 3 && leapYear)
-  }
-  return true
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -367,6 +351,9 @@ function classifyDomInIsolatedWorld({
   unsafeNavigationPatternSource,
   sensitiveAutocompleteTokens,
   maxControls,
+  maxElementsInspected,
+  maxDateLikeValues,
+  maxSelectOptionsInspected,
   viewportWidth,
   viewportHeight,
   maxSafetyEvidenceLength,
@@ -375,6 +362,9 @@ function classifyDomInIsolatedWorld({
   unsafeNavigationPatternSource: string
   sensitiveAutocompleteTokens: string[]
   maxControls: number
+  maxElementsInspected: number
+  maxDateLikeValues: number
+  maxSelectOptionsInspected: number
   viewportWidth: number
   viewportHeight: number
   maxSafetyEvidenceLength: number
@@ -382,21 +372,54 @@ function classifyDomInIsolatedWorld({
     const unsafePattern = new RegExp(unsafePatternSource, 'i')
     const unsafeNavigationPattern = new RegExp(unsafeNavigationPatternSource, 'i')
     const sensitiveAutocomplete = new Set<string>(sensitiveAutocompleteTokens)
-    const normalize = (value: unknown, limit = 140) => String(value ?? '')
+    const boundedRaw = (value: unknown) => String(value ?? '').slice(0, maxSafetyEvidenceLength + 1)
+    const normalize = (value: unknown, limit = 140) => boundedRaw(value)
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, limit)
-    const tokenizeEvidence = (value: unknown) => String(value ?? '')
+    const tokenizeEvidence = (value: unknown) => boundedRaw(value)
       .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
       .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, '$1 $2')
       .replace(/[^\p{L}\p{N}]+/gu, ' ')
     const finiteNumber = (value: unknown): number | undefined => {
-      const normalized = String(value ?? '').trim()
+      const bounded = boundedRaw(value)
+      if (bounded.length > maxSafetyEvidenceLength) return undefined
+      const normalized = bounded.trim()
       if (!normalized) return undefined
       const numeric = Number(normalized)
       return Number.isFinite(numeric) ? numeric : undefined
     }
     const matches = Element.prototype.matches
+    const createTreeWalker = Document.prototype.createTreeWalker
+    const nextNode = TreeWalker.prototype.nextNode
+    const boundedNodeText = (root: Element): string => {
+      const textWalker = createTreeWalker.call(document, root, NodeFilter.SHOW_ALL)
+      let value = ''
+      let nodesInspected = 0
+      while (nodesInspected < 256 && value.length <= maxSafetyEvidenceLength) {
+        const textNode = nextNode.call(textWalker)
+        if (!textNode) return value
+        nodesInspected += 1
+        if (textNode.nodeType === Node.TEXT_NODE) {
+          value += String(textNode.nodeValue ?? '').slice(0, maxSafetyEvidenceLength + 1 - value.length)
+        }
+      }
+      const hasMoreNodes = Boolean(nextNode.call(textWalker))
+      return hasMoreNodes || value.length > maxSafetyEvidenceLength
+        ? `${value.slice(0, maxSafetyEvidenceLength)}!`
+        : value
+    }
+    const boundedImageAlt = (root: Element): string => {
+      const elementWalker = createTreeWalker.call(document, root, NodeFilter.SHOW_ELEMENT)
+      let nodesInspected = 0
+      while (nodesInspected < 256) {
+        const node = nextNode.call(elementWalker)
+        if (!node) return ''
+        nodesInspected += 1
+        if (node instanceof HTMLImageElement) return boundedRaw(node.getAttribute('alt') ?? '')
+      }
+      return nextNode.call(elementWalker) ? '!'.repeat(maxSafetyEvidenceLength + 1) : ''
+    }
     const isReadOnlyControl = (element: Element): boolean => {
       if (element instanceof HTMLInputElement) {
         const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'readOnly')?.get
@@ -408,14 +431,29 @@ function classifyDomInIsolatedWorld({
       }
       return false
     }
-    const controls = Array.from(document.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLAnchorElement>(
-      'input, select, textarea, a[href]',
-    )).filter((element) => isElementScreenshotVisible(element, viewportWidth, viewportHeight)
-      && !matches.call(element, ':disabled')
-      && !isReadOnlyControl(element))
+    const controls: Array<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLAnchorElement> = []
+    const walker = createTreeWalker.call(document, document.documentElement, NodeFilter.SHOW_ELEMENT)
+    let inspected = 0
+    while (controls.length < maxControls && inspected < maxElementsInspected) {
+      const node = nextNode.call(walker)
+      if (!node) break
+      inspected += 1
+      if (
+        !(node instanceof HTMLInputElement)
+        && !(node instanceof HTMLSelectElement)
+        && !(node instanceof HTMLTextAreaElement)
+        && !(node instanceof HTMLAnchorElement)
+      ) continue
+      if (node instanceof HTMLAnchorElement && !node.hasAttribute('href')) continue
+      if (
+        isElementScreenshotVisible(node, viewportWidth, viewportHeight)
+        && !matches.call(node, ':disabled')
+        && !isReadOnlyControl(node)
+      ) controls.push(node)
+    }
 
     const forms = new Map<HTMLFormElement, string>()
-    const elements = controls.slice(0, maxControls)
+    const elements = controls
     const descriptors = elements.map((element, index) => {
       const id = `proof-control-${index + 1}`
       const form = 'form' in element ? element.form : null
@@ -427,34 +465,53 @@ function classifyDomInIsolatedWorld({
           forms.set(form, formId)
         }
       }
-      const ariaLabelledBy = (element.getAttribute('aria-labelledby') ?? '')
-        .split(/\s+/)
-        .filter(Boolean)
-      const ariaLabelledNodes = ariaLabelledBy
-        .map((referenceId) => document.getElementById(referenceId) as Element | null)
-        .filter((node): node is Element => node !== null)
-      const accessibleNodeText = (node: Element) => node instanceof HTMLElement
-        ? node.innerText || node.textContent || ''
-        : node.textContent || ''
-      const associatedLabels = 'labels' in element
-        ? Array.from(element.labels ?? [])
-        : []
-      const ariaLabelledText = ariaLabelledNodes
+      const referencedElements = (attribute: string) => {
+        const source = element.getAttribute(attribute) ?? ''
+        const raw = source.slice(0, maxSafetyEvidenceLength + 1)
+        const ids: string[] = []
+        let cursor = 0
+        while (cursor < raw.length && ids.length < 17) {
+          while (cursor < raw.length && /\s/.test(raw[cursor])) cursor += 1
+          const start = cursor
+          while (cursor < raw.length && !/\s/.test(raw[cursor])) cursor += 1
+          if (cursor > start) ids.push(raw.slice(start, cursor))
+        }
+        const overflow = source.length > maxSafetyEvidenceLength || ids.length > 16
+        if (ids.length > 16) ids.length = 16
+        const nodes = ids
+          .map((referenceId) => document.getElementById(referenceId) as Element | null)
+          .filter((node): node is Element => node !== null)
+        return { raw, ids, nodes, overflow }
+      }
+      const ariaLabelled = referencedElements('aria-labelledby')
+      const ariaDescribed = referencedElements('aria-describedby')
+      const accessibleNodeText = (node: Element) => boundedNodeText(node)
+      const associatedLabels: HTMLLabelElement[] = []
+      if ('labels' in element && element.labels) {
+        for (let labelIndex = 0; labelIndex < element.labels.length && labelIndex < 16; labelIndex += 1) {
+          const labelElement = element.labels.item(labelIndex)
+          if (labelElement) associatedLabels.push(labelElement)
+        }
+      }
+      const associatedLabelsOverflow = 'labels' in element && Boolean(element.labels && element.labels.length > 16)
+      const ariaLabelledText = ariaLabelled.nodes
         .map(accessibleNodeText)
         .find((value) => value.trim())
       const explicitLabel = element.getAttribute('aria-label')
         || ariaLabelledText
         || (element instanceof HTMLAnchorElement
-          ? element.textContent || element.querySelector('img')?.getAttribute('alt') || element.title
+          ? boundedNodeText(element) || boundedImageAlt(element) || element.title
           : '')
-        || associatedLabels.map((labelElement) => labelElement.innerText || labelElement.textContent || '')
+        || associatedLabels.map((labelElement) => boundedNodeText(labelElement))
           .find((value) => value.trim())
         || element.getAttribute('placeholder')
         || element.getAttribute('name')
         || element.getAttribute('id')
         || element.tagName.toLowerCase()
       const label = normalize(explicitLabel)
-      const autocompleteTokens = (element.getAttribute('autocomplete') ?? '')
+      const autocompleteSource = element.getAttribute('autocomplete') ?? ''
+      const boundedAutocomplete = autocompleteSource.slice(0, maxSafetyEvidenceLength + 1)
+      const autocompleteTokens = boundedAutocomplete
         .toLowerCase()
         .split(/\s+/)
         .filter(Boolean)
@@ -467,39 +524,74 @@ function classifyDomInIsolatedWorld({
             : element.type.toLowerCase()
       const role = element.getAttribute('role')
         || (element instanceof HTMLAnchorElement ? 'link' : type === 'search' ? 'searchbox' : element instanceof HTMLSelectElement ? 'combobox' : 'textbox')
+      const linkHrefSource = element instanceof HTMLAnchorElement ? element.getAttribute('href') ?? '' : ''
+      const linkHrefOverflow = linkHrefSource.length > maxSafetyEvidenceLength
+      const absoluteLink = element instanceof HTMLAnchorElement && !linkHrefOverflow ? element.href : ''
+      const linkTargetOverflow = linkHrefOverflow || absoluteLink.length > maxSafetyEvidenceLength
+      const rawLinkPath = element instanceof HTMLAnchorElement && !linkTargetOverflow
+        ? `${element.pathname}${element.search}`
+        : ''
+      const linkPathOverflow = rawLinkPath.length > maxSafetyEvidenceLength
+      const encodedLinkPath = linkPathOverflow ? '' : rawLinkPath
       const sameOriginLink = element instanceof HTMLAnchorElement
+        && !linkTargetOverflow
+        && !linkPathOverflow
         && /^https?:$/.test(element.protocol)
         && element.origin === location.origin
         && !element.target
         && !element.hasAttribute('download')
         && `${element.pathname}${element.search}` !== `${location.pathname}${location.search}`
       const enabledOptions = element instanceof HTMLSelectElement
-        ? Array.from(element.options)
-          .map((option, optionIndex) => ({ option, optionIndex }))
-          .filter(({ option }) => !matches.call(option, ':disabled'))
-          .slice(0, 30)
+        ? (() => {
+            const result: Array<{ option: HTMLOptionElement, optionIndex: number }> = []
+            for (
+              let optionIndex = 0;
+              optionIndex < element.options.length
+                && optionIndex < maxSelectOptionsInspected
+                && result.length < 30;
+              optionIndex += 1
+            ) {
+              const option = element.options.item(optionIndex)
+              if (option && !matches.call(option, ':disabled')) result.push({ option, optionIndex })
+            }
+            return result
+          })()
         : undefined
       const optionValues = enabledOptions
-        ? enabledOptions.map(({ option }) => option.value)
+        ? enabledOptions.map(({ option }) => option.value.slice(0, maxSafetyEvidenceLength + 1))
         : sameOriginLink
-          ? [element.href]
+          ? [absoluteLink]
           : undefined
       const optionIndices = enabledOptions?.map(({ optionIndex }) => optionIndex)
       const numericInput = element instanceof HTMLInputElement && ['number', 'range'].includes(type)
-      const explicitMinimum = numericInput ? finiteNumber(element.min) : undefined
+      const numericMinimumSource = numericInput ? element.getAttribute('min') ?? '' : ''
+      const numericMaximumSource = numericInput ? element.getAttribute('max') ?? '' : ''
+      const numericStepSource = numericInput ? element.getAttribute('step') ?? '' : ''
+      const numericValueSource = numericInput ? element.getAttribute('value') ?? '' : ''
+      const numericAttributeOverflow = numericInput && [
+        numericMinimumSource,
+        numericMaximumSource,
+        numericStepSource,
+        numericValueSource,
+      ].some((value) => value.length > maxSafetyEvidenceLength)
+      const explicitMinimum = numericInput && !numericAttributeOverflow
+        ? finiteNumber(numericMinimumSource)
+        : undefined
       const minimum = numericInput
         ? explicitMinimum ?? (type === 'range' ? 0 : undefined)
         : undefined
-      const maximum = numericInput
-        ? finiteNumber(element.max) ?? (type === 'range' ? 100 : undefined)
+      const maximum = numericInput && !numericAttributeOverflow
+        ? finiteNumber(numericMaximumSource) ?? (type === 'range' ? 100 : undefined)
         : undefined
-      const rawStep = numericInput ? element.step.trim().toLowerCase() : ''
+      const rawStep = numericInput && !numericAttributeOverflow
+        ? boundedRaw(numericStepSource).trim().toLowerCase()
+        : ''
       const parsedStep = finiteNumber(rawStep)
       const numericStep = numericInput && rawStep !== 'any'
         ? parsedStep !== undefined && parsedStep > 0 ? parsedStep : 1
         : undefined
       const numericStepBase = numericStep
-        ? explicitMinimum ?? finiteNumber(element.getAttribute('value')) ?? 0
+        ? explicitMinimum ?? finiteNumber(numericValueSource) ?? 0
         : undefined
       const tolerance = 1e-9
       const onStep = (value: number) => numericStep && numericStepBase !== undefined
@@ -507,7 +599,7 @@ function classifyDomInIsolatedWorld({
         : true
       let numericSample: number | undefined
       let numericValues: number[] | undefined
-      let numericUnsupported = false
+      let numericUnsupported = Boolean(numericAttributeOverflow)
       if (numericInput) {
         let candidate = minimum ?? (maximum !== undefined && maximum < 1 ? maximum : 1)
         if (numericStep && numericStepBase !== undefined) {
@@ -544,7 +636,77 @@ function classifyDomInIsolatedWorld({
           }
         }
       }
-      const encodedLinkPath = element instanceof HTMLAnchorElement ? `${element.pathname}${element.search}` : ''
+      const dateLikeInput = element instanceof HTMLInputElement
+        && ['date', 'month', 'time', 'week'].includes(type)
+      let dateLikeValues: string[] | undefined
+      let dateLikeSample: string | undefined
+      if (dateLikeInput) {
+        const getAttribute = Element.prototype.getAttribute
+        const cloneNode = Node.prototype.cloneNode
+        const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+        const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+        const validityGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'validity')?.get
+        const stepUp = HTMLInputElement.prototype.stepUp
+        const minimumSource = getAttribute.call(element, 'min') ?? ''
+        const maximumSource = getAttribute.call(element, 'max') ?? ''
+        const stepSource = getAttribute.call(element, 'step') ?? ''
+        const dateLikeAttributeOverflow = [minimumSource, maximumSource, stepSource]
+          .some((value) => value.length > maxSafetyEvidenceLength)
+        const minimumValue = dateLikeAttributeOverflow ? '' : boundedRaw(minimumSource).trim()
+        const maximumValue = dateLikeAttributeOverflow ? '' : boundedRaw(maximumSource).trim()
+        const stepValue = dateLikeAttributeOverflow ? '' : boundedRaw(stepSource).trim().toLowerCase()
+        if (
+          !dateLikeAttributeOverflow
+          &&
+          minimumValue
+          && maximumValue
+          && stepValue !== 'any'
+          && valueGetter
+          && valueSetter
+          && validityGetter
+        ) {
+          const probe = cloneNode.call(element, false) as HTMLInputElement
+          valueSetter.call(probe, maximumValue)
+          const maximumRetained = valueGetter.call(probe) === maximumValue
+          valueSetter.call(probe, minimumValue)
+          const minimumRetained = valueGetter.call(probe) === minimumValue
+          if (minimumRetained && maximumRetained) {
+            const values: string[] = []
+            let overflowedBudget = false
+            while (values.length <= maxDateLikeValues) {
+              const value = String(valueGetter.call(probe))
+              const validity = validityGetter.call(probe) as ValidityState
+              if (!value || validity.rangeUnderflow || validity.rangeOverflow || validity.stepMismatch || validity.badInput) break
+              values.push(value)
+              try {
+                stepUp.call(probe)
+              } catch {
+                break
+              }
+              const nextValue = String(valueGetter.call(probe))
+              if (!nextValue || nextValue === value) break
+              if (values.length === maxDateLikeValues) {
+                const nextValidity = validityGetter.call(probe) as ValidityState
+                if (!nextValidity.rangeOverflow && !nextValidity.stepMismatch && !nextValidity.badInput) {
+                  overflowedBudget = true
+                }
+                break
+              }
+            }
+            if (!overflowedBudget && values.length > 0 && values.length <= maxDateLikeValues) {
+              dateLikeValues = values
+              const currentValue = String(valueGetter.call(element))
+              dateLikeSample = values.find((value) => value !== currentValue) ?? values[0]
+            }
+          }
+        }
+      }
+      const checked = element instanceof HTMLInputElement && ['checkbox', 'radio'].includes(type)
+        ? (() => {
+            const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.get
+            return getter ? Boolean(getter.call(element)) : undefined
+          })()
+        : undefined
       let decodedLinkPath = encodedLinkPath
       try {
         decodedLinkPath = decodeURIComponent(encodedLinkPath)
@@ -553,15 +715,18 @@ function classifyDomInIsolatedWorld({
       }
       const safetyEvidenceSources = [
         element.getAttribute('aria-label') ?? '',
-        element.getAttribute('aria-labelledby') ?? '',
-        ...ariaLabelledBy,
-        ...ariaLabelledNodes.map(accessibleNodeText),
-        ...associatedLabels.flatMap((labelElement) => [labelElement.innerText, labelElement.textContent]),
+        ariaLabelled.raw,
+        ...ariaLabelled.ids,
+        ...ariaLabelled.nodes.map(accessibleNodeText),
+        ariaDescribed.raw,
+        ...ariaDescribed.ids,
+        ...ariaDescribed.nodes.map(accessibleNodeText),
+        ...associatedLabels.map((labelElement) => boundedNodeText(labelElement)),
         element.getAttribute('placeholder') ?? '',
         'name' in element ? element.name : '',
         element.id,
-        element instanceof HTMLAnchorElement ? element.textContent ?? '' : '',
-        element instanceof HTMLAnchorElement ? element.querySelector('img')?.getAttribute('alt') ?? '' : '',
+        element instanceof HTMLAnchorElement ? boundedNodeText(element) : '',
+        element instanceof HTMLAnchorElement ? boundedImageAlt(element) : '',
         element instanceof HTMLAnchorElement ? element.title : '',
         decodedLinkPath,
       ].map((value) => String(value ?? ''))
@@ -576,6 +741,14 @@ function classifyDomInIsolatedWorld({
         || token.startsWith('tel-')
         || /(address|birth|card|credential|email|name|otp|passcode|password|phone|postal|secret|token|username)/.test(token))
       const sensitive = ['email', 'file', 'password', 'tel'].includes(type)
+        || autocompleteSource.length > maxSafetyEvidenceLength
+        || numericAttributeOverflow
+        || (dateLikeInput && !dateLikeValues)
+        || linkTargetOverflow
+        || linkPathOverflow
+        || ariaLabelled.overflow
+        || ariaDescribed.overflow
+        || associatedLabelsOverflow
         || hasSensitiveAutocomplete
         || hasUnsafeEvidence
         || hasUnsafeNavigationEvidence
@@ -599,6 +772,9 @@ function classifyDomInIsolatedWorld({
         numericValues,
         numericSample,
         numericUnsupported,
+        dateLikeValues,
+        dateLikeSample,
+        checked,
         sensitive,
       }
     })
@@ -630,6 +806,9 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       unsafeNavigationPatternSource: UNSAFE_NAVIGATION_HINT.source,
       sensitiveAutocompleteTokens: [...SENSITIVE_AUTOCOMPLETE_TOKENS],
       maxControls: WRAPPER_MAX_DOM_EVIDENCE,
+      maxElementsInspected: WRAPPER_MAX_DOM_ELEMENTS_INSPECTED,
+      maxDateLikeValues: WRAPPER_MAX_DATE_LIKE_VALUES,
+      maxSelectOptionsInspected: WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
       viewportWidth: CAPTURE_VIEWPORT_WIDTH,
       viewportHeight: CAPTURE_VIEWPORT_HEIGHT,
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
@@ -710,6 +889,26 @@ function assertIsolatedControlOperable(
   }
 }
 
+function assertIsolatedDateLikeValueAllowed(
+  element: Element,
+  expectedType: string,
+  expectedValue?: IsolatedControlState,
+): void {
+  if (!['date', 'month', 'time', 'week'].includes(expectedType)) return
+  if (!(element instanceof HTMLInputElement)) throw new Error('The isolated control type changed.')
+  const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+  const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+  const validityGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'validity')?.get
+  if (!valueGetter || !valueSetter || !validityGetter) throw new Error('The isolated date-like control is unavailable.')
+  const target = expectedValue === undefined
+    ? element
+    : Node.prototype.cloneNode.call(element, false) as HTMLInputElement
+  if (expectedValue !== undefined) valueSetter.call(target, String(expectedValue))
+  const retained = expectedValue === undefined || valueGetter.call(target) === String(expectedValue)
+  const validity = validityGetter.call(target) as ValidityState
+  if (!retained || !validity.valid) throw new Error('The isolated date-like value is no longer allowed.')
+}
+
 function readIsolatedControlState(
   this: Element,
   expectedType: string,
@@ -726,6 +925,7 @@ function readIsolatedControlState(
     throw new Error('The isolated control is no longer available.')
   }
   assertIsolatedControlOperable(this, expectedOptionIndex)
+  assertIsolatedDateLikeValueAllowed(this, expectedType)
   if (expectedType === 'select-one') {
     if (!(this instanceof HTMLSelectElement)) throw new Error('The isolated control type changed.')
     return this.selectedIndex
@@ -764,6 +964,7 @@ function writeIsolatedControlState(
     throw new Error('The isolated control type changed.')
   }
   assertIsolatedControlOperable(this, expectedOptionIndex)
+  assertIsolatedDateLikeValueAllowed(this, expectedType, value)
   if (expectedType === 'select-one') {
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.set
     if (!setter) throw new Error('The isolated select setter is unavailable.')
@@ -820,7 +1021,7 @@ async function callOnIsolatedNode<T>(
     const objectId = resolved.object?.objectId
     if (!objectId) throw new Error('The isolated browser element identity expired.')
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); return (${functionDeclaration}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
       arguments: args.map((value) => ({ value })),
       objectGroup,
@@ -884,11 +1085,14 @@ function readLinkTarget(
   )
 }
 
-async function collectAxEvidence(context: BrowserContext, page: Page): Promise<WrapperAxEvidence[]> {
+async function collectAxEvidence(
+  context: BrowserContext,
+  page: Page,
+  backendNodeIds: number[],
+): Promise<WrapperAxEvidence[]> {
   const cdp = await context.newCDPSession(page)
   try {
     await cdp.send('Accessibility.enable')
-    const tree = await cdp.send('Accessibility.getFullAXTree') as { nodes?: AxNode[] }
     const usefulRoles = new Set([
       'button',
       'checkbox',
@@ -899,14 +1103,23 @@ async function collectAxEvidence(context: BrowserContext, page: Page): Promise<W
       'searchbox',
       'textbox',
     ])
-    return (tree.nodes ?? [])
-      .filter((node) => !node.ignored && usefulRoles.has(String(node.role?.value ?? '').toLowerCase()))
-      .map((node) => ({
+    const evidence: WrapperAxEvidence[] = []
+    for (const backendNodeId of backendNodeIds.slice(0, WRAPPER_MAX_DOM_EVIDENCE)) {
+      if (evidence.length >= WRAPPER_MAX_AX_EVIDENCE) break
+      const partial = await cdp.send('Accessibility.getPartialAXTree', {
+        backendNodeId,
+        fetchRelatives: false,
+      }) as { nodes?: AxNode[] }
+      const node = partial.nodes?.[0]
+      const role = String(node?.role?.value ?? '').toLowerCase()
+      if (!node || node.ignored || !usefulRoles.has(role)) continue
+      const item = {
         role: cleanPageText(node.role?.value, 40),
         name: cleanPageText(node.name?.value),
-      }))
-      .filter(({ name }) => Boolean(name))
-      .slice(0, WRAPPER_MAX_AX_EVIDENCE)
+      }
+      if (item.name) evidence.push(item)
+    }
+    return evidence
   } finally {
     await cdp.detach()
   }
@@ -987,8 +1200,8 @@ function validateActionInput(
         throw preActionError('invalid_action', `${key} must be one of the visible numeric values.`, 400)
       }
     } else if (Object.hasOwn(DATE_LIKE_FIELD_SPECS, field.type)) {
-      if (!isValidDateLikeInput(field.type as keyof typeof DATE_LIKE_FIELD_SPECS, value)) {
-        throw preActionError('invalid_action', `${key} must match the visible ${field.type} format.`, 400)
+      if (typeof value !== 'string' || !field.dateLikeValues?.includes(value)) {
+        throw preActionError('invalid_action', `${key} must be one of the visible ${field.type} values.`, 400)
       }
     } else if (typeof value !== 'string' || Array.from(value).length > 200) {
       throw preActionError('invalid_action', `${key} must be a string of at most 200 characters.`, 400)
@@ -1347,12 +1560,16 @@ export class WrapperProofService {
     if (!isSameOriginHttpUrl(session.page.url(), session.targetOrigin)) {
       throw new Error('The page left its validated origin.')
     }
-    const [domEvidence, axEvidence, title, screenshot] = await Promise.all([
+    const [domEvidence, title, screenshot] = await Promise.all([
       collectDomEvidence(session.context, session.page),
-      collectAxEvidence(session.context, session.page),
       session.page.title(),
       session.page.screenshot({ type: 'jpeg', quality: 72, fullPage: false }),
     ])
+    const axEvidence = await collectAxEvidence(
+      session.context,
+      session.page,
+      domEvidence.map(({ backendNodeId }) => backendNodeId),
+    )
     const inferred = inferSafeCapabilities(domEvidence)
       .filter((capability) => !session.networkLocked || capability.kind !== 'navigation')
       .map((capability) => ({
@@ -1391,6 +1608,9 @@ export class WrapperProofService {
         numericValues: _numericValues,
         numericSample: _numericSample,
         numericUnsupported: _numericUnsupported,
+        dateLikeValues: _dateLikeValues,
+        dateLikeSample: _dateLikeSample,
+        checked: _checked,
         ...evidence
       }) => evidence),
       axEvidence,

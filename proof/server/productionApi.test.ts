@@ -19,6 +19,8 @@ function request(
     signal?: AbortSignal
     method?: string
     sourceIp?: string
+    contentType?: string
+    secFetchSite?: string
   } = {},
 ): Request {
   const clientId = options.clientId ?? 'client_1234567890abcdef'
@@ -26,11 +28,11 @@ function request(
   return new Request(`https://wrapper.example${path}`, {
     method: options.method ?? 'POST',
     headers: {
-      'Content-Type': 'application/json',
+      'Content-Type': options.contentType ?? 'application/json',
       'X-WebMCP-Client': clientId,
       'X-Vercel-Forwarded-For': options.sourceIp ?? `203.0.113.${sourceOctet}`,
       Origin: options.origin ?? 'https://wrapper.example',
-      'Sec-Fetch-Site': 'same-origin',
+      'Sec-Fetch-Site': options.secFetchSite ?? 'same-origin',
     },
     body: JSON.stringify(body),
     signal: options.signal,
@@ -307,6 +309,156 @@ describe('production wrapper API boundaries', () => {
     }, { clientId: 'close_client_000000001', method: 'DELETE' }), target)
     expect(close.status).toBe(401)
     expect(closeSession).toHaveBeenCalledOnce()
+  })
+
+  it('marks only typed pre-backend action failures as non-invalidating', async () => {
+    const validBody = {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-pre-backend',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }
+    const cases: Array<{ name: string, targetRequest: Request, code: string, status: number }> = [
+      {
+        name: 'content type',
+        targetRequest: request('/api/wrapper/action', validBody, {
+          clientId: 'prebackend_content_001',
+          sourceIp: '198.51.100.121',
+          contentType: 'text/plain',
+        }),
+        code: 'content_type',
+        status: 415,
+      },
+      {
+        name: 'cross-site',
+        targetRequest: request('/api/wrapper/action', validBody, {
+          clientId: 'prebackend_crosssite_1',
+          sourceIp: '198.51.100.122',
+          secFetchSite: 'cross-site',
+        }),
+        code: 'cross_site',
+        status: 403,
+      },
+      {
+        name: 'origin',
+        targetRequest: request('/api/wrapper/action', validBody, {
+          clientId: 'prebackend_origin_0001',
+          sourceIp: '198.51.100.123',
+          origin: 'https://attacker.example',
+        }),
+        code: 'origin_mismatch',
+        status: 403,
+      },
+      {
+        name: 'client id',
+        targetRequest: request('/api/wrapper/action', validBody, {
+          clientId: 'short',
+          sourceIp: '198.51.100.124',
+        }),
+        code: 'client_id',
+        status: 400,
+      },
+      {
+        name: 'body limit',
+        targetRequest: rawRequest('/api/wrapper/action', 'x'.repeat(WRAPPER_MAX_REQUEST_BODY_BYTES + 1), {
+          clientId: 'prebackend_bodylimit_1',
+          sourceIp: '198.51.100.125',
+        }),
+        code: 'body_limit',
+        status: 413,
+      },
+      {
+        name: 'malformed JSON',
+        targetRequest: rawRequest('/api/wrapper/action', '{', {
+          clientId: 'prebackend_json_00001',
+          sourceIp: '198.51.100.126',
+        }),
+        code: 'invalid_json',
+        status: 400,
+      },
+      {
+        name: 'required fields',
+        targetRequest: request('/api/wrapper/action', { sessionId: validBody.sessionId }, {
+          clientId: 'prebackend_fields_0001',
+          sourceIp: '198.51.100.127',
+        }),
+        code: 'invalid_action',
+        status: 400,
+      },
+    ]
+
+    for (const testCase of cases) {
+      const target = backend()
+      const response = await handleActionRequest(testCase.targetRequest, target)
+      expect(response.status, testCase.name).toBe(testCase.status)
+      expect(await response.json(), testCase.name).toMatchObject({
+        code: testCase.code,
+        sessionInvalidated: false,
+      })
+      expect(target.execute, testCase.name).not.toHaveBeenCalled()
+    }
+  })
+
+  it('marks the 31st action rate-limit rejection as non-invalidating without calling the backend', async () => {
+    const execute = vi.fn(async () => ({ ok: true }))
+    const target = backend({ execute })
+    const body = {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-rate-limit',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }
+    const options = {
+      clientId: 'action_rate_limit_00001',
+      sourceIp: '198.51.100.128',
+    }
+    for (let index = 0; index < 30; index += 1) {
+      expect((await handleActionRequest(request('/api/wrapper/action', body, options), target)).status).toBe(200)
+    }
+    expect(execute).toHaveBeenCalledTimes(30)
+
+    const limited = await handleActionRequest(request('/api/wrapper/action', body, options), target)
+    expect(limited.status).toBe(429)
+    expect(await limited.json()).toEqual({
+      error: 'The wrapper rate limit was reached. Try again after the current window.',
+      code: 'rate_limit',
+      sessionInvalidated: false,
+    })
+    expect(execute).toHaveBeenCalledTimes(30)
+  })
+
+  it('keeps backend and abort failures fail-closed after action acceptance', async () => {
+    const body = {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-backend-control',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }
+    const unknown = backend({ execute: vi.fn(async () => { throw new Error('internal backend detail') }) })
+    const unknownResponse = await handleActionRequest(request('/api/wrapper/action', body, {
+      clientId: 'backend_unknown_000001',
+      sourceIp: '198.51.100.129',
+    }), unknown)
+    expect(await unknownResponse.json()).toEqual({
+      error: 'The isolated browser operation failed.',
+      code: 'internal_error',
+    })
+
+    const controller = new AbortController()
+    controller.abort()
+    const aborted = backend({ execute: vi.fn(async () => { throw new DOMException('Aborted', 'AbortError') }) })
+    const abortedResponse = await handleActionRequest(request('/api/wrapper/action', body, {
+      clientId: 'backend_abort_0000001',
+      sourceIp: '198.51.100.130',
+      signal: controller.signal,
+    }), aborted)
+    expect(await abortedResponse.json()).toEqual({
+      error: 'The isolated browser operation was cancelled.',
+      code: 'cancelled',
+    })
   })
 
   it('propagates request abort and reports structured provider capacity failures honestly', async () => {

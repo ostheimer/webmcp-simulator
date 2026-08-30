@@ -9,31 +9,10 @@ const FILTER_HINT = /\b(filter|category|sort|type|status|kategorie|filtern|sorti
 const UNSAFE_HINT = /\b(account|address|book|buy|card|checkout|comment|contact|delete|email|login|message|order|password|pay|phone|publish|register|remove|secrets?|security|send|signin|signup|ssn|subscribe|tokens?|upload|username|konto|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 
 export const DATE_LIKE_FIELD_SPECS = {
-  date: {
-    sample: '2026-01-15',
-    pattern: '^[1-9]\\d{3}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])$',
-    minLength: 10,
-    maxLength: 10,
-    format: 'date',
-  },
-  month: {
-    sample: '2026-01',
-    pattern: '^[1-9]\\d{3}-(?:0[1-9]|1[0-2])$',
-    minLength: 7,
-    maxLength: 7,
-  },
-  time: {
-    sample: '12:00',
-    pattern: '^(?:[01]\\d|2[0-3]):[0-5]\\d$',
-    minLength: 5,
-    maxLength: 5,
-  },
-  week: {
-    sample: '2026-W01',
-    pattern: '^[1-9]\\d{3}-W(?:0[1-9]|[1-4]\\d|5[0-3])$',
-    minLength: 8,
-    maxLength: 8,
-  },
+  date: {},
+  month: {},
+  time: {},
+  week: {},
 } as const
 
 export interface DetectedControl extends WrapperDomEvidence {
@@ -49,6 +28,9 @@ export interface DetectedControl extends WrapperDomEvidence {
   numericValues?: number[]
   numericSample?: number
   numericUnsupported?: boolean
+  dateLikeValues?: string[]
+  dateLikeSample?: string
+  checked?: boolean
 }
 
 export interface ActionField {
@@ -63,6 +45,9 @@ export interface ActionField {
   numericStepBase?: number
   numericValues?: number[]
   numericSample?: number
+  dateLikeValues?: string[]
+  dateLikeSample?: string
+  checked?: boolean
 }
 
 export interface CapabilityAction {
@@ -120,10 +105,9 @@ function schemaForField(control: DetectedControl): Record<string, unknown> {
   }
   const dateLikeSpec = DATE_LIKE_FIELD_SPECS[control.type as keyof typeof DATE_LIKE_FIELD_SPECS]
   if (dateLikeSpec) {
-    const { sample: _sample, ...schema } = dateLikeSpec
     return {
       type: 'string',
-      ...schema,
+      enum: control.dateLikeValues,
       description: `Value for the visible ${control.type} control.`,
     }
   }
@@ -159,9 +143,9 @@ function sampleForActionField(field: ActionField): unknown {
   if (field.type === 'number' || field.type === 'range') {
     return field.numericSample ?? 1
   }
-  if (field.type === 'checkbox' || field.type === 'radio') return true
-  const dateLikeSpec = DATE_LIKE_FIELD_SPECS[field.type as keyof typeof DATE_LIKE_FIELD_SPECS]
-  if (dateLikeSpec) return dateLikeSpec.sample
+  if (field.type === 'checkbox') return !field.checked
+  if (field.type === 'radio') return true
+  if (Object.hasOwn(DATE_LIKE_FIELD_SPECS, field.type)) return field.dateLikeSample
   return 'Sample'
 }
 
@@ -275,6 +259,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
     const safeControls = group.filter((control) =>
       !control.sensitive
       && !control.numericUnsupported
+      && (!Object.hasOwn(DATE_LIKE_FIELD_SPECS, control.type) || Boolean(control.dateLikeValues?.length))
       && !UNSAFE_HINT.test(control.label)
       && ['checkbox', 'date', 'month', 'number', 'radio', 'range', 'select-one', 'text', 'time', 'week'].includes(control.type),
     )
@@ -325,6 +310,9 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         numericStepBase: control.numericStepBase,
         numericValues: control.numericValues,
         numericSample: control.numericSample,
+        dateLikeValues: control.dateLikeValues,
+        dateLikeSample: control.dateLikeSample,
+        checked: control.checked,
       })
     })
 

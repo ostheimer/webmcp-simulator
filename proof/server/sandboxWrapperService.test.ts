@@ -75,6 +75,7 @@ function actionFixture(runtimeMs = 20): WrapperActionResult {
 class FakeSandbox {
   name = ''
   expectedToken = ''
+  outerExpiresAtMs = 0
   deleted = 0
   commandCalls = 0
   forceStatus?: number
@@ -91,8 +92,9 @@ class FakeSandbox {
   async writeFiles(files: Array<{ path: string, content: string | Uint8Array }>) {
     const config = files.find(({ path }) => path.endsWith('session.json'))
     if (!config) throw new Error('Missing worker config.')
-    const parsed = JSON.parse(String(config.content)) as { capabilityToken: string }
+    const parsed = JSON.parse(String(config.content)) as { capabilityToken: string, expiresAtMs: number }
     this.expectedToken = parsed.capabilityToken
+    this.outerExpiresAtMs = parsed.expiresAtMs
   }
 
   async runCommand(params: {
@@ -125,7 +127,10 @@ class FakeSandbox {
       ? operation === 'analyze'
         ? analysisFixture(this.workerRuntimeMs)
         : operation === 'action'
-          ? actionFixture(this.workerRuntimeMs)
+          ? {
+              result: actionFixture(this.workerRuntimeMs),
+              outerExpiresAtMs: this.outerExpiresAtMs,
+            }
           : { ready: true, closed: true }
       : status === 410
         ? { error: 'The isolated browser session expired.', code: 'session_expired' }
@@ -433,6 +438,43 @@ describe('SandboxWrapperService session boundaries', () => {
       .toBeGreaterThanOrEqual(first.analysis.runtime.estimatedCost.lowerBound)
     expect(second.analysis.runtime.estimatedCost.upperBound)
       .toBeGreaterThanOrEqual(first.analysis.runtime.estimatedCost.upperBound)
+  })
+
+  it('never decorates an action past the outer Sandbox lifetime', async () => {
+    const harness = createHarness()
+    const analysis = await harness.service.analyze('https://public.example.at')
+    const outerExpiry = Date.parse(analysis.expiresAt)
+    harness.sandbox.workerRuntimeMs = 60_000
+    const originalRunCommand = harness.sandbox.runCommand.bind(harness.sandbox)
+    harness.sandbox.runCommand = async (params) => {
+      const command = await originalRunCommand(params)
+      if (params.env?.WEBMCP_WORKER_OPERATION !== 'action') return command
+      const payload = JSON.parse(await command.stdout()) as { status: number, body: string }
+      if (payload.status !== 200) return command
+      const envelope = JSON.parse(payload.body) as {
+        result: WrapperActionResult
+        outerExpiresAtMs: number
+      }
+      envelope.result.analysis.expiresAt = new Date(outerExpiry + WRAPPER_SESSION_TTL_MS).toISOString()
+      return commandResult(0, JSON.stringify({ ...payload, body: JSON.stringify(envelope) }))
+    }
+
+    const result = await harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'bounded lifetime' },
+    )
+
+    expect(Date.parse(result.analysis.expiresAt)).toBe(outerExpiry)
+    expect(Date.parse(result.analysis.expiresAt)).toBeLessThanOrEqual(harness.sandbox.outerExpiresAtMs)
+    harness.sandbox.forceStatus = 410
+    await expect(harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'must not appear valid' },
+    )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
   it('propagates abort to the command and deletes the partially mutable sandbox', async () => {

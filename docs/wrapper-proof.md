@@ -70,10 +70,11 @@ copied into tool titles, descriptions, parameter names, or parameter
 instructions. Form parameters use neutral `field_1`, `field_2`, and similar
 wrapper-owned keys; CDP backend-node references and remote identifiers remain
 server-only.
-Every accessible-name source is safety evidence: `aria-label`, every
-`aria-labelledby` reference (including non-HTML elements), every associated
-label, placeholder, name, and ID. Public display labels remain bounded and do
-not determine whether a field is sensitive.
+Every accessible-name and description source is safety evidence: `aria-label`,
+bounded `aria-labelledby` and `aria-describedby` references (including non-HTML
+elements), associated labels, placeholder, name, ID, and autocomplete. Reference,
+label, and text budgets fail closed on overflow. Public display labels remain
+bounded and do not determine whether a field is sensitive.
 Filter and navigation choices use numeric indices. Password, secret, token,
 email, phone, message, payment, account, upload, purchase, booking, publishing,
 deletion, and similar controls are excluded.
@@ -90,7 +91,8 @@ deletion, and similar controls are excluded.
 ### Reused conceptually from `stash@{0}` / Issue #2
 
 - inspect only visible, effectively enabled, writable, named controls and options;
-- derive bounded schemas from native control types;
+- derive bounded schemas from native control types, exposing date-like controls
+  only when Chromium can enumerate a complete finite min/max/step value set;
 - use native setters/events for React-compatible preparation;
 - never call `submit()`, `requestSubmit()`, or a submit button;
 - treat labels and choices as untrusted content.
@@ -108,6 +110,10 @@ metadata.
   are blocked, so some sites render partially or are rejected.
 - Tool inference covers native controls and links, not canvas controls, shadow
   DOM, cross-origin frames, or interactions that require authentication.
+- Classification examines at most 5,000 DOM elements and retains at most 80
+  controls. Per-control option, label, ARIA-reference, text-node, and safety-text
+  work is separately bounded; accessibility evidence uses partial CDP queries
+  only for retained controls. Overflow excludes the affected interaction.
 - Each successful navigation returns the current final URL, re-collects DOM and
   accessibility evidence, replaces the server capability map, and re-registers
   the destination tool catalog before the updated page is shown.

@@ -11,6 +11,13 @@ export const WRAPPER_MAX_SCREENSHOT_BYTES = 900 * 1024
 export const WRAPPER_MAX_TARGET_RESOURCE_BYTES = 4 * 1024 * 1024
 export const WRAPPER_MAX_TARGET_SESSION_BYTES = 20 * 1024 * 1024
 export const WRAPPER_MAX_DOM_EVIDENCE = 80
+// DOM classification never materializes an unbounded selector result. It examines
+// at most this many elements and retains at most WRAPPER_MAX_DOM_EVIDENCE controls.
+export const WRAPPER_MAX_DOM_ELEMENTS_INSPECTED = 5_000
+// Date-like controls are exposed only when Chromium can enumerate their complete
+// native min/max/step value set within this limit.
+export const WRAPPER_MAX_DATE_LIKE_VALUES = 200
+export const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = 200
 export const WRAPPER_MAX_AX_EVIDENCE = 40
 export const WRAPPER_MAX_RATE_IDENTITIES_PER_FUNCTION = 512
 export const WRAPPER_ANALYSIS_TIMEOUT_MS = 35_000

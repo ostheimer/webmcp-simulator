@@ -340,10 +340,13 @@ async function startFixture(): Promise<Fixture> {
     }
     if (requestUrl === '/date-like-forms') {
       response.end(`<!doctype html><title>Date-like forms</title>
-        <form><input type="date" name="start_date" aria-label="Start date"><input type="text" name="date_details" aria-label="Date details"></form>
-        <form><input type="month" name="start_month" aria-label="Start month"><input type="text" name="month_details" aria-label="Month details"></form>
-        <form><input type="time" name="start_time" aria-label="Start time"><input type="text" name="time_details" aria-label="Time details"></form>
-        <form><input type="week" name="start_week" aria-label="Start week"><input type="text" name="week_details" aria-label="Week details"></form>`)
+        <form><input type="date" min="2026-01-14" max="2026-01-18" name="start_date" aria-label="Start date"><input type="text" name="date_details" aria-label="Date details"></form>
+        <form><input type="month" min="2026-01" max="2026-05" step="2" name="start_month" aria-label="Start month"><input type="text" name="month_details" aria-label="Month details"></form>
+        <form><input type="time" min="12:00:30" max="12:02:00" step="30" name="start_time" aria-label="Start time"><input type="text" name="time_details" aria-label="Time details"></form>
+        <form><input type="week" min="2026-W52" max="2027-W02" name="start_week" aria-label="Start week"><input type="text" name="week_details" aria-label="Week details"></form>
+        <form><input type="date" min="2026-01-01" name="open_date" aria-label="Open date"><input type="text" aria-label="Open date details"></form>
+        <form><input type="date" min="2020-01-01" max="2022-01-01" name="large_date" aria-label="Large date"><input type="text" aria-label="Large date details"></form>
+        <form><input type="date" min="2026-02-31" max="2026-03-05" name="invalid_date" aria-label="Invalid date"><input type="text" aria-label="Invalid date details"></form>`)
       return
     }
     if (requestUrl === '/numeric-bounds') {
@@ -352,6 +355,81 @@ async function startFixture(): Promise<Fixture> {
         <form><input type="number" max="0.7" step="0.2" aria-label="Bounded decimal"><input type="text" aria-label="Decimal details"></form>
         <form><input type="range" min="10" max="20" step="0" aria-label="Zero step"><input type="text" aria-label="Zero step details"></form>
         <form><input type="range" min="10" max="20" step="-2" aria-label="Negative step"><input type="text" aria-label="Negative step details"></form>`)
+      return
+    }
+    if (requestUrl === '/checkbox-samples') {
+      response.end(`<!doctype html><title>Checkbox samples</title>
+        <form id="checked-form">
+          <input id="checked-one" type="checkbox" aria-label="Checked one" checked>
+          <input id="checked-two" type="checkbox" aria-label="Checked two" checked>
+        </form>
+        <form id="unchecked-form">
+          <input id="unchecked-one" type="checkbox" aria-label="Unchecked one">
+          <input id="unchecked-two" type="checkbox" aria-label="Unchecked two">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/bounded-dom') {
+      response.end(`<!doctype html><title>Bounded DOM</title>
+        <input id="bounded-search" type="search" aria-label="Bounded search">
+        <select id="disabled-option-flood" aria-label="Category filter"></select>
+        <input id="many-labels" type="text" aria-label="Many labels">
+        <input id="many-references" type="text" aria-label="Many references">
+        <input id="huge-autocomplete" type="text" aria-label="Huge autocomplete">
+        <input id="huge-label" type="text" aria-label="Huge label">
+        <div id="huge-description"></div>
+        <input id="huge-description-control" type="text" aria-label="Huge description" aria-describedby="huge-description">
+        <input id="huge-numeric-min" type="number" aria-label="Huge numeric min">
+        <input id="huge-numeric-max" type="number" aria-label="Huge numeric max">
+        <input id="huge-numeric-step" type="number" aria-label="Huge numeric step">
+        <input id="huge-numeric-value" type="number" aria-label="Huge numeric value">
+        <input id="huge-date-min" type="date" max="2026-01-02" aria-label="Huge date min">
+        <input id="huge-date-max" type="date" min="2026-01-01" aria-label="Huge date max">
+        <input id="huge-date-step" type="date" min="2026-01-01" max="2026-01-02" aria-label="Huge date step">
+        <a id="huge-link-path">Huge link path</a>
+        <script>
+          const select = document.getElementById('disabled-option-flood');
+          const options = document.createDocumentFragment();
+          for (let index = 0; index < 400; index += 1) {
+            const option = document.createElement('option'); option.disabled = true; option.textContent = 'Disabled ' + index; options.append(option);
+          }
+          for (let index = 0; index < 2; index += 1) {
+            const option = document.createElement('option'); option.value = 'enabled-' + index; option.textContent = 'Enabled ' + index; options.append(option);
+          }
+          select.append(options);
+          const labels = document.createDocumentFragment();
+          for (let index = 0; index < 400; index += 1) {
+            const label = document.createElement('label'); label.htmlFor = 'many-labels'; label.hidden = true; label.textContent = 'Context ' + index; labels.append(label);
+          }
+          document.body.append(labels);
+          const references = [];
+          const referenceNodes = document.createDocumentFragment();
+          for (let index = 0; index < 400; index += 1) {
+            const node = document.createElement('span'); node.id = 'reference-' + index; node.hidden = true; node.textContent = 'Reference ' + index; references.push(node.id); referenceNodes.append(node);
+          }
+          document.body.append(referenceNodes);
+          document.getElementById('many-references').setAttribute('aria-describedby', references.join(' '));
+          document.getElementById('huge-autocomplete').setAttribute('autocomplete', ('neutral '.repeat(1200)).trim());
+          document.getElementById('huge-label').setAttribute('aria-label', ('Neutral label '.repeat(900)).trim());
+          const hugeText = document.createDocumentFragment();
+          for (let index = 0; index < 300; index += 1) {
+            const span = document.createElement('span'); span.textContent = 'x'.repeat(32); hugeText.append(span);
+          }
+          document.getElementById('huge-description').append(hugeText);
+          const hugeAttribute = '1'.repeat(5000);
+          document.getElementById('huge-numeric-min').setAttribute('min', hugeAttribute);
+          document.getElementById('huge-numeric-max').setAttribute('max', hugeAttribute);
+          document.getElementById('huge-numeric-step').setAttribute('step', hugeAttribute);
+          document.getElementById('huge-numeric-value').setAttribute('value', hugeAttribute);
+          document.getElementById('huge-date-min').setAttribute('min', hugeAttribute);
+          document.getElementById('huge-date-max').setAttribute('max', hugeAttribute);
+          document.getElementById('huge-date-step').setAttribute('step', hugeAttribute);
+          document.getElementById('huge-link-path').setAttribute('href', '/safe?value=' + 'x'.repeat(5000));
+          const nonControls = document.createDocumentFragment();
+          for (let index = 0; index < 4000; index += 1) nonControls.append(document.createElement('div'));
+          document.body.append(nonControls);
+          const late = document.createElement('input'); late.type = 'search'; late.setAttribute('aria-label', 'Late unbounded search'); document.body.append(late);
+        </script>`)
       return
     }
     if (requestUrl === '/visibility') {
@@ -389,6 +467,9 @@ async function startFixture(): Promise<Fixture> {
         <span id="neutral-description">Reference</span>
         <span id="payment-description">Credit card</span>
         <svg aria-hidden="true"><text id="svg-payment-description">Payment card</text></svg>
+        <span id="safe-help">Optional context</span>
+        <span id="password-help">User password</span>
+        <svg aria-hidden="true"><text id="svg-card-help">Credit card number</text></svg>
         <form>
           <input type="text" name="safe_one" aria-label="First neutral field">
           <input type="text" name="safe_two" aria-label="Second neutral field">
@@ -399,6 +480,9 @@ async function startFixture(): Promise<Fixture> {
           <label for="secondary-reference">User password</label>
           <input type="text" name="svg_reference" id="svg-reference" aria-label="SVG neutral aria label"
             aria-labelledby="svg-payment-description">
+          <input type="text" name="safe_help_value" aria-label="Safe described field" aria-describedby="safe-help">
+          <input type="text" name="password_help_value" aria-label="Password described field" aria-describedby="password-help">
+          <input type="text" name="svg_help_value" aria-label="SVG described field" aria-describedby="svg-card-help">
         </form>`)
       return
     }
@@ -923,7 +1007,7 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
-  it('validates and retains date, month, time, and ISO week values before mutation', async () => {
+  it('publishes only finite Chromium-native date-like value sets and validates them before mutation', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -938,11 +1022,21 @@ describe('WrapperProofService security boundaries', () => {
       { field_1: '2026-02-31' },
     )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
 
-    const expectedSamples = ['2026-01-15', '2026-01', '12:00', '2026-W01']
-    for (let index = 0; index < expectedSamples.length; index += 1) {
+    const expected = [
+      ['2026-01-14', '2026-01-15', '2026-01-16', '2026-01-17', '2026-01-18'],
+      ['2026-01', '2026-03', '2026-05'],
+      ['12:00:30', '12:01:00', '12:01:30', '12:02:00'],
+      ['2026-W52', '2026-W53', '2027-W01', '2027-W02'],
+    ]
+    expect(analysis.capabilities.filter(({ name }) => name.startsWith('prepare_visible_form'))).toHaveLength(4)
+    expect(analysis.domEvidence.filter(({ label }) => ['Open date', 'Large date', 'Invalid date'].includes(label)))
+      .toHaveLength(3)
+    for (let index = 0; index < expected.length; index += 1) {
       const toolName = index === 0 ? 'prepare_visible_form' : `prepare_visible_form_${index + 1}`
       const capability = analysis.capabilities.find(({ name }) => name === toolName)!
-      expect(capability.sampleInput.field_1).toBe(expectedSamples[index])
+      const fieldSchema = (capability.inputSchema.properties as Record<string, Record<string, unknown>>).field_1
+      expect(fieldSchema.enum).toEqual(expected[index])
+      expect(capability.sampleInput.field_1).toBe(expected[index][0])
       const result = await service.execute(
         analysis.sessionId,
         analysis.sessionToken,
@@ -1026,6 +1120,50 @@ describe('WrapperProofService security boundaries', () => {
       expect(result.structuredContent.targetStateVerified).toBe(true)
       analysis = result.analysis
     }
+  })
+
+  it('uses the opposite of the native analyzed checkbox state for executable samples', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/checkbox-samples`)
+    const checked = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(checked.inputSchema).toMatchObject({
+      properties: { field_1: { type: 'boolean' }, field_2: { type: 'boolean' } },
+    })
+    expect(checked.sampleInput).toEqual({ field_1: false, field_2: false })
+    const checkedResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      checked.name,
+      checked.sampleInput,
+      undefined,
+      checked.id,
+    )
+    expect(checkedResult.structuredContent).toMatchObject({
+      isolatedStateChanged: true,
+      targetStateVerified: true,
+    })
+    analysis = checkedResult.analysis
+    expect(await internalSession(service, analysis.sessionId).page.locator('#checked-one, #checked-two').evaluateAll(
+      (controls) => controls.map((control) => (control as HTMLInputElement).checked),
+    )).toEqual([false, false])
+
+    const unchecked = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    expect(unchecked.sampleInput).toEqual({ field_1: true, field_2: true })
+    const uncheckedResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      unchecked.name,
+      unchecked.sampleInput,
+      undefined,
+      unchecked.id,
+    )
+    expect(uncheckedResult.structuredContent.targetStateVerified).toBe(true)
+    expect(await internalSession(service, analysis.sessionId).page.locator('#unchecked-one, #unchecked-two').evaluateAll(
+      (controls) => controls.map((control) => (control as HTMLInputElement).checked),
+    )).toEqual([true, true])
   })
 
   it('keeps follow-up actions usable when a marked control is hidden and replaced', async () => {
@@ -1208,6 +1346,49 @@ describe('WrapperProofService security boundaries', () => {
     expect(analysis.capabilities.map(({ name }) => name)).toEqual(['prepare_page_search', 'open_page_link'])
   })
 
+  it('bounds DOM traversal, disabled-option inspection, labels, references, and text while keeping the session usable', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/bounded-dom`)
+
+    expect(analysis.domEvidence.length).toBeLessThanOrEqual(80)
+    expect(analysis.domEvidence.map(({ label }) => label)).toContain('Bounded search')
+    expect(analysis.domEvidence.map(({ label }) => label)).not.toContain('Late unbounded search')
+    expect(analysis.capabilities.map(({ name }) => name)).not.toContain('set_page_filter')
+    expect(analysis.domEvidence.find(({ label }) => label === 'Many labels')?.sensitive).toBe(true)
+    expect(analysis.domEvidence.find(({ label }) => label === 'Many references')?.sensitive).toBe(true)
+    expect(analysis.domEvidence.find(({ label }) => label === 'Huge autocomplete')?.sensitive).toBe(true)
+    expect(analysis.domEvidence.some(({ label, sensitive }) => label.length === 140 && sensitive)).toBe(true)
+    expect(analysis.domEvidence.find(({ label }) => label === 'Huge description')?.sensitive).toBe(true)
+    for (const label of [
+      'Huge numeric min',
+      'Huge numeric max',
+      'Huge numeric step',
+      'Huge numeric value',
+      'Huge date min',
+      'Huge date max',
+      'Huge date step',
+      'Huge link path',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)?.sensitive).toBe(true)
+    }
+    expect(analysis.capabilities.map(({ name }) => name)).not.toContain('open_page_link')
+
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'bounded and usable' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
+  }, 15_000)
+
   it('excludes normalized sensitive autocomplete fields and consequential navigation paths', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -1241,7 +1422,7 @@ describe('WrapperProofService security boundaries', () => {
     expect(linkAnalysis.domEvidence.filter(({ type, sensitive }) => type === 'link' && sensitive)).toHaveLength(6)
   })
 
-  it('checks every aria-labelledby reference and associated label for sensitive evidence', async () => {
+  it('checks bounded accessible labels and descriptions, including SVG text, for sensitive evidence', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -1254,9 +1435,13 @@ describe('WrapperProofService security boundaries', () => {
       { label: 'Neutral aria label', sensitive: true },
       { label: 'Second neutral aria label', sensitive: true },
       { label: 'SVG neutral aria label', sensitive: true },
+      { label: 'Safe described field', sensitive: false },
+      { label: 'Password described field', sensitive: true },
+      { label: 'SVG described field', sensitive: true },
     ])
     const form = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
-    expect(Object.keys((form.inputSchema.properties ?? {}) as object)).toEqual(['field_1', 'field_2'])
+    expect(Object.keys((form.inputSchema.properties ?? {}) as object)).toEqual(['field_1', 'field_2', 'field_3'])
+    expect(JSON.stringify(form)).not.toMatch(/Optional context|password|Credit card number/i)
   })
 
   it('rejects a queued stale capability binding before mutation and preserves the session', async () => {
