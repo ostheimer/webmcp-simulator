@@ -262,7 +262,7 @@ function tokenizeUntrustedEvidence(value: string): string {
 export function isConsequentialNavigationUrl(value: string): boolean {
   try {
     const url = new URL(value)
-    let evidence = `${url.pathname}${url.search}`
+    let evidence = `${url.pathname}${url.search}${url.hash}`
     try {
       evidence = decodeURIComponent(evidence)
     } catch {
@@ -636,13 +636,43 @@ function classifyDomInIsolatedWorld({
       }
       return false
     }
+    const inputTypeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
+    const inputFormGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'form')?.get
+    const getAttribute = Element.prototype.getAttribute
+    const getRootNode = Node.prototype.getRootNode
+    const radioOwnerIds = new WeakMap<object, string>()
+    let radioOwnerCount = 0
+    const radioGroupCounts = new Map<string, number>()
+    const radioGroupKey = (input: HTMLInputElement): string | undefined => {
+      if (!inputTypeGetter || !inputFormGetter || inputTypeGetter.call(input) !== 'radio') return undefined
+      const name = getAttribute.call(input, 'name') ?? ''
+      if (!name || name.length > maxSafetyEvidenceLength) return undefined
+      const owner = (inputFormGetter.call(input) as HTMLFormElement | null)
+        ?? getRootNode.call(input)
+      if (!owner || typeof owner !== 'object') return undefined
+      let ownerId = radioOwnerIds.get(owner)
+      if (!ownerId) {
+        radioOwnerCount += 1
+        ownerId = `radio-owner-${radioOwnerCount}`
+        radioOwnerIds.set(owner, ownerId)
+      }
+      return `${ownerId}:${name}`
+    }
     const controls: Array<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement | HTMLAnchorElement> = []
     const walker = createTreeWalker.call(document, document.documentElement, NodeFilter.SHOW_ELEMENT)
     let inspected = 0
-    while (controls.length < maxControls && inspected < maxElementsInspected) {
+    let traversalComplete = false
+    while (inspected < maxElementsInspected) {
       const node = nextNode.call(walker)
-      if (!node) break
+      if (!node) {
+        traversalComplete = true
+        break
+      }
       inspected += 1
+      if (node instanceof HTMLInputElement) {
+        const key = radioGroupKey(node)
+        if (key) radioGroupCounts.set(key, (radioGroupCounts.get(key) ?? 0) + 1)
+      }
       if (
         !(node instanceof HTMLInputElement)
         && !(node instanceof HTMLSelectElement)
@@ -651,11 +681,14 @@ function classifyDomInIsolatedWorld({
       ) continue
       if (node instanceof HTMLAnchorElement && !node.hasAttribute('href')) continue
       if (
+        controls.length < maxControls
+        &&
         isElementScreenshotVisible(node, viewportWidth, viewportHeight)
         && !matches.call(node, ':disabled')
         && !isReadOnlyControl(node)
       ) controls.push(node)
     }
+    if (!traversalComplete) traversalComplete = !nextNode.call(walker)
 
     const forms = new Map<HTMLFormElement, string>()
     const elements = controls
@@ -740,7 +773,7 @@ function classifyDomInIsolatedWorld({
       const absoluteLink = element instanceof HTMLAnchorElement && !linkHrefOverflow ? element.href : ''
       const linkTargetOverflow = linkHrefOverflow || absoluteLink.length > maxSafetyEvidenceLength
       const rawLinkPath = element instanceof HTMLAnchorElement && !linkTargetOverflow
-        ? `${element.pathname}${element.search}`
+        ? `${element.pathname}${element.search}${element.hash}`
         : ''
       const linkPathOverflow = rawLinkPath.length > maxSafetyEvidenceLength
       const encodedLinkPath = linkPathOverflow ? '' : rawLinkPath
@@ -782,6 +815,12 @@ function classifyDomInIsolatedWorld({
         numericStepSource,
         numericValueSource,
       ].some((value) => value.length > maxSafetyEvidenceLength)
+      const numericValueGetter = numericInput
+        ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+        : undefined
+      const numericCurrent = numericInput && numericValueGetter
+        ? finiteNumber(numericValueGetter.call(element))
+        : undefined
       const explicitMinimum = numericInput && !numericAttributeOverflow
         ? finiteNumber(numericMinimumSource)
         : undefined
@@ -809,22 +848,6 @@ function classifyDomInIsolatedWorld({
       let numericValues: number[] | undefined
       let numericUnsupported = Boolean(numericAttributeOverflow)
       if (numericInput) {
-        let candidate = minimum ?? (maximum !== undefined && maximum < 1 ? maximum : 1)
-        if (numericStep && numericStepBase !== undefined) {
-          candidate = numericStepBase + Math.ceil((candidate - numericStepBase) / numericStep - tolerance) * numericStep
-          if (maximum !== undefined && candidate > maximum + tolerance) {
-            candidate = numericStepBase + Math.floor((maximum - numericStepBase) / numericStep + tolerance) * numericStep
-          }
-        }
-        if (
-          (minimum !== undefined && candidate < minimum - tolerance)
-          || (maximum !== undefined && candidate > maximum + tolerance)
-          || !onStep(candidate)
-        ) {
-          numericUnsupported = true
-        } else {
-          numericSample = Number(candidate.toPrecision(12))
-        }
         const zeroAlignedStep = numericStep && numericStepBase !== undefined
           && Math.abs(numericStepBase / numericStep - Math.round(numericStepBase / numericStep)) < tolerance
         if (numericStep && !zeroAlignedStep) {
@@ -843,6 +866,30 @@ function classifyDomInIsolatedWorld({
             }
           }
         }
+        const normalized = (value: number) => Number(value.toPrecision(12))
+        const allowed = (value: number) => Number.isFinite(value)
+          && (minimum === undefined || value >= minimum - tolerance)
+          && (maximum === undefined || value <= maximum + tolerance)
+          && onStep(value)
+        const alignUp = (value: number) => numericStep && numericStepBase !== undefined
+          ? numericStepBase + Math.ceil((value - numericStepBase) / numericStep - tolerance) * numericStep
+          : value
+        const alignDown = (value: number) => numericStep && numericStepBase !== undefined
+          ? numericStepBase + Math.floor((value - numericStepBase) / numericStep + tolerance) * numericStep
+          : value
+        const delta = numericStep ?? 1
+        const candidates = numericValues ?? [
+          alignUp(minimum ?? (maximum !== undefined && maximum < 1 ? maximum : 1)),
+          ...(numericCurrent === undefined ? [] : [numericCurrent + delta, numericCurrent - delta]),
+          ...(minimum === undefined ? [] : [alignUp(minimum)]),
+          ...(maximum === undefined ? [] : [alignDown(maximum)]),
+          alignUp(0),
+        ].map(normalized)
+        numericSample = candidates.find((candidate, candidateIndex) =>
+          candidates.indexOf(candidate) === candidateIndex
+          && allowed(candidate)
+          && (numericCurrent === undefined || Math.abs(candidate - numericCurrent) >= tolerance))
+        if (numericSample === undefined) numericUnsupported = true
       }
       const dateLikeInput = element instanceof HTMLInputElement
         && ['date', 'month', 'time', 'week'].includes(type)
@@ -972,6 +1019,7 @@ function classifyDomInIsolatedWorld({
         element.getAttribute('placeholder') ?? '',
         'name' in element ? element.name : '',
         element.id,
+        element.getAttribute('title') ?? '',
         element instanceof HTMLAnchorElement ? boundedNodeText(element) : '',
         element instanceof HTMLAnchorElement ? boundedImageAlt(element) : '',
         element instanceof HTMLAnchorElement ? element.title : '',
@@ -1007,6 +1055,16 @@ function classifyDomInIsolatedWorld({
         || hasUnsafeNavigationEvidence
         || (element instanceof HTMLAnchorElement && !sameOriginLink)
 
+      const currentRadioGroupKey = element instanceof HTMLInputElement
+        ? radioGroupKey(element)
+        : undefined
+      const radioGroupSize = currentRadioGroupKey
+        ? radioGroupCounts.get(currentRadioGroupKey)
+        : undefined
+      const radioGroupComplete = type === 'radio'
+        ? Boolean(traversalComplete && currentRadioGroupKey && radioGroupSize)
+        : undefined
+
       return {
         id,
         tag: element.tagName.toLowerCase() as 'a' | 'input' | 'select' | 'textarea',
@@ -1025,6 +1083,7 @@ function classifyDomInIsolatedWorld({
         numericStepBase,
         numericValues,
         numericSample,
+        numericCurrent,
         numericUnsupported,
         dateLikeValues,
         dateLikeSample,
@@ -1033,6 +1092,8 @@ function classifyDomInIsolatedWorld({
         textMaxLength,
         textSample,
         textUnsupported,
+        radioGroupSize,
+        radioGroupComplete,
         safetySnapshot: safetyCapture.snapshot,
         sensitive,
       }
@@ -1051,6 +1112,67 @@ async function createIsolatedWorld(cdp: CDPSession): Promise<number> {
   }) as { executionContextId?: number }
   if (!world.executionContextId) throw new Error('The isolated browser world could not be created.')
   return world.executionContextId
+}
+
+async function isCdpPaintVisible(
+  cdp: CDPSession,
+  executionContextId: number,
+  targetObjectId: string,
+  backendNodeId: number,
+  objectGroup: string,
+): Promise<boolean> {
+  let quads: number[][]
+  try {
+    const result = await cdp.send('DOM.getContentQuads', { backendNodeId }) as { quads?: number[][] }
+    quads = result.quads ?? []
+  } catch {
+    return false
+  }
+  for (const quad of quads.slice(0, 4)) {
+    if (quad.length !== 8) continue
+    const xs = [quad[0], quad[2], quad[4], quad[6]]
+    const ys = [quad[1], quad[3], quad[5], quad[7]]
+    const left = Math.max(0, Math.min(...xs))
+    const top = Math.max(0, Math.min(...ys))
+    const right = Math.min(CAPTURE_VIEWPORT_WIDTH, Math.max(...xs))
+    const bottom = Math.min(CAPTURE_VIEWPORT_HEIGHT, Math.max(...ys))
+    if (right <= left || bottom <= top) continue
+    for (const xFraction of [0.1, 0.5, 0.9]) {
+      for (const yFraction of [0.1, 0.5, 0.9]) {
+        const x = Math.max(0, Math.min(CAPTURE_VIEWPORT_WIDTH - 1, Math.floor(left + (right - left) * xFraction)))
+        const y = Math.max(0, Math.min(CAPTURE_VIEWPORT_HEIGHT - 1, Math.floor(top + (bottom - top) * yFraction)))
+        let hitBackendNodeId: number | undefined
+        try {
+          const hit = await cdp.send('DOM.getNodeForLocation', {
+            x,
+            y,
+            ignorePointerEventsNone: true,
+          }) as { backendNodeId?: number }
+          hitBackendNodeId = hit.backendNodeId
+        } catch {
+          return false
+        }
+        if (!hitBackendNodeId) continue
+        if (hitBackendNodeId === backendNodeId) return true
+        const resolvedHit = await cdp.send('DOM.resolveNode', {
+          backendNodeId: hitBackendNodeId,
+          executionContextId,
+          objectGroup,
+        }) as { object?: { objectId?: string } }
+        const hitObjectId = resolvedHit.object?.objectId
+        if (!hitObjectId) continue
+        const contained = await cdp.send('Runtime.callFunctionOn', {
+          functionDeclaration: 'function(candidate) { return candidate instanceof Node && (candidate === this || this.contains(candidate)); }',
+          objectId: targetObjectId,
+          arguments: [{ objectId: hitObjectId }],
+          objectGroup,
+          returnByValue: true,
+        }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
+        if (!contained.exceptionDetails && contained.result?.value === true) return true
+      }
+    }
+  }
+  return false
 }
 
 async function collectDomEvidence(context: BrowserContext, page: Page): Promise<DetectedControl[]> {
@@ -1087,7 +1209,7 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       throw new Error('The isolated browser classifier did not return bounded evidence.')
     }
 
-    const backendNodeIds: number[] = []
+    const detectedControls: DetectedControl[] = []
     for (let index = 0; index < descriptors.length; index += 1) {
       const remoteElement = await cdp.send('Runtime.evaluate', {
         expression: `globalThis[${JSON.stringify(storageKey)}][${index}]`,
@@ -1102,12 +1224,19 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       if (!described.node?.backendNodeId) {
         throw new Error('The isolated browser element identity is unavailable.')
       }
-      backendNodeIds.push(described.node.backendNodeId)
+      if (!await isCdpPaintVisible(
+        cdp,
+        executionContextId,
+        objectId,
+        described.node.backendNodeId,
+        objectGroup,
+      )) continue
+      detectedControls.push({
+        ...descriptors[index],
+        backendNodeId: described.node.backendNodeId,
+      })
     }
-    return descriptors.map((descriptor, index) => ({
-      ...descriptor,
-      backendNodeId: backendNodeIds[index],
-    }))
+    return detectedControls
   } finally {
     if (executionContextId) {
       await cdp.send('Runtime.evaluate', {
@@ -1164,6 +1293,49 @@ function assertIsolatedControlOperable(
     if (!(option instanceof HTMLOptionElement) || matches.call(option, ':disabled')) {
       throw new Error('The isolated select option is disabled.')
     }
+  }
+}
+
+function assertIsolatedRadioGroupBound(
+  element: Element,
+  expectedGroupSize: number,
+  maxElementsInspected: number,
+): void {
+  if (expectedGroupSize < 0) return
+  if (!(element instanceof HTMLInputElement)) throw new Error('The isolated radio group type changed.')
+  const typeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
+  const formGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'form')?.get
+  const getAttribute = Element.prototype.getAttribute
+  const getRootNode = Node.prototype.getRootNode
+  const createTreeWalker = Document.prototype.createTreeWalker
+  const nextNode = TreeWalker.prototype.nextNode
+  if (!typeGetter || !formGetter || typeGetter.call(element) !== 'radio') {
+    throw new Error('The isolated radio group type changed.')
+  }
+  const expectedName = getAttribute.call(element, 'name') ?? ''
+  if (!expectedName) throw new Error('The isolated radio group name changed.')
+  const expectedForm = formGetter.call(element) as HTMLFormElement | null
+  const expectedRoot = getRootNode.call(element)
+  const walker = createTreeWalker.call(document, document.documentElement, NodeFilter.SHOW_ELEMENT)
+  let inspected = 0
+  let members = 0
+  let traversalComplete = false
+  while (inspected < maxElementsInspected) {
+    const node = nextNode.call(walker)
+    if (!node) {
+      traversalComplete = true
+      break
+    }
+    inspected += 1
+    if (!(node instanceof HTMLInputElement) || typeGetter.call(node) !== 'radio') continue
+    const sameOwner = expectedForm
+      ? formGetter.call(node) === expectedForm
+      : !formGetter.call(node) && getRootNode.call(node) === expectedRoot
+    if (sameOwner && (getAttribute.call(node, 'name') ?? '') === expectedName) members += 1
+  }
+  if (!traversalComplete) traversalComplete = !nextNode.call(walker)
+  if (!traversalComplete || members !== expectedGroupSize) {
+    throw new Error('The isolated radio group membership changed.')
   }
 }
 
@@ -1228,10 +1400,12 @@ function readIsolatedControlState(
   viewportWidth: number,
   viewportHeight: number,
   expectedOptionIndex: number,
+  expectedRadioGroupSize: number,
   expectedSafetySnapshot: string,
   maxSafetyEvidenceLength: number,
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
+  maxElementsInspected: number,
 ): IsolatedControlState {
   if (
     !(this instanceof HTMLElement)
@@ -1248,6 +1422,7 @@ function readIsolatedControlState(
     maxSelectOptionsInspected,
   )
   assertIsolatedControlOperable(this, expectedOptionIndex)
+  assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType)
   if (expectedType === 'select-one') {
     if (!(this instanceof HTMLSelectElement)) throw new Error('The isolated control type changed.')
@@ -1270,10 +1445,12 @@ function writeIsolatedControlState(
   viewportWidth: number,
   viewportHeight: number,
   expectedOptionIndex: number,
+  expectedRadioGroupSize: number,
   expectedSafetySnapshot: string,
   maxSafetyEvidenceLength: number,
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
+  maxElementsInspected: number,
 ): void {
   if (!(this instanceof HTMLElement) || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)) {
     throw new Error('The isolated control is no longer available.')
@@ -1298,6 +1475,7 @@ function writeIsolatedControlState(
     maxSelectOptionsInspected,
   )
   assertIsolatedControlOperable(this, expectedOptionIndex)
+  assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType, value)
   assertIsolatedTextValueAllowed(this, expectedType, value)
   if (expectedType === 'select-one') {
@@ -1366,8 +1544,11 @@ async function callOnIsolatedNode<T>(
     }) as { object?: { objectId?: string } }
     const objectId = resolved.object?.objectId
     if (!objectId) throw new Error('The isolated browser element identity expired.')
+    if (!await isCdpPaintVisible(cdp, executionContextId, objectId, backendNodeId, objectGroup)) {
+      throw new Error('The isolated browser control is not visibly painted.')
+    }
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
       arguments: args.map((value) => ({ value })),
       objectGroup,
@@ -1390,6 +1571,7 @@ function readControlState(
   requireVisible: boolean,
   expectedSafetySnapshot: string,
   expectedOptionIndex = -1,
+  expectedRadioGroupSize = -1,
 ): Promise<IsolatedControlState> {
   return callOnIsolatedNode<IsolatedControlState>(
     context,
@@ -1402,10 +1584,12 @@ function readControlState(
       CAPTURE_VIEWPORT_WIDTH,
       CAPTURE_VIEWPORT_HEIGHT,
       expectedOptionIndex,
+      expectedRadioGroupSize,
       expectedSafetySnapshot,
       MAX_SAFETY_EVIDENCE_LENGTH,
       MAX_TOTAL_SAFETY_EVIDENCE_LENGTH,
       WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
+      WRAPPER_MAX_DOM_ELEMENTS_INSPECTED,
     ],
   )
 }
@@ -1418,6 +1602,7 @@ function writeControlState(
   value: IsolatedControlState,
   expectedSafetySnapshot: string,
   expectedOptionIndex = -1,
+  expectedRadioGroupSize = -1,
 ): Promise<void> {
   return callOnIsolatedNode<void>(
     context,
@@ -1430,10 +1615,12 @@ function writeControlState(
       CAPTURE_VIEWPORT_WIDTH,
       CAPTURE_VIEWPORT_HEIGHT,
       expectedOptionIndex,
+      expectedRadioGroupSize,
       expectedSafetySnapshot,
       MAX_SAFETY_EVIDENCE_LENGTH,
       MAX_TOTAL_SAFETY_EVIDENCE_LENGTH,
       WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
+      WRAPPER_MAX_DOM_ELEMENTS_INSPECTED,
     ],
   )
 }
@@ -1533,6 +1720,10 @@ function validateActionInput(
     const linkCount = capability.action.urls?.length ?? 0
     if (!Number.isInteger(linkIndex) || Number(linkIndex) < 0 || Number(linkIndex) >= linkCount) {
       throw preActionError('invalid_action', 'linkIndex must reference a visible same-origin link.', 400)
+    }
+    const url = capability.action.urls?.[Number(linkIndex)]
+    if (!url || isConsequentialNavigationUrl(url)) {
+      throw preActionError('invalid_action', 'linkIndex must not reference a consequential route.', 400)
     }
     return
   }
@@ -1701,6 +1892,9 @@ async function applyAction(
     await readLinkTarget(context, page, backendNodeId, url, safetySnapshot)
     const before = page.url()
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAVIGATION_TIMEOUT_MS })
+    if (isConsequentialNavigationUrl(page.url())) {
+      throw actionVerificationError('The isolated page reached a consequential navigation route.')
+    }
     return {
       navigationOccurred: true,
       stateChanged: async () => page.url() !== before,
@@ -1765,7 +1959,16 @@ async function applyAction(
       if (!selectedBackendNodeId) throw new Error(`${field.key} no longer references a visible radio choice.`)
       const safetySnapshots = field.safetySnapshots ?? []
       const before = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
-        readControlState(context, page, backendNodeId, 'radio', true, safetySnapshots[index])))
+        readControlState(
+          context,
+          page,
+          backendNodeId,
+          'radio',
+          true,
+          safetySnapshots[index],
+          -1,
+          field.radioGroupSize ?? -1,
+        )))
       await writeControlState(
         context,
         page,
@@ -1773,15 +1976,35 @@ async function applyAction(
         'radio',
         true,
         safetySnapshots[selectedIndex],
+        -1,
+        field.radioGroupSize ?? -1,
       )
       changeChecks.push(async () => {
         const after = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
-          readControlState(context, page, backendNodeId, 'radio', true, safetySnapshots[index])))
+          readControlState(
+            context,
+            page,
+            backendNodeId,
+            'radio',
+            true,
+            safetySnapshots[index],
+            -1,
+            field.radioGroupSize ?? -1,
+          )))
         return after.some((checked, index) => checked !== before[index])
       })
       verifications.push(async () => {
         const after = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
-          readControlState(context, page, backendNodeId, 'radio', true, safetySnapshots[index])))
+          readControlState(
+            context,
+            page,
+            backendNodeId,
+            'radio',
+            true,
+            safetySnapshots[index],
+            -1,
+            field.radioGroupSize ?? -1,
+          )))
         if (!after[selectedIndex] || after.filter(Boolean).length !== 1) {
           throw actionVerificationError(`${field.key} did not retain one exclusive radio choice.`)
         }
@@ -1794,6 +2017,8 @@ async function applyAction(
         field.type,
         true,
         field.safetySnapshot,
+        -1,
+        field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
       )
       await writeControlState(
         context,
@@ -1802,6 +2027,8 @@ async function applyAction(
         field.type,
         Boolean(value),
         field.safetySnapshot,
+        -1,
+        field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
       )
       changeChecks.push(async () =>
         await readControlState(
@@ -1811,6 +2038,8 @@ async function applyAction(
           field.type,
           true,
           field.safetySnapshot,
+          -1,
+          field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
         ) !== before)
       verifications.push(async () => {
         if (await readControlState(
@@ -1820,6 +2049,8 @@ async function applyAction(
           field.type,
           true,
           field.safetySnapshot,
+          -1,
+          field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
         ) !== value) {
           throw actionVerificationError(`${field.key} did not retain its checked state.`)
         }
@@ -1938,15 +2169,22 @@ async function actionWouldChange(
         optionIndex,
       ) !== optionIndex) return true
     } else if (field.type === 'radio-group') {
-      const selectedBackendNodeId = field.backendNodeIds?.[Number(value)]
-      if (!selectedBackendNodeId || !await readControlState(
-        context,
-        page,
-        selectedBackendNodeId,
-        'radio',
-        true,
-        field.safetySnapshots?.[Number(value)] as string,
-      )) return true
+      const backendNodeIds = field.backendNodeIds ?? []
+      const safetySnapshots = field.safetySnapshots ?? []
+      const selectedIndex = Number(value)
+      if (!backendNodeIds[selectedIndex]) return true
+      const states = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
+        readControlState(
+          context,
+          page,
+          backendNodeId,
+          'radio',
+          true,
+          safetySnapshots[index],
+          -1,
+          field.radioGroupSize ?? -1,
+        )))
+      if (!states[selectedIndex] || states.filter(Boolean).length !== 1) return true
     } else if (field.type === 'checkbox' || field.type === 'radio') {
       if (await readControlState(
         context,
@@ -1955,6 +2193,8 @@ async function actionWouldChange(
         field.type,
         true,
         field.safetySnapshot,
+        -1,
+        field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
       ) !== value) return true
     } else if (await readControlState(
       context,
@@ -2189,6 +2429,7 @@ export class WrapperProofService {
         numericStepBase: _numericStepBase,
         numericValues: _numericValues,
         numericSample: _numericSample,
+        numericCurrent: _numericCurrent,
         numericUnsupported: _numericUnsupported,
         dateLikeValues: _dateLikeValues,
         dateLikeSample: _dateLikeSample,
@@ -2197,6 +2438,8 @@ export class WrapperProofService {
         textMaxLength: _textMaxLength,
         textSample: _textSample,
         textUnsupported: _textUnsupported,
+        radioGroupSize: _radioGroupSize,
+        radioGroupComplete: _radioGroupComplete,
         safetySnapshot: _safetySnapshot,
         ...evidence
       }) => evidence),
@@ -2592,6 +2835,9 @@ export class WrapperProofService {
       throwIfAborted(signal)
       if (!isSameOriginHttpUrl(session.page.url(), session.targetOrigin)) {
         throw new Error('The action attempted to leave the validated origin.')
+      }
+      if (evidence.navigationOccurred && isConsequentialNavigationUrl(session.page.url())) {
+        throw actionVerificationError('The isolated page reached a consequential navigation route.')
       }
       await raceWithSessionPolicy(session, evidence.verify(), signal)
       throwIfAborted(signal)

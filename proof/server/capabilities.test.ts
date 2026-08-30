@@ -121,8 +121,8 @@ describe('inferSafeCapabilities', () => {
 
   it('models one radio group as one exclusive indexed field', () => {
     const capabilities = inferSafeCapabilities([
-      control({ id: 'radio-1', backendNodeId: 11, fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option A' }),
-      control({ id: 'radio-2', backendNodeId: 12, fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option B' }),
+      control({ id: 'radio-1', backendNodeId: 11, fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option A', radioGroupSize: 2, radioGroupComplete: true }),
+      control({ id: 'radio-2', backendNodeId: 12, fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option B', radioGroupSize: 2, radioGroupComplete: true }),
       control({ id: 'notes', fieldKey: 'details', formId: 'form-1', type: 'text', label: 'Details' }),
     ])
 
@@ -148,6 +148,8 @@ describe('inferSafeCapabilities', () => {
         formId: 'form-1',
         type: 'radio',
         checked: true,
+        radioGroupSize: 2,
+        radioGroupComplete: true,
       }),
       control({
         id: 'radio-2',
@@ -156,11 +158,23 @@ describe('inferSafeCapabilities', () => {
         formId: 'form-1',
         type: 'radio',
         checked: false,
+        radioGroupSize: 2,
+        radioGroupComplete: true,
       }),
       control({ id: 'notes', fieldKey: 'details', formId: 'form-1', type: 'text' }),
     ])
 
     expect(capabilities[0].sampleInput).toEqual({ field_1: 1, field_2: 'Sample' })
+  })
+
+  it('excludes a radio group when not every native member is safely retained', () => {
+    const capabilities = inferSafeCapabilities([
+      control({ id: 'radio-1', fieldKey: 'mode', formId: 'form-1', type: 'radio', radioGroupSize: 3, radioGroupComplete: true }),
+      control({ id: 'radio-2', fieldKey: 'mode', formId: 'form-1', type: 'radio', radioGroupSize: 3, radioGroupComplete: true }),
+      control({ id: 'notes', fieldKey: 'details', formId: 'form-1', type: 'text' }),
+    ])
+
+    expect(capabilities).toEqual([])
   })
 
   it('publishes conservative code-point bounds for native UTF-16 text limits', () => {

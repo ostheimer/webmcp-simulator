@@ -553,4 +553,50 @@ describe('SandboxWrapperService network policy', () => {
     ]))
     expect(SANDBOX_DENIED_CIDRS).not.toContain('2606:4700:4700::1111')
   })
+
+  it.each([
+    {
+      label: 'IPv4',
+      target: {
+        url: 'https://93.184.216.34/',
+        origin: 'https://93.184.216.34',
+        hostname: '93.184.216.34',
+        pinnedAddress: '93.184.216.34',
+        addresses: [{ address: '93.184.216.34', family: 4 }],
+      } satisfies PublicTarget,
+    },
+    {
+      label: 'IPv6',
+      target: {
+        url: 'https://[2606:4700:4700::1111]/',
+        origin: 'https://[2606:4700:4700::1111]',
+        hostname: '2606:4700:4700::1111',
+        pinnedAddress: '2606:4700:4700::1111',
+        addresses: [{ address: '2606:4700:4700::1111', family: 6 }],
+      } satisfies PublicTarget,
+    },
+  ])('rejects a public $label literal before creating a production Sandbox', async ({ target }) => {
+    let createCalls = 0
+    const factory: SandboxFactory = {
+      async create() {
+        createCalls += 1
+        throw new Error('must not create')
+      },
+      async get() {
+        throw new Error('must not reconnect')
+      },
+    }
+    const service = new SandboxWrapperService({
+      factory,
+      snapshotId: 'snap_reviewed',
+      resolveTarget: async () => target,
+      loadWorkerAssets: async () => ({ worker: Buffer.from('worker'), client: Buffer.from('client') }),
+    })
+
+    await expect(service.analyze(target.url)).rejects.toMatchObject({
+      code: 'invalid_target',
+      status: 400,
+    })
+    expect(createCalls).toBe(0)
+  })
 })

@@ -5,7 +5,11 @@ import type { Page } from 'playwright'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { PublicTarget } from './publicTarget.ts'
 import { WRAPPER_SESSION_TTL_MS } from './wrapperLimits.ts'
-import { isSameOriginHttpUrl, WrapperProofService } from './wrapperService.ts'
+import {
+  isConsequentialNavigationUrl,
+  isSameOriginHttpUrl,
+  WrapperProofService,
+} from './wrapperService.ts'
 
 interface Fixture {
   server: Server
@@ -125,6 +129,37 @@ async function startFixture(): Promise<Fixture> {
           <input type="search" aria-label="Filtering search" style="width:160px;height:32px"
             oninput="this.parentElement.style.filter='opacity(0)'">
         </div>`)
+      return
+    }
+    if (requestUrl === '/paint-occlusion') {
+      response.end(`<!doctype html><title>Paint occlusion fixture</title>
+        <input id="occluded-search" type="search" aria-label="Occluded search"
+          style="position:absolute;left:20px;top:30px;width:180px;height:36px">
+        <div id="opaque-overlay" style="position:absolute;left:20px;top:30px;width:180px;height:36px;background:#111;z-index:10;pointer-events:none"></div>
+        <input id="painted-search" type="search" aria-label="Painted search"
+          style="position:absolute;left:20px;top:100px;width:180px;height:36px">`)
+      return
+    }
+    if (requestUrl === '/paint-occlusion-action') {
+      response.end(`<!doctype html><title>Paint occlusion action fixture</title>
+        <input id="action-search" type="search" aria-label="Action search"
+          style="position:absolute;left:20px;top:30px;width:180px;height:36px">`)
+      return
+    }
+    if (requestUrl === '/fragment-links') {
+      response.end(`<!doctype html><title>Fragment links fixture</title>
+        <a href="/about#/checkout">Unsafe fragment route</a>
+        <a href="/about#overview">Neutral fragment route</a>
+        <a href="/late-fragment">Late fragment route</a>`)
+      return
+    }
+    if (requestUrl === '/about') {
+      response.end('<!doctype html><title>About fragment destination</title><input type="search" aria-label="About search">')
+      return
+    }
+    if (requestUrl === '/late-fragment') {
+      response.end(`<!doctype html><title>Late fragment destination</title>
+        <script>setTimeout(() => { location.hash = '/booking' }, 30)</script>`)
       return
     }
     if (requestUrl === '/redirect-source') {
@@ -473,7 +508,31 @@ async function startFixture(): Promise<Fixture> {
         <form><input type="range" min="10" max="20" step="2" aria-label="Bounded range"><input type="text" aria-label="Range details"></form>
         <form><input type="number" max="0.7" step="0.2" aria-label="Bounded decimal"><input type="text" aria-label="Decimal details"></form>
         <form><input type="range" min="10" max="20" step="0" aria-label="Zero step"><input type="text" aria-label="Zero step details"></form>
-        <form><input type="range" min="10" max="20" step="-2" aria-label="Negative step"><input type="text" aria-label="Negative step details"></form>`)
+        <form><input type="range" min="10" max="20" step="-2" aria-label="Negative step"><input type="text" aria-label="Negative step details"></form>
+        <form><input type="number" min="0" max="3" step="1" value="1" aria-label="Current one"><input type="text" aria-label="Current one details"></form>
+        <form><input type="range" min="10" max="20" step="2" value="10" aria-label="Current stepped minimum"><input type="text" aria-label="Current stepped details"></form>
+        <form><input type="number" min="5" max="5" step="1" value="5" aria-label="Single numeric state"><input type="text" aria-label="Single state details"></form>`)
+      return
+    }
+    if (requestUrl === '/radio-native-groups') {
+      response.end(`<!doctype html><title>Native radio groups</title>
+        <form id="safe-radio-form">
+          <input id="safe-radio-a" type="radio" name="safe_mode" value="a" checked><label for="safe-radio-a">Safe A</label>
+          <input id="safe-radio-b" type="radio" name="safe_mode" value="b"><label for="safe-radio-b">Safe B</label>
+          <input type="text" aria-label="Safe radio detail">
+        </form>
+        <form id="hidden-radio-form">
+          <input type="radio" name="hidden_mode" value="a" checked aria-label="Hidden group A">
+          <input type="radio" name="hidden_mode" value="b" aria-label="Hidden group B">
+          <input id="hidden-radio-member" type="radio" name="hidden_mode" value="hidden" aria-label="Hidden group member" hidden>
+          <input type="text" aria-label="Hidden radio detail">
+        </form>
+        <form id="sensitive-radio-form">
+          <input type="radio" name="sensitive_mode" value="a" checked aria-label="Sensitive group A">
+          <input type="radio" name="sensitive_mode" value="b" aria-label="Sensitive group B">
+          <input type="radio" name="sensitive_mode" value="secret" title="Credit card number">
+          <input type="text" aria-label="Sensitive radio detail">
+        </form>`)
       return
     }
     if (requestUrl === '/checkbox-samples') {
@@ -578,6 +637,7 @@ async function startFixture(): Promise<Fixture> {
           <input type="text" id="creditCard" aria-label="Neutral field K">
           <input type="text" id="userCredential" aria-label="Neutral field L">
           <input type="text" id="apiToken" aria-label="Neutral field M">
+          <input type="text" name="reference_title" aria-label="Neutral field N" title="Credit card number">
         </form>`)
       return
     }
@@ -788,6 +848,14 @@ describe('isSameOriginHttpUrl', () => {
     expect(isSameOriginHttpUrl('https://public.example.at:443/path', 'https://public.example.at')).toBe(true)
     expect(isSameOriginHttpUrl('http://public.example.at/path', 'https://public.example.at')).toBe(false)
     expect(isSameOriginHttpUrl('https://public.example.at:8443/path', 'https://public.example.at')).toBe(false)
+  })
+})
+
+describe('isConsequentialNavigationUrl', () => {
+  it('checks decoded fragment routes without rejecting neutral fragments', () => {
+    expect(isConsequentialNavigationUrl('https://public.example.at/about#/checkout')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://public.example.at/about#/%62ooking')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://public.example.at/about#overview')).toBe(false)
   })
 })
 
@@ -1220,6 +1288,90 @@ describe('WrapperProofService security boundaries', () => {
       analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Single choice'))).toBe(false)
   })
 
+  it('offers radio groups only when every native same-owner member is safely bound and revalidated', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/radio-native-groups`)
+    const forms = analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')
+    expect(forms).toHaveLength(1)
+    const form = forms[0]
+    expect(form.sampleInput).toMatchObject({ field_1: 1 })
+    const advertisedLabels = form.evidenceIds.map((id) =>
+      analysis.domEvidence.find((evidence) => evidence.id === id)?.label)
+    expect(advertisedLabels).toEqual(['Safe A', 'Safe B', 'Safe radio detail'])
+    expect(analysis.domEvidence.find(({ label }) => label === 'sensitive_mode')).toMatchObject({ sensitive: true })
+
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#safe-radio-form').evaluate((owner) => {
+      const hidden = document.createElement('input')
+      hidden.id = 'late-hidden-radio'
+      hidden.type = 'radio'
+      hidden.name = 'safe_mode'
+      hidden.hidden = true
+      owner.append(hidden)
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#safe-radio-a, #safe-radio-b').evaluateAll(
+      (radios) => radios.map((radio) => (radio as HTMLInputElement).checked),
+    )).toEqual([true, false])
+
+    await page.locator('#late-hidden-radio').evaluate((radio) => radio.remove())
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await page.locator('#safe-radio-a, #safe-radio-b').evaluateAll(
+      (radios) => radios.map((radio) => (radio as HTMLInputElement).checked),
+    )).toEqual([false, true])
+
+    const raceService = createService({ actionStartDelayMs: 150 })
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/radio-native-groups`)
+    const raceForm = raceAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const racePage = internalSession(raceService, raceAnalysis.sessionId).page
+    let radioMutations = 0
+    await racePage.exposeFunction('recordRadioMutation', () => { radioMutations += 1 })
+    await racePage.locator('#safe-radio-a, #safe-radio-b').evaluateAll((radios) => {
+      for (const radio of radios) {
+        radio.addEventListener('change', () => {
+          void (window as unknown as { recordRadioMutation: () => Promise<void> }).recordRadioMutation()
+        })
+      }
+    })
+    const pending = raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceForm.name,
+      raceForm.sampleInput,
+      undefined,
+      raceForm.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await racePage.locator('#safe-radio-form').evaluate((owner) => {
+      const hidden = document.createElement('input')
+      hidden.type = 'radio'
+      hidden.name = 'safe_mode'
+      hidden.hidden = true
+      owner.append(hidden)
+    })
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(radioMutations).toBe(0)
+    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
   it('revalidates page-authored safety evidence before read, write, and verification', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -1236,6 +1388,7 @@ describe('WrapperProofService security boundaries', () => {
       { attribute: 'autocomplete', value: 'current-password', original: null },
       { attribute: 'name', value: 'userPassword', original: 'search_term' },
       { attribute: 'id', value: 'creditCard', original: null },
+      { attribute: 'title', value: 'Credit card number', original: null },
       { attribute: 'pattern', value: '[0-9]+', original: null },
     ]
     for (const mutation of searchMutations) {
@@ -1551,6 +1704,31 @@ describe('WrapperProofService security boundaries', () => {
       expect(result.structuredContent.targetStateVerified).toBe(true)
       analysis = result.analysis
     }
+
+    const currentOne = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_5')!
+    expect(currentOne.sampleInput.field_1).toBe(0)
+    const currentOneResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      currentOne.name,
+      currentOne.sampleInput,
+    )
+    expect(currentOneResult.structuredContent).toMatchObject({ isolatedStateChanged: true, targetStateVerified: true })
+    analysis = currentOneResult.analysis
+
+    const currentStepped = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_6')!
+    expect(currentStepped.sampleInput.field_1).toBe(12)
+    const currentSteppedResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      currentStepped.name,
+      currentStepped.sampleInput,
+    )
+    expect(currentSteppedResult.structuredContent).toMatchObject({ isolatedStateChanged: true, targetStateVerified: true })
+    analysis = currentSteppedResult.analysis
+
+    const singletonEvidence = analysis.domEvidence.find(({ label }) => label === 'Single numeric state')!
+    expect(analysis.capabilities.some(({ evidenceIds }) => evidenceIds.includes(singletonEvidence.id))).toBe(false)
   })
 
   it('uses the opposite of the native analyzed checkbox state for executable samples', async () => {
@@ -1766,6 +1944,48 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
+  it('uses CDP paint hit-testing to exclude and revalidate opaque pointer-events-none overlays', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+
+    const discoveryService = createService()
+    services.push(discoveryService)
+    const discovery = await discoveryService.analyze(`${fixture.origin}/paint-occlusion`)
+    expect(discovery.domEvidence.map(({ label }) => label)).toEqual(['Painted search'])
+    expect(discovery.capabilities.map(({ name }) => name)).toEqual(['prepare_page_search'])
+
+    const actionService = createService()
+    services.push(actionService)
+    const analysis = await actionService.analyze(`${fixture.origin}/paint-occlusion-action`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const page = internalSession(actionService, analysis.sessionId).page
+    await page.locator('body').evaluate(() => {
+      const overlay = document.createElement('div')
+      overlay.id = 'late-opaque-overlay'
+      overlay.setAttribute('style', 'position:absolute;left:20px;top:30px;width:180px;height:36px;background:#111;z-index:10;pointer-events:none')
+      document.body.append(overlay)
+    })
+    await expect(actionService.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'must remain hidden' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#action-search').inputValue()).toBe('')
+
+    await page.locator('#late-opaque-overlay').evaluate((overlay) => overlay.remove())
+    await expect(actionService.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'painted again' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
   it('excludes transparent and zero-geometry controls from visible evidence and capabilities', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -1843,6 +2063,7 @@ describe('WrapperProofService security boundaries', () => {
       'Neutral field K',
       'Neutral field L',
       'Neutral field M',
+      'Neutral field N',
     ])
 
     const linkAnalysis = await service.analyze(`${fixture.origin}/unsafe-links`)
@@ -2132,6 +2353,45 @@ describe('WrapperProofService security boundaries', () => {
     })
     expect(fixture.requests).toContain('/about-safe')
     expect(fixture.requests).toContain('/next')
+  })
+
+  it('excludes consequential hash routes, allows neutral fragments, and rejects a late hash-router transition', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+
+    const safeService = createService()
+    services.push(safeService)
+    const safeAnalysis = await safeService.analyze(`${fixture.origin}/fragment-links`)
+    expect(safeAnalysis.domEvidence.find(({ label }) => label === 'Unsafe fragment route'))
+      .toMatchObject({ sensitive: true })
+    const safeNavigation = safeAnalysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    expect(safeNavigation.inputSchema).toMatchObject({ properties: { linkIndex: { maximum: 1 } } })
+    await expect(safeService.execute(
+      safeAnalysis.sessionId,
+      safeAnalysis.sessionToken,
+      safeNavigation.name,
+      { linkIndex: 0 },
+      undefined,
+      safeNavigation.id,
+    )).resolves.toMatchObject({
+      finalUrl: `${fixture.origin}/about#overview`,
+      structuredContent: { targetStateVerified: true, navigationOccurred: true },
+    })
+
+    const lateService = createService()
+    services.push(lateService)
+    const lateAnalysis = await lateService.analyze(`${fixture.origin}/fragment-links`)
+    const lateNavigation = lateAnalysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      lateNavigation.name,
+      { linkIndex: 1 },
+      undefined,
+      lateNavigation.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(fixture.requests).toContain('/late-fragment')
+    expect(internalServiceState(lateService)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('blocks consequential subframes without invalidating a safe main-frame navigation', async () => {

@@ -28,6 +28,7 @@ export interface DetectedControl extends WrapperDomEvidence {
   numericStepBase?: number
   numericValues?: number[]
   numericSample?: number
+  numericCurrent?: number
   numericUnsupported?: boolean
   dateLikeValues?: string[]
   dateLikeSample?: string
@@ -36,6 +37,8 @@ export interface DetectedControl extends WrapperDomEvidence {
   textMaxLength?: number
   textSample?: string
   textUnsupported?: boolean
+  radioGroupSize?: number
+  radioGroupComplete?: boolean
   safetySnapshot: string
 }
 
@@ -59,6 +62,7 @@ export interface ActionField {
   textMaxLength?: number
   textSample?: string
   radioSampleIndex?: number
+  radioGroupSize?: number
   safetySnapshot: string
   safetySnapshots?: string[]
 }
@@ -313,6 +317,10 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       if (radioGroup) {
         if (claimedRadioGroups.has(radioGroupKey as string)) continue
         claimedRadioGroups.add(radioGroupKey as string)
+        if (
+          !radioGroup.every(({ radioGroupComplete }) => radioGroupComplete)
+          || radioGroup.some(({ radioGroupSize }) => radioGroupSize !== radioGroup.length)
+        ) continue
         const checkedIndex = radioGroup.findIndex(({ checked }) => checked)
         const radioSampleIndex = radioGroup.findIndex((_choice, choiceIndex) => choiceIndex !== checkedIndex)
         if (radioSampleIndex < 0) continue
@@ -354,6 +362,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         textMaxLength: control.textMaxLength,
         textSample: control.textSample,
         radioSampleIndex,
+        radioGroupSize: radioGroup?.length,
         safetySnapshot: control.safetySnapshot,
         safetySnapshots: radioGroup?.map(({ safetySnapshot }) => safetySnapshot),
       })

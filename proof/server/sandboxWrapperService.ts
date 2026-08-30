@@ -144,12 +144,11 @@ async function defaultLoadWorkerAssets(): Promise<{ worker: Buffer, client: Buff
 export function buildSandboxNetworkPolicy(target: PublicTarget): NetworkPolicy {
   const match = [{ match: { method: ['GET', 'HEAD'] }, transform: [] }]
   if (isIP(target.hostname)) {
-    return {
-      subnets: {
-        allow: [target.pinnedAddress.includes(':') ? `${target.pinnedAddress}/128` : `${target.pinnedAddress}/32`],
-        deny: [...SANDBOX_DENIED_CIDRS],
-      },
-    }
+    throw new WrapperServiceError(
+      'invalid_target',
+      'IP-literal website targets are not supported by the production browser worker.',
+      400,
+    )
   }
   return {
     allow: { [target.hostname]: match },
