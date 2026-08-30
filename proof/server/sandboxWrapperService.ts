@@ -95,6 +95,8 @@ export interface SandboxWrapperServiceOptions {
   image?: string
   loadWorkerAssets?: () => Promise<{ worker: Buffer, client: Buffer }>
   now?: () => number
+  /** Test-only override; production uses the absolute configured analysis deadline. */
+  analysisTimeoutMs?: number
 }
 
 interface WorkerResponse {
@@ -200,6 +202,35 @@ function sandboxCapacityError(sessionInvalidated?: boolean): WrapperServiceError
   )
 }
 
+function sandboxAnalysisTimeoutError(): WrapperServiceError {
+  return new WrapperServiceError(
+    'analysis_timeout',
+    'The isolated website analysis exceeded its fixed time limit.',
+    504,
+  )
+}
+
+function sandboxAnalysisAbortError(): DOMException {
+  return new DOMException('The isolated analysis was cancelled.', 'AbortError')
+}
+
+async function raceSandboxOperation<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    void promise.catch(() => undefined)
+    throw sandboxAnalysisAbortError()
+  }
+  let rejectAbort!: (reason: DOMException) => void
+  const aborted = new Promise<never>((_resolve, reject) => { rejectAbort = reject })
+  const onAbort = () => rejectAbort(sandboxAnalysisAbortError())
+  signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    return await Promise.race([promise, aborted])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+    void promise.catch(() => undefined)
+  }
+}
+
 function isNonMutatingActionRejection(error: unknown): boolean {
   return error instanceof WrapperServiceError
     && error.sessionInvalidated === false
@@ -252,6 +283,7 @@ export class SandboxWrapperService {
   private readonly image?: string
   private readonly loadWorkerAssets: () => Promise<{ worker: Buffer, client: Buffer }>
   private readonly now: () => number
+  private readonly analysisTimeoutMs: number
 
   constructor(options: SandboxWrapperServiceOptions = {}) {
     this.factory = options.factory ?? defaultFactory()
@@ -264,6 +296,7 @@ export class SandboxWrapperService {
     )
     this.loadWorkerAssets = options.loadWorkerAssets ?? defaultLoadWorkerAssets
     this.now = options.now ?? Date.now
+    this.analysisTimeoutMs = options.analysisTimeoutMs ?? WRAPPER_ANALYSIS_TIMEOUT_MS
   }
 
   private async callWorker<T>(
@@ -318,29 +351,59 @@ export class SandboxWrapperService {
   }
 
   async analyze(value: string, signal?: AbortSignal): Promise<WrapperAnalysis> {
-    if (!this.snapshotId && !this.image) throw sandboxConfigurationError()
-    const target = await this.resolveTarget(value)
-    const sessionId = createSandboxLocator()
-    const sessionToken = createSessionCapability()
     const startedAtMs = this.now()
-    const expiresAtMs = startedAtMs + WRAPPER_SESSION_TTL_MS
-    const assets = await this.loadWorkerAssets()
+    let deadlineExpired = false
+    const operationController = new AbortController()
+    const onExternalAbort = () => operationController.abort()
+    signal?.addEventListener('abort', onExternalAbort, { once: true })
+    if (signal?.aborted) operationController.abort()
+    const deadlineTimer = setTimeout(() => {
+      deadlineExpired = true
+      operationController.abort()
+    }, this.analysisTimeoutMs)
+    deadlineTimer.unref?.()
     let sandbox: SandboxHandle | undefined
+    const deleted = new WeakSet<object>()
+    const deleteSandboxOnce = async (handle: SandboxHandle | undefined): Promise<void> => {
+      if (!handle || deleted.has(handle)) return
+      deleted.add(handle)
+      await handle.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
+    }
     try {
+      if (!this.snapshotId && !this.image) throw sandboxConfigurationError()
+      const target = await raceSandboxOperation(
+        this.resolveTarget(value),
+        operationController.signal,
+      )
+      const sessionId = createSandboxLocator()
+      const sessionToken = createSessionCapability()
+      const expiresAtMs = startedAtMs + WRAPPER_SESSION_TTL_MS
+      const assets = await raceSandboxOperation(
+        this.loadWorkerAssets(),
+        operationController.signal,
+      )
       const source = this.snapshotId
         ? { type: 'snapshot', snapshotId: this.snapshotId }
         : undefined
-      sandbox = await this.factory.create({
+      const createPromise = this.factory.create({
         name: sessionId,
         ...(source ? { source } : { image: this.image }),
         persistent: false,
         timeout: WRAPPER_SESSION_TTL_MS,
         resources: { vcpus: WRAPPER_VCPUS },
         networkPolicy: buildSandboxNetworkPolicy(target),
-        signal,
+        signal: operationController.signal,
         tags: { purpose: 'webmcp-wrapper', session: randomUUID().slice(0, 8) },
       })
-      await sandbox.writeFiles([
+      try {
+        sandbox = await raceSandboxOperation(createPromise, operationController.signal)
+      } catch (error) {
+        if (operationController.signal.aborted) {
+          void createPromise.then(deleteSandboxOnce).catch(() => undefined)
+        }
+        throw error
+      }
+      await raceSandboxOperation(sandbox.writeFiles([
         { path: WORKER_PATH, content: assets.worker, mode: 0o700 },
         { path: CLIENT_PATH, content: assets.client, mode: 0o700 },
         {
@@ -353,34 +416,55 @@ export class SandboxWrapperService {
           }),
           mode: 0o600,
         },
-      ], { signal })
-      await sandbox.runCommand({
+      ], { signal: operationController.signal }), operationController.signal)
+      await raceSandboxOperation(sandbox.runCommand({
         cmd: 'node',
         args: [WORKER_PATH, CONFIG_PATH],
         detached: true,
-        signal,
+        signal: operationController.signal,
         timeoutMs: WRAPPER_SESSION_TTL_MS - 5_000,
-      })
+      }), operationController.signal)
 
       let ready = false
       for (let attempt = 0; attempt < 20; attempt += 1) {
         try {
-          await this.callWorker(sandbox, sessionToken, 'health', {}, signal)
+          await raceSandboxOperation(
+            this.callWorker(sandbox, sessionToken, 'health', {}, operationController.signal),
+            operationController.signal,
+          )
           ready = true
           break
         } catch {
-          await new Promise((resolve) => setTimeout(resolve, 100))
+          if (operationController.signal.aborted) throw sandboxAnalysisAbortError()
+          await raceSandboxOperation(
+            new Promise((resolve) => setTimeout(resolve, 100)),
+            operationController.signal,
+          )
         }
       }
       if (!ready) throw new Error('The isolated Chromium worker did not become ready.')
-      const analysis = await this.callWorker<WrapperAnalysis>(sandbox, sessionToken, 'analyze', {}, signal)
-      if (signal?.aborted) throw new DOMException('The isolated analysis was cancelled.', 'AbortError')
+      const analysis = await raceSandboxOperation(
+        this.callWorker<WrapperAnalysis>(
+          sandbox,
+          sessionToken,
+          'analyze',
+          {},
+          operationController.signal,
+        ),
+        operationController.signal,
+      )
+      if (operationController.signal.aborted) throw sandboxAnalysisAbortError()
       return decorateAnalysis(analysis, sandbox, sessionId, sessionToken, expiresAtMs, startedAtMs, this.now)
     } catch (error) {
-      await sandbox?.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
-      if (signal?.aborted) throw new DOMException('The isolated analysis was cancelled.', 'AbortError')
+      const timedOut = deadlineExpired
+      await deleteSandboxOnce(sandbox)
+      if (timedOut) throw sandboxAnalysisTimeoutError()
+      if (signal?.aborted || operationController.signal.aborted) throw sandboxAnalysisAbortError()
       if (isSandboxCapacityError(error)) throw sandboxCapacityError()
       throw error
+    } finally {
+      clearTimeout(deadlineTimer)
+      signal?.removeEventListener('abort', onExternalAbort)
     }
   }
 

@@ -152,6 +152,16 @@ function commandResult(exitCode: number, output: string) {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 function testTarget(): PublicTarget {
   return {
     url: 'https://public.example.at/',
@@ -208,6 +218,64 @@ afterEach(() => {
 })
 
 describe('SandboxWrapperService session boundaries', () => {
+  it('enforces one absolute analysis deadline across DNS, create, and post-create setup', async () => {
+    const dns = deferred<PublicTarget>()
+    let dnsCreateCalls = 0
+    const dnsService = new SandboxWrapperService({
+      snapshotId: 'snap_reviewed',
+      analysisTimeoutMs: 15,
+      resolveTarget: () => dns.promise,
+      factory: {
+        async create() { dnsCreateCalls += 1; throw new Error('must not create') },
+        async get() { throw new Error('must not reconnect') },
+      },
+      loadWorkerAssets: async () => ({ worker: Buffer.from('worker'), client: Buffer.from('client') }),
+    })
+    await expect(dnsService.analyze('https://public.example.at')).rejects.toMatchObject({
+      code: 'analysis_timeout',
+      status: 504,
+    })
+    expect(dnsCreateCalls).toBe(0)
+
+    const lateCreate = deferred<FakeSandbox>()
+    const lateSandbox = new FakeSandbox()
+    const createService = new SandboxWrapperService({
+      snapshotId: 'snap_reviewed',
+      analysisTimeoutMs: 15,
+      resolveTarget: async () => testTarget(),
+      factory: {
+        create: () => lateCreate.promise,
+        async get() { throw new Error('must not reconnect') },
+      },
+      loadWorkerAssets: async () => ({ worker: Buffer.from('worker'), client: Buffer.from('client') }),
+    })
+    const creating = createService.analyze('https://public.example.at')
+    await expect(creating).rejects.toMatchObject({ code: 'analysis_timeout', status: 504 })
+    lateCreate.resolve(lateSandbox)
+    await vi.waitFor(() => expect(lateSandbox.deleted).toBe(1))
+
+    const setupSandbox = new FakeSandbox()
+    setupSandbox.runCommand = async (params) => {
+      if (params.detached) await new Promise(() => undefined)
+      return commandResult(0, '')
+    }
+    const setupService = new SandboxWrapperService({
+      snapshotId: 'snap_reviewed',
+      analysisTimeoutMs: 15,
+      resolveTarget: async () => testTarget(),
+      factory: {
+        async create() { return setupSandbox },
+        async get() { throw new Error('must not reconnect') },
+      },
+      loadWorkerAssets: async () => ({ worker: Buffer.from('worker'), client: Buffer.from('client') }),
+    })
+    await expect(setupService.analyze('https://public.example.at')).rejects.toMatchObject({
+      code: 'analysis_timeout',
+      status: 504,
+    })
+    expect(setupSandbox.deleted).toBe(1)
+  })
+
   it('trims option browser sources and treats whitespace-only values as unconfigured', async () => {
     const configured = createHarness({ snapshotId: '  snap_reviewed  ' })
     await configured.service.analyze('https://public.example.at')

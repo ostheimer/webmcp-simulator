@@ -12,6 +12,8 @@ const ANALYSIS_RATE_WINDOW_MS = 10 * 60 * 1000
 const MAX_ANALYSES_PER_WINDOW = 4
 const ACTION_RATE_WINDOW_MS = 60 * 1000
 const MAX_ACTIONS_PER_WINDOW = 30
+const CLOSE_RATE_WINDOW_MS = 60 * 1000
+const MAX_CLOSES_PER_WINDOW = 30
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9_-]{16,80}$/
 
 interface RateEntry {
@@ -58,6 +60,7 @@ export class BoundedRateStore {
 const activeAnalyses = new Set<string>()
 const analysisRates = new BoundedRateStore()
 const actionRates = new BoundedRateStore()
+const closeRates = new BoundedRateStore()
 const service = new SandboxWrapperService()
 
 export interface ProductionWrapperBackend {
@@ -285,11 +288,12 @@ export function handleCloseRequest(
   backend: ProductionWrapperBackend = service,
 ): Promise<Response> {
   return handle(async () => {
-    assertRequestBoundary(request)
+    const { sourceId } = assertRequestBoundary(request)
     const body = await readJson(request)
     if (typeof body.sessionId !== 'string' || typeof body.sessionToken !== 'string') {
       throw new HttpError('sessionId and sessionToken are required.', 400, 'invalid_session')
     }
+    consumeRateLimit(closeRates, sourceId, MAX_CLOSES_PER_WINDOW, CLOSE_RATE_WINDOW_MS)
     const closed = await backend.closeSession(body.sessionId, body.sessionToken, request.signal)
     if (!closed) throw new HttpError('The isolated browser session capability is invalid.', 401, 'invalid_capability')
     return { closed: true }

@@ -48,6 +48,20 @@ async function startFixture(): Promise<Fixture> {
           oninput="setTimeout(() => { this.value = 'reset-by-page' }, 40)">`)
       return
     }
+    if (requestUrl === '/generated-accessible-safety') {
+      response.end(`<!doctype html><title>Generated accessible safety</title>
+        <style>
+          .generated-sensitive::before { content: 'Credit ca​rd number'; }
+          .generated-neutral::before { content: 'Reference'; }
+          .late-generated.hostile::after { content: 'Password'; }
+          .generated-overflow::before { content: '${'x'.repeat(4_200)}'; }
+        </style>
+        <label><span class="generated-sensitive"></span><input id="generated-sensitive" type="search" aria-label="Safe generated search"></label>
+        <label id="late-generated-label" class="late-generated"><input id="late-generated" type="search" aria-label="Late generated search"></label>
+        <label class="generated-neutral"><input id="generated-neutral" type="search" aria-label="Neutral generated search"></label>
+        <label><span class="generated-overflow"></span><input id="generated-overflow" type="search" aria-label="Overflow generated search"></label>`)
+      return
+    }
     if (requestUrl === '/reorder-verification') {
       response.end(`<!doctype html><title>Reorder fixture</title>
         <input type="search" aria-label="Original search" oninput="
@@ -198,6 +212,18 @@ async function startFixture(): Promise<Fixture> {
     }
     if (requestUrl === '/purchase') {
       response.end('<!doctype html><title>Purchase must not load</title>')
+      return
+    }
+    if (requestUrl === '/initial-consequential-redirect') {
+      response.statusCode = 302
+      response.setHeader('Location', '/purchase')
+      response.end()
+      return
+    }
+    if (requestUrl === '/initial-consequential-hash') {
+      response.end(`<!doctype html><title>Unsafe initial hash</title>
+        <input type="search" aria-label="Must never be exposed">
+        <script>setTimeout(() => { location.hash = '/%63heckout' }, 20)</script>`)
       return
     }
     if (requestUrl === '/oversized-content-length') {
@@ -413,6 +439,24 @@ async function startFixture(): Promise<Fixture> {
             overflow.append(option);
           }
         </script>`)
+      return
+    }
+    if (requestUrl === '/selected-option-boundary') {
+      response.end(`<!doctype html><title>Selected option boundary</title>
+        <select id="initial-hidden-selected" aria-label="Hidden selection filter">
+          <option value="hidden" hidden selected>Hidden selected</option>
+          <option value="safe">Safe option</option>
+        </select>
+        <select id="initial-disabled-selected" aria-label="Disabled selection filter">
+          <option value="disabled" disabled selected>Disabled selected</option>
+          <option value="safe">Safe option</option>
+        </select>
+        <select id="late-hidden-selected" aria-label="Late selection filter">
+          <option value="one" selected>One</option>
+          <option id="late-hidden-option" value="hidden" hidden>Hidden</option>
+          <option value="two">Two</option>
+        </select>
+        <input id="selected-boundary-search" type="search" aria-label="Safe selected boundary search">`)
       return
     }
     if (requestUrl === '/late-control-contracts') {
@@ -1285,6 +1329,7 @@ function createService(options: {
   maxTargetResourceBytes?: number
   maxTargetSessionBytes?: number
   beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
+  beforeRadioGroupWrite?: (page: Page) => Promise<void>
 } = {}) {
   const resolveTarget = async (value: string): Promise<PublicTarget> => {
     const url = new URL(value)
@@ -1304,6 +1349,7 @@ function createService(options: {
     maxTargetResourceBytes: options.maxTargetResourceBytes,
     maxTargetSessionBytes: options.maxTargetSessionBytes,
     beforeAnalysisScreenshot: options.beforeAnalysisScreenshot,
+    beforeRadioGroupWrite: options.beforeRadioGroupWrite,
   })
 }
 
@@ -1867,6 +1913,49 @@ describe('WrapperProofService security boundaries', () => {
       filter.sampleInput,
       undefined,
       filter.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('rejects selected options outside the retained safe mapping before any select mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/selected-option-boundary`)
+    expect(analysis.domEvidence.find(({ label }) => label === 'Hidden selection filter'))
+      .toMatchObject({ sensitive: true })
+    expect(analysis.domEvidence.find(({ label }) => label === 'Disabled selection filter'))
+      .toMatchObject({ sensitive: true })
+    const filter = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((item) => item.id === id)?.label === 'Late selection filter'))!
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#late-hidden-option').evaluate((option) => {
+      ;(option as HTMLOptionElement).selected = true
+    })
+    const selectedBefore = await page.locator('#late-hidden-selected option').evaluateAll(
+      (options) => options.map((option) => (option as HTMLOptionElement).selected),
+    )
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-hidden-selected option').evaluateAll(
+      (options) => options.map((option) => (option as HTMLOptionElement).selected),
+    )).toEqual(selectedBefore)
+
+    const search = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((item) => item.id === id)?.label === 'Safe selected boundary search'))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'still safe' },
+      undefined,
+      search.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
@@ -2720,6 +2809,35 @@ describe('WrapperProofService security boundaries', () => {
     })
   })
 
+  it('classifies and revalidates bounded CSS-generated accessible evidence', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/generated-accessible-safety`)
+    const labels = analysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))
+    expect(labels).toContainEqual({ label: 'Safe generated search', sensitive: true })
+    expect(labels).toContainEqual({ label: 'Neutral generated search', sensitive: false })
+    expect(labels).toContainEqual({ label: 'Late generated search', sensitive: false })
+    expect(labels).toContainEqual({ label: 'Overflow generated search', sensitive: true })
+    expect(analysis.capabilities.some(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((item) => item.id === id)?.label === 'Safe generated search'))).toBe(false)
+
+    const lateSearch = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.some((id) =>
+      analysis.domEvidence.find((item) => item.id === id)?.label === 'Late generated search'))!
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#late-generated-label').evaluate((label) => label.classList.add('hostile'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateSearch.name,
+      { query: 'must-not-apply' },
+      undefined,
+      lateSearch.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-generated').inputValue()).toBe('')
+  })
+
   it('samples a different checked radio choice and excludes a single-choice group', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -2838,6 +2956,45 @@ describe('WrapperProofService security boundaries', () => {
     await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(radioMutations).toBe(0)
     expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('revalidates every radio sibling atomically before changing the exclusive choice', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let mutationHookCalls = 0
+    const service = createService({
+      beforeRadioGroupWrite: async (page) => {
+        mutationHookCalls += 1
+        await page.locator('label[for="first-a"]').evaluate((label) => {
+          label.textContent = 'Credit card number'
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/checked-radio-groups`)
+    const form = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const page = internalSession(service, analysis.sessionId).page
+    let changeEvents = 0
+    await page.exposeFunction('recordAtomicRadioChange', () => { changeEvents += 1 })
+    await page.locator('#first-a, #first-b').evaluateAll((radios) => {
+      for (const radio of radios) {
+        radio.addEventListener('change', () => {
+          void (window as unknown as { recordAtomicRadioChange(): Promise<void> }).recordAtomicRadioChange()
+        })
+      }
+    })
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(mutationHookCalls).toBe(1)
+    expect(changeEvents).toBe(0)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('revalidates page-authored safety evidence before read, write, and verification', async () => {
@@ -3999,6 +4156,29 @@ describe('WrapperProofService security boundaries', () => {
     })
     expect(fixture.requests).toContain('/about-safe')
     expect(fixture.requests).toContain('/next')
+  })
+
+  it('publishes no evidence from consequential initial, redirected, or encoded hash destinations', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    for (const path of [
+      '/purchase',
+      '/initial-consequential-redirect',
+      '/initial-consequential-hash',
+      '/about#/%63heckout',
+    ]) {
+      let screenshotCalls = 0
+      const service = createService({
+        beforeAnalysisScreenshot: async () => { screenshotCalls += 1 },
+      })
+      services.push(service)
+      await expect(service.analyze(`${fixture.origin}${path}`)).rejects.toMatchObject({
+        code: 'unsupported_page',
+        status: 422,
+      })
+      expect(screenshotCalls, path).toBe(0)
+      expect(internalServiceState(service), path).toEqual({ sessions: 0, reservations: 0 })
+    }
   })
 
   it('excludes consequential hash routes, allows neutral fragments, and rejects a late hash-router transition', async () => {

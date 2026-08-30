@@ -311,6 +311,61 @@ describe('production wrapper API boundaries', () => {
     expect(closeSession).toHaveBeenCalledOnce()
   })
 
+  it('rate-limits close attempts by trusted source only after a valid bounded body', async () => {
+    const closeSession = vi.fn(async () => true)
+    const target = backend({ closeSession })
+    const sourceIp = '198.51.100.141'
+
+    for (let index = 0; index < 40; index += 1) {
+      const invalid = await handleCloseRequest(request('/api/wrapper/session', {
+        sessionId: `missing-token-${index}`,
+      }, {
+        clientId: `invalid_close_${String(index).padStart(8, '0')}`,
+        sourceIp,
+        method: 'DELETE',
+      }), target)
+      expect(invalid.status).toBe(400)
+    }
+    expect(closeSession).not.toHaveBeenCalled()
+
+    const statuses: number[] = []
+    for (let index = 0; index < 31; index += 1) {
+      statuses.push((await handleCloseRequest(request('/api/wrapper/session', {
+        sessionId: `webmcp-wrapper-random-${String(index).padStart(8, '0')}`,
+        sessionToken: `${String(index).padStart(2, '0')}${'A'.repeat(41)}`,
+      }, {
+        clientId: `rotated_close_${String(index).padStart(8, '0')}`,
+        sourceIp,
+        method: 'DELETE',
+      }), target)).status)
+    }
+    expect(statuses).toEqual([...Array.from({ length: 30 }, () => 200), 429])
+    expect(closeSession).toHaveBeenCalledTimes(30)
+  })
+
+  it('returns a sanitized typed production analysis timeout', async () => {
+    const target = backend({
+      analyze: vi.fn(async () => {
+        throw new WrapperServiceError(
+          'analysis_timeout',
+          'The isolated website analysis exceeded its fixed time limit.',
+          504,
+        )
+      }),
+    })
+    const response = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'analysis_timeout_client01',
+      sourceIp: '198.51.100.142',
+    }), target)
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated website analysis exceeded its fixed time limit.',
+      code: 'analysis_timeout',
+    })
+  })
+
   it('marks only typed pre-backend action failures as non-invalidating', async () => {
     const validBody = {
       sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
