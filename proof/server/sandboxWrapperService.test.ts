@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { WrapperActionResult, WrapperAnalysis } from '../../src/features/wrapper/types.ts'
 import type { PublicTarget } from './publicTarget.ts'
 import { createSandboxLocator, createSessionCapability } from './sessionCapability.ts'
@@ -155,13 +155,17 @@ function testTarget(): PublicTarget {
   }
 }
 
-function createHarness() {
+function createHarness(
+  browserSource: { snapshotId?: string, image?: string } = { snapshotId: 'snap_reviewed' },
+) {
   const sandbox = new FakeSandbox()
   let createCalls = 0
   let getCalls = 0
+  let lastCreateParams: Record<string, unknown> | undefined
   const factory: SandboxFactory = {
     async create(params) {
       createCalls += 1
+      lastCreateParams = params
       sandbox.name = String(params.name)
       return sandbox
     },
@@ -179,7 +183,7 @@ function createHarness() {
   }
   const service = new SandboxWrapperService({
     factory,
-    snapshotId: 'snap_reviewed',
+    ...browserSource,
     resolveTarget: async () => testTarget(),
     loadWorkerAssets: async () => ({ worker: Buffer.from('worker'), client: Buffer.from('client') }),
     now: () => Date.parse('2026-08-30T10:00:00.000Z'),
@@ -188,10 +192,52 @@ function createHarness() {
     sandbox,
     service,
     counts: () => ({ createCalls, getCalls }),
+    createParams: () => lastCreateParams,
   }
 }
 
+afterEach(() => {
+  vi.unstubAllEnvs()
+})
+
 describe('SandboxWrapperService session boundaries', () => {
+  it('trims option browser sources and treats whitespace-only values as unconfigured', async () => {
+    const configured = createHarness({ snapshotId: '  snap_reviewed  ' })
+    await configured.service.analyze('https://public.example.at')
+    expect(configured.createParams()).toMatchObject({
+      source: { type: 'snapshot', snapshotId: 'snap_reviewed' },
+    })
+
+    const image = createHarness({ snapshotId: '  ', image: '  docker.io/reviewed/browser:1  ' })
+    await image.service.analyze('https://public.example.at')
+    expect(image.createParams()).toMatchObject({ image: 'docker.io/reviewed/browser:1' })
+
+    const missing = createHarness({ snapshotId: '  ', image: '\t' })
+    await expect(missing.service.analyze('https://public.example.at')).rejects.toMatchObject({
+      code: 'sandbox_not_configured',
+      status: 503,
+    })
+    expect(missing.counts().createCalls).toBe(0)
+  })
+
+  it('trims environment browser-source fallbacks before provider use', async () => {
+    vi.stubEnv('WEBMCP_SANDBOX_SNAPSHOT_ID', '  env_snapshot  ')
+    vi.stubEnv('WEBMCP_SANDBOX_IMAGE', '  ')
+    const environment = createHarness({})
+    await environment.service.analyze('https://public.example.at')
+    expect(environment.createParams()).toMatchObject({
+      source: { type: 'snapshot', snapshotId: 'env_snapshot' },
+    })
+
+    vi.stubEnv('WEBMCP_SANDBOX_SNAPSHOT_ID', '  ')
+    vi.stubEnv('WEBMCP_SANDBOX_IMAGE', '  docker.io/reviewed/env-browser:1  ')
+    const environmentImage = createHarness({})
+    await environmentImage.service.analyze('https://public.example.at')
+    expect(environmentImage.createParams()).toMatchObject({
+      image: 'docker.io/reviewed/env-browser:1',
+    })
+  })
+
   it('creates a random locator plus a separate capability and reconnects only through get', async () => {
     const harness = createHarness()
     const analysis = await harness.service.analyze('https://public.example.at')

@@ -37,21 +37,38 @@ export const DATE_LIKE_FIELD_SPECS = {
 } as const
 
 export interface DetectedControl extends WrapperDomEvidence {
+  backendNodeId: number
+  fieldKey?: string
+  formId?: string
   optionValues?: string[]
   optionIndices?: number[]
+  minimum?: number
+  maximum?: number
+  numericStep?: number
+  numericStepBase?: number
+  numericValues?: number[]
+  numericSample?: number
+  numericUnsupported?: boolean
 }
 
 export interface ActionField {
   key: string
-  selector: string
+  backendNodeId: number
   type: string
-  selectors?: string[]
+  backendNodeIds?: number[]
   optionIndices?: number[]
+  minimum?: number
+  maximum?: number
+  numericStep?: number
+  numericStepBase?: number
+  numericValues?: number[]
+  numericSample?: number
 }
 
 export interface CapabilityAction {
   kind: WrapperInteractionKind
-  selector?: string
+  backendNodeId?: number
+  controlType?: string
   urls?: string[]
   optionValues?: string[]
   optionIndices?: number[]
@@ -85,7 +102,17 @@ function schemaForField(control: DetectedControl): Record<string, unknown> {
     }
   }
   if (['number', 'range'].includes(control.type)) {
-    return { type: 'number', description: 'Value for the visible numeric control.' }
+    return {
+      type: 'number',
+      ...(control.minimum === undefined ? {} : { minimum: control.minimum }),
+      ...(control.maximum === undefined ? {} : { maximum: control.maximum }),
+      ...(control.numericValues
+        ? { enum: control.numericValues }
+        : control.numericStep === undefined
+          ? {}
+          : { multipleOf: control.numericStep }),
+      description: 'Value for the visible numeric control.',
+    }
   }
   if (['checkbox', 'radio'].includes(control.type)) {
     return { type: 'boolean', description: 'Checked state for the visible control.' }
@@ -128,7 +155,9 @@ function sampleForActionField(field: ActionField): unknown {
   if (field.type === 'select-one') {
     return Math.min(1, Math.max(0, (field.optionIndices?.length ?? 1) - 1))
   }
-  if (field.type === 'number' || field.type === 'range') return 1
+  if (field.type === 'number' || field.type === 'range') {
+    return field.numericSample ?? 1
+  }
   if (field.type === 'checkbox' || field.type === 'radio') return true
   const dateLikeSpec = DATE_LIKE_FIELD_SPECS[field.type as keyof typeof DATE_LIKE_FIELD_SPECS]
   if (dateLikeSpec) return dateLikeSpec.sample
@@ -158,7 +187,11 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       },
       evidenceIds: [search.id],
       sampleInput: { query: 'New York' },
-      action: { kind: 'prepare_search', selector: search.selector },
+      action: {
+        kind: 'prepare_search',
+        backendNodeId: search.backendNodeId,
+        controlType: search.type,
+      },
     })
   }
 
@@ -188,7 +221,8 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
       sampleInput: { optionIndex: Math.min(1, optionCount - 1) },
       action: {
         kind: 'filter',
-        selector: control.selector,
+        backendNodeId: control.backendNodeId,
+        controlType: control.type,
         optionValues: control.optionValues,
         optionIndices: control.optionIndices
           ?? control.optionValues?.map((_value, optionIndex) => optionIndex),
@@ -238,6 +272,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
   for (const group of formGroups.values()) {
     const safeControls = group.filter((control) =>
       !control.sensitive
+      && !control.numericUnsupported
       && !UNSAFE_HINT.test(control.label)
       && ['checkbox', 'date', 'month', 'number', 'radio', 'range', 'select-one', 'text', 'time', 'week'].includes(control.type),
     )
@@ -270,18 +305,24 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
     const properties: Record<string, Record<string, unknown>> = Object.create(null)
     const fields: ActionField[] = []
     safeFields.forEach((field, index) => {
-      // Remote names and ids are server-only selector evidence. Agent-facing
+      // Remote names and ids are server-only evidence. Agent-facing
       // schemas use wrapper-owned neutral keys exclusively.
       const key = `field_${index + 1}`
       properties[key] = schemaForSafeFormField(field)
       const { control, radioGroup } = field
       fields.push({
         key,
-        selector: control.selector,
+        backendNodeId: control.backendNodeId,
         type: radioGroup ? 'radio-group' : control.type,
-        selectors: radioGroup?.map(({ selector }) => selector),
+        backendNodeIds: radioGroup?.map(({ backendNodeId }) => backendNodeId),
         optionIndices: control.optionIndices
           ?? control.optionValues?.map((_value, optionIndex) => optionIndex),
+        minimum: control.minimum,
+        maximum: control.maximum,
+        numericStep: control.numericStep,
+        numericStepBase: control.numericStepBase,
+        numericValues: control.numericValues,
+        numericSample: control.numericSample,
       })
     })
 

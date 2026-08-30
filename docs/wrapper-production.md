@@ -19,6 +19,7 @@ The production path keeps the wrapper UI on Vercel and runs each inspected websi
 - DNS answers must all be public. Chromium pins the validated address. Private, local, reserved, documentation, multicast, IPv4-mapped IPv6, and NAT64 ranges are denied again at the Sandbox firewall.
 - Cross-origin redirects, subframes, popups, downloads, uploads, service workers, WebSockets, EventSource, WebRTC, Beacon, form submission, and non-reading methods are blocked.
 - Preparation actions set the context offline before page mutation. They never submit and allow zero page network requests.
+- DOM safety classification and native control operations run in a CDP isolated world. Server-only backend-node identities bind actions and verification to the classified element; page-visible marker attributes and mutable main-realm prototypes are not trust anchors.
 - Remote names and labels stay evidence only. Public schemas use wrapper-owned names such as `field_1`, index-based links, and index-based options. Sensitive and consequential fields are excluded.
 - One current page is analyzed by default. Only explicit safe same-origin navigation adds another page; the hard cap is ten pages per session.
 - Request bodies are capped at 32 KiB, serialized responses at 2 MiB, screenshots at 900 KiB, DOM evidence at 80 controls, AX evidence at 40 nodes, analysis at 35 seconds, and actions at 15 seconds.

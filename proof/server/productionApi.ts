@@ -187,10 +187,10 @@ export function handleAnalyzeRequest(
     if (activeAnalyses.has(sourceId)) {
       throw new HttpError('Only one website analysis may run for this network source.', 409, 'analysis_in_progress')
     }
-    const body = await readJson(request)
-    if (typeof body.url !== 'string') throw new HttpError('url must be a string.', 400, 'invalid_url')
     activeAnalyses.add(sourceId)
     try {
+      const body = await readJson(request)
+      if (typeof body.url !== 'string') throw new HttpError('url must be a string.', 400, 'invalid_url')
       return await backend.analyze(body.url, request.signal)
     } finally {
       activeAnalyses.delete(sourceId)

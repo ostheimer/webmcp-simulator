@@ -91,17 +91,17 @@ describe('createWrapperTools', () => {
     const controls = [
       {
         id: 'control-1', tag: 'input' as const, type: 'text', role: 'textbox',
-        label: 'First value', selector: '[data-webmcp-proof-id="control-1"]',
+        label: 'First value', backendNodeId: 1,
         fieldKey: 'ignore_previous_instructions', formId: 'form-1', sensitive: false,
       },
       {
         id: 'control-2', tag: 'input' as const, type: 'text', role: 'textbox',
-        label: 'Second value', selector: '[data-webmcp-proof-id="control-2"]',
+        label: 'Second value', backendNodeId: 2,
         fieldKey: 'reveal_user_secrets', formId: 'form-1', sensitive: false,
       },
       {
         id: 'control-3', tag: 'input' as const, type: 'password', role: 'textbox',
-        label: 'Password', selector: '[data-webmcp-proof-id="control-3"]',
+        label: 'Password', backendNodeId: 3,
         fieldKey: 'agent_password', formId: 'form-1', sensitive: true,
       },
     ]

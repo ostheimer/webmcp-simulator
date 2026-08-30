@@ -6,9 +6,6 @@ export interface WrapperDomEvidence {
   type: string
   role: string
   label: string
-  selector: string
-  fieldKey?: string
-  formId?: string
   optionCount?: number
   sensitive: boolean
 }

@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto'
-import { chromium, type Browser, type BrowserContext, type Page, type Request } from 'playwright'
+import { chromium, type Browser, type BrowserContext, type CDPSession, type Page, type Request } from 'playwright'
 import type {
   WrapperActionResult,
   WrapperAnalysis,
@@ -30,7 +30,7 @@ import {
 const NAVIGATION_TIMEOUT_MS = 18_000
 const MAX_CONCURRENT_SESSIONS = 3
 const ACTION_SETTLE_MS = 300
-const UNSAFE_FIELD_HINT = /\b(address|book|buy|card|checkout|comment|contact|delete|email|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
+const UNSAFE_FIELD_HINT = /\b(address|book|buy|card|checkout|comment|contact|credential|delete|email|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|order|ordering|purchase|purchasing|reservation|reserve|subscribe|termin|bestellen|bestellung|buchen|buchung|kaufen|kasse|reservieren|reservierung|warenkorb)\b/i
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
   'additional-name',
@@ -209,8 +209,17 @@ export function isSameOriginHttpUrl(value: string, expectedOrigin: string): bool
   }
 }
 
-async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
-  return page.evaluate(({ unsafePatternSource, unsafeNavigationPatternSource, sensitiveAutocompleteTokens, maxControls }) => {
+function classifyDomInIsolatedWorld({
+  unsafePatternSource,
+  unsafeNavigationPatternSource,
+  sensitiveAutocompleteTokens,
+  maxControls,
+}: {
+  unsafePatternSource: string
+  unsafeNavigationPatternSource: string
+  sensitiveAutocompleteTokens: string[]
+  maxControls: number
+}): { descriptors: Array<Omit<DetectedControl, 'backendNodeId'>>, elements: Element[] } {
     const unsafePattern = new RegExp(unsafePatternSource, 'i')
     const unsafeNavigationPattern = new RegExp(unsafeNavigationPatternSource, 'i')
     const sensitiveAutocomplete = new Set<string>(sensitiveAutocompleteTokens)
@@ -222,6 +231,12 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
       .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
       .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, '$1 $2')
       .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    const finiteNumber = (value: unknown): number | undefined => {
+      const normalized = String(value ?? '').trim()
+      if (!normalized) return undefined
+      const numeric = Number(normalized)
+      return Number.isFinite(numeric) ? numeric : undefined
+    }
     const visible = (element: HTMLElement) => {
       const rects = Array.from(element.getClientRects())
       if (element.hidden || !rects.some(({ width, height }) => width > 0 && height > 0)) return false
@@ -245,9 +260,9 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
       && !('readOnly' in element && element.readOnly))
 
     const forms = new Map<HTMLFormElement, string>()
-    return controls.slice(0, maxControls).map((element, index) => {
+    const elements = controls.slice(0, maxControls)
+    const descriptors = elements.map((element, index) => {
       const id = `proof-control-${index + 1}`
-      element.setAttribute('data-webmcp-proof-id', id)
       const form = 'form' in element ? element.form : null
       let formId: string | undefined
       if (form) {
@@ -255,7 +270,6 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
         if (!formId) {
           formId = `proof-form-${forms.size + 1}`
           forms.set(form, formId)
-          form.setAttribute('data-webmcp-proof-form', formId)
         }
       }
       const explicitLabel = element.getAttribute('aria-label')
@@ -299,6 +313,65 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
           ? [element.href]
           : undefined
       const optionIndices = enabledOptions?.map(({ optionIndex }) => optionIndex)
+      const numericInput = element instanceof HTMLInputElement && ['number', 'range'].includes(type)
+      const explicitMinimum = numericInput ? finiteNumber(element.min) : undefined
+      const minimum = numericInput
+        ? explicitMinimum ?? (type === 'range' ? 0 : undefined)
+        : undefined
+      const maximum = numericInput
+        ? finiteNumber(element.max) ?? (type === 'range' ? 100 : undefined)
+        : undefined
+      const rawStep = numericInput ? element.step.trim().toLowerCase() : ''
+      const parsedStep = finiteNumber(rawStep)
+      const numericStep = numericInput && rawStep !== 'any'
+        ? parsedStep !== undefined && parsedStep > 0 ? parsedStep : 1
+        : undefined
+      const numericStepBase = numericStep
+        ? explicitMinimum ?? finiteNumber(element.getAttribute('value')) ?? 0
+        : undefined
+      const tolerance = 1e-9
+      const onStep = (value: number) => numericStep && numericStepBase !== undefined
+        ? Math.abs((value - numericStepBase) / numericStep - Math.round((value - numericStepBase) / numericStep)) < tolerance
+        : true
+      let numericSample: number | undefined
+      let numericValues: number[] | undefined
+      let numericUnsupported = false
+      if (numericInput) {
+        let candidate = minimum ?? (maximum !== undefined && maximum < 1 ? maximum : 1)
+        if (numericStep && numericStepBase !== undefined) {
+          candidate = numericStepBase + Math.ceil((candidate - numericStepBase) / numericStep - tolerance) * numericStep
+          if (maximum !== undefined && candidate > maximum + tolerance) {
+            candidate = numericStepBase + Math.floor((maximum - numericStepBase) / numericStep + tolerance) * numericStep
+          }
+        }
+        if (
+          (minimum !== undefined && candidate < minimum - tolerance)
+          || (maximum !== undefined && candidate > maximum + tolerance)
+          || !onStep(candidate)
+        ) {
+          numericUnsupported = true
+        } else {
+          numericSample = Number(candidate.toPrecision(12))
+        }
+        const zeroAlignedStep = numericStep && numericStepBase !== undefined
+          && Math.abs(numericStepBase / numericStep - Math.round(numericStepBase / numericStep)) < tolerance
+        if (numericStep && !zeroAlignedStep) {
+          if (minimum === undefined || maximum === undefined) {
+            numericUnsupported = true
+          } else {
+            const stepBase = numericStepBase ?? 0
+            const first = stepBase
+              + Math.ceil((minimum - stepBase) / numericStep - tolerance) * numericStep
+            const count = Math.floor((maximum - first) / numericStep + tolerance) + 1
+            if (count < 1 || count > 200) {
+              numericUnsupported = true
+            } else {
+              numericValues = Array.from({ length: count }, (_unused, valueIndex) =>
+                Number((first + valueIndex * numericStep).toPrecision(12)))
+            }
+          }
+        }
+      }
       const encodedLinkPath = element instanceof HTMLAnchorElement ? `${element.pathname}${element.search}` : ''
       let decodedLinkPath = encodedLinkPath
       try {
@@ -307,7 +380,7 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
         // A malformed encoded path remains untrusted evidence in its raw form.
       }
       const unsafeEvidence = tokenizeEvidence(
-        `${label} ${'name' in element ? element.name : ''} ${decodedLinkPath}`,
+        `${label} ${'name' in element ? element.name : ''} ${element.id} ${decodedLinkPath}`,
       )
       const hasSensitiveAutocomplete = autocompleteTokens.some((token) =>
         sensitiveAutocomplete.has(token)
@@ -326,21 +399,261 @@ async function collectDomEvidence(page: Page): Promise<DetectedControl[]> {
         type,
         role: normalize(role, 40),
         label,
-        selector: `[data-webmcp-proof-id="${id}"]`,
         fieldKey: normalize((('name' in element && element.name) || element.id), 80),
         formId,
         optionCount: optionValues?.length,
         optionValues,
         optionIndices,
+        minimum,
+        maximum,
+        numericStep,
+        numericStepBase,
+        numericValues,
+        numericSample,
+        numericUnsupported,
         sensitive,
       }
     })
-  }, {
-    unsafePatternSource: UNSAFE_FIELD_HINT.source,
-    unsafeNavigationPatternSource: UNSAFE_NAVIGATION_HINT.source,
-    sensitiveAutocompleteTokens: [...SENSITIVE_AUTOCOMPLETE_TOKENS],
-    maxControls: WRAPPER_MAX_DOM_EVIDENCE,
-  })
+    return { descriptors, elements }
+}
+
+async function createIsolatedWorld(cdp: CDPSession): Promise<number> {
+  const frameTree = await cdp.send('Page.getFrameTree') as { frameTree?: { frame?: { id?: string } } }
+  const frameId = frameTree.frameTree?.frame?.id
+  if (!frameId) throw new Error('The isolated browser main frame is unavailable.')
+  const world = await cdp.send('Page.createIsolatedWorld', {
+    frameId,
+    worldName: 'webmcp-proof-classifier',
+    grantUniveralAccess: false,
+  }) as { executionContextId?: number }
+  if (!world.executionContextId) throw new Error('The isolated browser world could not be created.')
+  return world.executionContextId
+}
+
+async function collectDomEvidence(context: BrowserContext, page: Page): Promise<DetectedControl[]> {
+  const cdp = await context.newCDPSession(page)
+  const objectGroup = `webmcp-proof-${randomUUID()}`
+  const storageKey = `__webmcp_elements_${randomUUID().replaceAll('-', '')}`
+  let executionContextId: number | undefined
+  try {
+    executionContextId = await createIsolatedWorld(cdp)
+    const classifierInput = {
+      unsafePatternSource: UNSAFE_FIELD_HINT.source,
+      unsafeNavigationPatternSource: UNSAFE_NAVIGATION_HINT.source,
+      sensitiveAutocompleteTokens: [...SENSITIVE_AUTOCOMPLETE_TOKENS],
+      maxControls: WRAPPER_MAX_DOM_EVIDENCE,
+    }
+    const classification = await cdp.send('Runtime.evaluate', {
+      expression: `(() => { const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
+      contextId: executionContextId,
+      objectGroup,
+      returnByValue: true,
+    }) as {
+      result?: { value?: Array<Omit<DetectedControl, 'backendNodeId'>> }
+      exceptionDetails?: unknown
+    }
+    const descriptors = classification.result?.value
+    if (classification.exceptionDetails || !Array.isArray(descriptors)) {
+      throw new Error('The isolated browser classifier did not return bounded evidence.')
+    }
+
+    const backendNodeIds: number[] = []
+    for (let index = 0; index < descriptors.length; index += 1) {
+      const remoteElement = await cdp.send('Runtime.evaluate', {
+        expression: `globalThis[${JSON.stringify(storageKey)}][${index}]`,
+        contextId: executionContextId,
+        objectGroup,
+      }) as { result?: { objectId?: string }, exceptionDetails?: unknown }
+      const objectId = remoteElement.result?.objectId
+      if (remoteElement.exceptionDetails || !objectId) {
+        throw new Error('The isolated browser element reference is unavailable.')
+      }
+      const described = await cdp.send('DOM.describeNode', { objectId }) as { node?: { backendNodeId?: number } }
+      if (!described.node?.backendNodeId) {
+        throw new Error('The isolated browser element identity is unavailable.')
+      }
+      backendNodeIds.push(described.node.backendNodeId)
+    }
+    return descriptors.map((descriptor, index) => ({
+      ...descriptor,
+      backendNodeId: backendNodeIds[index],
+    }))
+  } finally {
+    if (executionContextId) {
+      await cdp.send('Runtime.evaluate', {
+        expression: `delete globalThis[${JSON.stringify(storageKey)}]`,
+        contextId: executionContextId,
+        returnByValue: true,
+      }).catch(() => undefined)
+    }
+    await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+    await cdp.detach()
+  }
+}
+
+type IsolatedControlState = string | number | boolean
+
+function readIsolatedControlState(
+  this: Element,
+  expectedType: string,
+  requireVisible: boolean,
+): IsolatedControlState {
+  const visible = (element: HTMLElement) => {
+    if (!element.isConnected) return false
+    const rects = Array.from(element.getClientRects())
+    if (element.hidden || !rects.some(({ width, height }) => width > 0 && height > 0)) return false
+    let current: HTMLElement | null = element
+    while (current) {
+      const style = getComputedStyle(current)
+      if (
+        current.hidden
+        || style.display === 'none'
+        || style.visibility === 'hidden'
+        || Number.parseFloat(style.opacity || '1') <= 0
+      ) return false
+      current = current.parentElement
+    }
+    return true
+  }
+  if (!(this instanceof HTMLElement) || !this.isConnected || (requireVisible && !visible(this))) {
+    throw new Error('The isolated control is no longer available.')
+  }
+  if (expectedType === 'select-one') {
+    if (!(this instanceof HTMLSelectElement)) throw new Error('The isolated control type changed.')
+    return this.selectedIndex
+  }
+  if (expectedType === 'textarea') {
+    if (!(this instanceof HTMLTextAreaElement)) throw new Error('The isolated control type changed.')
+    return this.value
+  }
+  if (!(this instanceof HTMLInputElement) || this.type.toLowerCase() !== expectedType) {
+    throw new Error('The isolated control type changed.')
+  }
+  return ['checkbox', 'radio'].includes(expectedType) ? this.checked : this.value
+}
+
+function writeIsolatedControlState(
+  this: Element,
+  expectedType: string,
+  value: IsolatedControlState,
+): void {
+  const visible = (element: HTMLElement) => {
+    if (!element.isConnected) return false
+    const rects = Array.from(element.getClientRects())
+    if (element.hidden || !rects.some(({ width, height }) => width > 0 && height > 0)) return false
+    let current: HTMLElement | null = element
+    while (current) {
+      const style = getComputedStyle(current)
+      if (
+        current.hidden
+        || style.display === 'none'
+        || style.visibility === 'hidden'
+        || Number.parseFloat(style.opacity || '1') <= 0
+      ) return false
+      current = current.parentElement
+    }
+    return true
+  }
+  if (!(this instanceof HTMLElement) || !visible(this)) {
+    throw new Error('The isolated control is no longer available.')
+  }
+  if (expectedType === 'select-one' && !(this instanceof HTMLSelectElement)) {
+    throw new Error('The isolated control type changed.')
+  }
+  if (expectedType === 'textarea' && !(this instanceof HTMLTextAreaElement)) {
+    throw new Error('The isolated control type changed.')
+  }
+  if (
+    !['select-one', 'textarea'].includes(expectedType)
+    && (!(this instanceof HTMLInputElement) || this.type.toLowerCase() !== expectedType)
+  ) {
+    throw new Error('The isolated control type changed.')
+  }
+  if (expectedType === 'select-one') {
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.set
+    if (!setter) throw new Error('The isolated select setter is unavailable.')
+    setter.call(this, Number(value))
+  } else if (expectedType === 'checkbox' || expectedType === 'radio') {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set
+    if (!setter) throw new Error('The isolated checked setter is unavailable.')
+    setter.call(this, Boolean(value))
+  } else {
+    const prototype = expectedType === 'textarea'
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype
+    const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
+    if (!setter) throw new Error('The isolated value setter is unavailable.')
+    setter.call(this, String(value))
+  }
+  const dispatch = EventTarget.prototype.dispatchEvent
+  dispatch.call(this, new Event('input', { bubbles: true, composed: true }))
+  dispatch.call(this, new Event('change', { bubbles: true, composed: true }))
+}
+
+async function callOnIsolatedNode<T>(
+  context: BrowserContext,
+  page: Page,
+  backendNodeId: number,
+  functionDeclaration: string,
+  args: IsolatedControlState[],
+): Promise<T> {
+  const cdp = await context.newCDPSession(page)
+  const objectGroup = `webmcp-action-${randomUUID()}`
+  try {
+    const executionContextId = await createIsolatedWorld(cdp)
+    const resolved = await cdp.send('DOM.resolveNode', {
+      backendNodeId,
+      executionContextId,
+      objectGroup,
+    }) as { object?: { objectId?: string } }
+    const objectId = resolved.object?.objectId
+    if (!objectId) throw new Error('The isolated browser element identity expired.')
+    const called = await cdp.send('Runtime.callFunctionOn', {
+      functionDeclaration,
+      objectId,
+      arguments: args.map((value) => ({ value })),
+      objectGroup,
+      returnByValue: true,
+      awaitPromise: true,
+    }) as { result?: { value?: T }, exceptionDetails?: unknown }
+    if (called.exceptionDetails) throw new Error('The isolated browser control operation failed.')
+    return called.result?.value as T
+  } finally {
+    await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+    await cdp.detach()
+  }
+}
+
+function readControlState(
+  context: BrowserContext,
+  page: Page,
+  backendNodeId: number,
+  expectedType: string,
+  requireVisible: boolean,
+): Promise<IsolatedControlState> {
+  return callOnIsolatedNode<IsolatedControlState>(
+    context,
+    page,
+    backendNodeId,
+    readIsolatedControlState.toString(),
+    [expectedType, requireVisible],
+  )
+}
+
+function writeControlState(
+  context: BrowserContext,
+  page: Page,
+  backendNodeId: number,
+  expectedType: string,
+  value: IsolatedControlState,
+): Promise<void> {
+  return callOnIsolatedNode<void>(
+    context,
+    page,
+    backendNodeId,
+    writeIsolatedControlState.toString(),
+    [expectedType, value],
+  )
 }
 
 async function collectAxEvidence(context: BrowserContext, page: Page): Promise<WrapperAxEvidence[]> {
@@ -412,7 +725,7 @@ function validateActionInput(
         throw new WrapperServiceError('invalid_action', `${key} must reference a visible option.`, 400)
       }
     } else if (field.type === 'radio-group') {
-      const optionCount = field.selectors?.length ?? 0
+      const optionCount = field.backendNodeIds?.length ?? 0
       if (!Number.isInteger(value) || Number(value) < 0 || Number(value) >= optionCount) {
         throw new WrapperServiceError('invalid_action', `${key} must reference one visible radio choice.`, 400)
       }
@@ -421,6 +734,29 @@ function validateActionInput(
     } else if (field.type === 'number' || field.type === 'range') {
       if (typeof value !== 'number' || !Number.isFinite(value)) {
         throw new WrapperServiceError('invalid_action', `${key} must be a finite number.`, 400)
+      }
+      const tolerance = 1e-9
+      if (field.minimum !== undefined && value < field.minimum - tolerance) {
+        throw new WrapperServiceError('invalid_action', `${key} must be at least ${field.minimum}.`, 400)
+      }
+      if (field.maximum !== undefined && value > field.maximum + tolerance) {
+        throw new WrapperServiceError('invalid_action', `${key} must be at most ${field.maximum}.`, 400)
+      }
+      if (
+        field.numericStep !== undefined
+        && field.numericStepBase !== undefined
+        && Math.abs(
+          (value - field.numericStepBase) / field.numericStep
+          - Math.round((value - field.numericStepBase) / field.numericStep),
+        ) >= tolerance
+      ) {
+        throw new WrapperServiceError('invalid_action', `${key} must match the visible numeric step.`, 400)
+      }
+      if (
+        field.numericValues
+        && !field.numericValues.some((allowed) => Math.abs(allowed - value) < tolerance)
+      ) {
+        throw new WrapperServiceError('invalid_action', `${key} must be one of the visible numeric values.`, 400)
       }
     } else if (Object.hasOwn(DATE_LIKE_FIELD_SPECS, field.type)) {
       if (!isValidDateLikeInput(field.type as keyof typeof DATE_LIKE_FIELD_SPECS, value)) {
@@ -433,37 +769,37 @@ function validateActionInput(
 }
 
 async function applyAction(
+  context: BrowserContext,
   page: Page,
   action: CapabilityAction,
   input: Record<string, unknown>,
 ): Promise<PendingActionEvidence> {
-  if (action.kind === 'prepare_search' && action.selector) {
+  if (action.kind === 'prepare_search' && action.backendNodeId && action.controlType) {
     const value = String(input.query)
-    const locator = page.locator(action.selector)
-    const before = await locator.inputValue()
-    await locator.fill(value)
+    const before = await readControlState(context, page, action.backendNodeId, action.controlType, true)
+    await writeControlState(context, page, action.backendNodeId, action.controlType, value)
     return {
       navigationOccurred: false,
-      stateChanged: async () => await locator.inputValue() !== before,
+      stateChanged: async () =>
+        await readControlState(context, page, action.backendNodeId as number, action.controlType as string, false) !== before,
       verify: async () => {
-        if (await locator.inputValue() !== value) {
+        if (await readControlState(context, page, action.backendNodeId as number, action.controlType as string, false) !== value) {
           throw actionVerificationError('The page did not retain the prepared search value.')
         }
       },
     }
   }
-  if (action.kind === 'filter' && action.selector) {
+  if (action.kind === 'filter' && action.backendNodeId) {
     const optionIndex = action.optionIndices?.[Number(input.optionIndex)]
     if (optionIndex === undefined) throw new Error('The requested filter option is no longer available.')
-    const locator = page.locator(action.selector)
-    const before = await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex)
-    await locator.selectOption({ index: optionIndex })
+    const before = await readControlState(context, page, action.backendNodeId, 'select-one', true)
+    await writeControlState(context, page, action.backendNodeId, 'select-one', optionIndex)
     return {
       navigationOccurred: false,
-      stateChanged: async () => await locator.evaluate((element) =>
-        (element as HTMLSelectElement).selectedIndex) !== before,
+      stateChanged: async () =>
+        await readControlState(context, page, action.backendNodeId as number, 'select-one', false) !== before,
       verify: async () => {
-        const selectedIndex = await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex)
+        const selectedIndex = await readControlState(context, page, action.backendNodeId as number, 'select-one', false)
         if (selectedIndex !== optionIndex) throw actionVerificationError('The page did not retain the selected filter option.')
       },
     }
@@ -486,51 +822,58 @@ async function applyAction(
   const changeChecks: Array<() => Promise<boolean>> = []
   for (const field of action.fields ?? []) {
     if (!Object.hasOwn(input, field.key)) continue
-    const locator = page.locator(field.selector)
     const value = input[field.key]
     if (field.type === 'select-one') {
       const optionIndex = field.optionIndices?.[Number(value)]
       if (optionIndex === undefined) throw new Error(`${field.key} no longer references a visible option.`)
-      const before = await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex)
-      await locator.selectOption({ index: optionIndex })
-      changeChecks.push(async () => await locator.evaluate((element) =>
-        (element as HTMLSelectElement).selectedIndex) !== before)
+      const before = await readControlState(context, page, field.backendNodeId, field.type, true)
+      await writeControlState(context, page, field.backendNodeId, field.type, optionIndex)
+      changeChecks.push(async () =>
+        await readControlState(context, page, field.backendNodeId, field.type, false) !== before)
       verifications.push(async () => {
-        const selectedIndex = await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex)
+        const selectedIndex = await readControlState(context, page, field.backendNodeId, field.type, false)
         if (selectedIndex !== optionIndex) throw actionVerificationError(`${field.key} did not retain the selected option.`)
       })
     } else if (field.type === 'radio-group') {
-      const selectors = field.selectors ?? []
+      const backendNodeIds = field.backendNodeIds ?? []
       const selectedIndex = Number(value)
-      const selectedSelector = selectors[selectedIndex]
-      if (!selectedSelector) throw new Error(`${field.key} no longer references a visible radio choice.`)
-      const group = selectors.map((selector) => page.locator(selector))
-      const before = await Promise.all(group.map((radio) => radio.isChecked()))
-      await page.locator(selectedSelector).setChecked(true)
+      const selectedBackendNodeId = backendNodeIds[selectedIndex]
+      if (!selectedBackendNodeId) throw new Error(`${field.key} no longer references a visible radio choice.`)
+      const before = await Promise.all(backendNodeIds.map((backendNodeId) =>
+        readControlState(context, page, backendNodeId, 'radio', true)))
+      await writeControlState(context, page, selectedBackendNodeId, 'radio', true)
       changeChecks.push(async () => {
-        const after = await Promise.all(group.map((radio) => radio.isChecked()))
+        const after = await Promise.all(backendNodeIds.map((backendNodeId) =>
+          readControlState(context, page, backendNodeId, 'radio', false)))
         return after.some((checked, index) => checked !== before[index])
       })
       verifications.push(async () => {
-        const after = await Promise.all(group.map((radio) => radio.isChecked()))
+        const after = await Promise.all(backendNodeIds.map((backendNodeId) =>
+          readControlState(context, page, backendNodeId, 'radio', false)))
         if (!after[selectedIndex] || after.filter(Boolean).length !== 1) {
           throw actionVerificationError(`${field.key} did not retain one exclusive radio choice.`)
         }
       })
     } else if (field.type === 'checkbox' || field.type === 'radio') {
-      const before = await locator.isChecked()
-      await locator.setChecked(Boolean(value))
-      changeChecks.push(async () => await locator.isChecked() !== before)
+      const before = await readControlState(context, page, field.backendNodeId, field.type, true)
+      await writeControlState(context, page, field.backendNodeId, field.type, Boolean(value))
+      changeChecks.push(async () =>
+        await readControlState(context, page, field.backendNodeId, field.type, false) !== before)
       verifications.push(async () => {
-        if (await locator.isChecked() !== value) throw actionVerificationError(`${field.key} did not retain its checked state.`)
+        if (await readControlState(context, page, field.backendNodeId, field.type, false) !== value) {
+          throw actionVerificationError(`${field.key} did not retain its checked state.`)
+        }
       })
     } else {
       const stringValue = String(value)
-      const before = await locator.inputValue()
-      await locator.fill(stringValue)
-      changeChecks.push(async () => await locator.inputValue() !== before)
+      const before = await readControlState(context, page, field.backendNodeId, field.type, true)
+      await writeControlState(context, page, field.backendNodeId, field.type, stringValue)
+      changeChecks.push(async () =>
+        await readControlState(context, page, field.backendNodeId, field.type, false) !== before)
       verifications.push(async () => {
-        if (await locator.inputValue() !== stringValue) throw actionVerificationError(`${field.key} did not retain its prepared value.`)
+        if (await readControlState(context, page, field.backendNodeId, field.type, false) !== stringValue) {
+          throw actionVerificationError(`${field.key} did not retain its prepared value.`)
+        }
       })
     }
   }
@@ -550,18 +893,18 @@ async function applyAction(
 }
 
 async function actionWouldChange(
+  context: BrowserContext,
   page: Page,
   action: CapabilityAction,
   input: Record<string, unknown>,
 ): Promise<boolean> {
-  if (action.kind === 'prepare_search' && action.selector) {
-    return await page.locator(action.selector).inputValue() !== String(input.query)
+  if (action.kind === 'prepare_search' && action.backendNodeId && action.controlType) {
+    return await readControlState(context, page, action.backendNodeId, action.controlType, true) !== String(input.query)
   }
-  if (action.kind === 'filter' && action.selector) {
+  if (action.kind === 'filter' && action.backendNodeId) {
     const optionIndex = action.optionIndices?.[Number(input.optionIndex)]
     if (optionIndex === undefined) return true
-    return await page.locator(action.selector).evaluate((element) =>
-      (element as HTMLSelectElement).selectedIndex) !== optionIndex
+    return await readControlState(context, page, action.backendNodeId, 'select-one', true) !== optionIndex
   }
   if (action.kind === 'navigation') {
     const url = action.urls?.[Number(input.linkIndex)]
@@ -569,18 +912,17 @@ async function actionWouldChange(
   }
   for (const field of action.fields ?? []) {
     if (!Object.hasOwn(input, field.key)) continue
-    const locator = page.locator(field.selector)
     const value = input[field.key]
     if (field.type === 'select-one') {
       const optionIndex = field.optionIndices?.[Number(value)]
       if (optionIndex === undefined) return true
-      if (await locator.evaluate((element) => (element as HTMLSelectElement).selectedIndex) !== optionIndex) return true
+      if (await readControlState(context, page, field.backendNodeId, field.type, true) !== optionIndex) return true
     } else if (field.type === 'radio-group') {
-      const selectedSelector = field.selectors?.[Number(value)]
-      if (!selectedSelector || !await page.locator(selectedSelector).isChecked()) return true
+      const selectedBackendNodeId = field.backendNodeIds?.[Number(value)]
+      if (!selectedBackendNodeId || !await readControlState(context, page, selectedBackendNodeId, 'radio', true)) return true
     } else if (field.type === 'checkbox' || field.type === 'radio') {
-      if (await locator.isChecked() !== value) return true
-    } else if (await locator.inputValue() !== String(value)) {
+      if (await readControlState(context, page, field.backendNodeId, field.type, true) !== value) return true
+    } else if (await readControlState(context, page, field.backendNodeId, field.type, true) !== String(value)) {
       return true
     }
   }
@@ -611,7 +953,7 @@ export class WrapperProofService {
       throw new Error('The page left its validated origin.')
     }
     const [domEvidence, axEvidence, title, screenshot] = await Promise.all([
-      collectDomEvidence(session.page),
+      collectDomEvidence(session.context, session.page),
       collectAxEvidence(session.context, session.page),
       session.page.title(),
       session.page.screenshot({ type: 'jpeg', quality: 72, fullPage: false }),
@@ -638,8 +980,18 @@ export class WrapperProofService {
       title: cleanPageText(title, 180) || new URL(session.page.url()).hostname,
       screenshotDataUrl: screenshotDataUrl(screenshot),
       domEvidence: domEvidence.map(({
+        backendNodeId: _backendNodeId,
+        fieldKey: _fieldKey,
+        formId: _formId,
         optionValues: _optionValues,
         optionIndices: _optionIndices,
+        minimum: _minimum,
+        maximum: _maximum,
+        numericStep: _numericStep,
+        numericStepBase: _numericStepBase,
+        numericValues: _numericValues,
+        numericSample: _numericSample,
+        numericUnsupported: _numericUnsupported,
         ...evidence
       }) => evidence),
       axEvidence,
@@ -856,7 +1208,10 @@ export class WrapperProofService {
         )
       }
       validateActionInput(capability, input)
-      const wouldChange = await raceWithSignal(actionWouldChange(session.page, capability.action, input), signal)
+      const wouldChange = await raceWithSignal(
+        actionWouldChange(session.context, session.page, capability.action, input),
+        signal,
+      )
       throwIfAborted(signal)
       if (!wouldChange) {
         throw new WrapperServiceError(
@@ -881,7 +1236,7 @@ export class WrapperProofService {
           await raceWithSignal(waitFor(this.actionStartDelayMs), signal)
         }
         throwIfAborted(signal)
-        const evidence = await applyAction(session.page, capability.action, input)
+        const evidence = await applyAction(session.context, session.page, capability.action, input)
         session.networkMode = 'blocked'
         await raceWithSignal(session.context.setOffline(true), signal)
         await waitForNetworkQuiescence(session, signal)

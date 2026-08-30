@@ -56,7 +56,8 @@ The proof recognizes only:
 Page labels are displayed as explicitly untrusted evidence. They are never
 copied into tool titles, descriptions, parameter names, or parameter
 instructions. Form parameters use neutral `field_1`, `field_2`, and similar
-wrapper-owned keys; selectors and remote identifiers remain server-only.
+wrapper-owned keys; CDP backend-node references and remote identifiers remain
+server-only.
 Filter and navigation choices use numeric indices. Password, secret, token,
 email, phone, message, payment, account, upload, purchase, booking, publishing,
 deletion, and similar controls are excluded.

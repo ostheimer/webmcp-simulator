@@ -9,7 +9,7 @@ function control(overrides: Partial<DetectedControl>): DetectedControl {
     type: 'text',
     role: 'textbox',
     label: 'Visible field',
-    selector: '[data-webmcp-proof-id="control-1"]',
+    backendNodeId: 1,
     sensitive: false,
     ...overrides,
   }
@@ -110,8 +110,8 @@ describe('inferSafeCapabilities', () => {
 
   it('models one radio group as one exclusive indexed field', () => {
     const capabilities = inferSafeCapabilities([
-      control({ id: 'radio-1', selector: '[data-webmcp-proof-id="radio-1"]', fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option A' }),
-      control({ id: 'radio-2', selector: '[data-webmcp-proof-id="radio-2"]', fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option B' }),
+      control({ id: 'radio-1', backendNodeId: 11, fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option A' }),
+      control({ id: 'radio-2', backendNodeId: 12, fieldKey: 'heating_mode', formId: 'form-1', type: 'radio', label: 'Option B' }),
       control({ id: 'notes', fieldKey: 'details', formId: 'form-1', type: 'text', label: 'Details' }),
     ])
 
@@ -124,10 +124,7 @@ describe('inferSafeCapabilities', () => {
     })
     expect(form.sampleInput).toEqual({ field_1: 0, field_2: 'Sample' })
     expect(form.action.fields).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'radio-group', selectors: expect.arrayContaining([
-        '[data-webmcp-proof-id="radio-1"]',
-        '[data-webmcp-proof-id="radio-2"]',
-      ]) }),
+      expect.objectContaining({ type: 'radio-group', backendNodeIds: [11, 12] }),
     ]))
   })
 
@@ -150,6 +147,62 @@ describe('inferSafeCapabilities', () => {
       properties: { field_1: { minimum: 0, maximum: 0 } },
     })
     expect(form.sampleInput).toEqual({ field_1: 0, field_2: 'Sample' })
+  })
+
+  it('publishes numeric bounds, step grids, and executable samples from detected controls', () => {
+    const capabilities = inferSafeCapabilities([
+      control({
+        id: 'range-1',
+        fieldKey: 'range',
+        formId: 'form-1',
+        type: 'range',
+        minimum: 10,
+        maximum: 20,
+        numericStep: 2,
+        numericStepBase: 10,
+        numericSample: 10,
+      }),
+      control({ id: 'text-1', fieldKey: 'details', formId: 'form-1', type: 'text' }),
+    ])
+
+    const form = capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(form.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'number', minimum: 10, maximum: 20, multipleOf: 2 },
+      },
+    })
+    expect(form.sampleInput).toEqual({ field_1: 10, field_2: 'Sample' })
+    expect(form.action.fields?.[0]).toMatchObject({
+      minimum: 10,
+      maximum: 20,
+      numericStep: 2,
+      numericStepBase: 10,
+      numericSample: 10,
+    })
+  })
+
+  it('uses an exact enum for bounded numeric steps with a non-zero-aligned base', () => {
+    const capabilities = inferSafeCapabilities([
+      control({
+        id: 'number-1',
+        fieldKey: 'number',
+        formId: 'form-1',
+        type: 'number',
+        minimum: 0.1,
+        maximum: 0.5,
+        numericStep: 0.2,
+        numericStepBase: 0.1,
+        numericValues: [0.1, 0.3, 0.5],
+        numericSample: 0.1,
+      }),
+      control({ id: 'text-1', fieldKey: 'details', formId: 'form-1', type: 'text' }),
+    ])
+
+    const form = capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(form.inputSchema).toMatchObject({
+      properties: { field_1: { minimum: 0.1, maximum: 0.5, enum: [0.1, 0.3, 0.5] } },
+    })
+    expect(form.sampleInput.field_1).toBe(0.1)
   })
 
   it.each([

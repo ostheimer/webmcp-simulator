@@ -110,6 +110,11 @@ function sandboxConfigurationError(): WrapperServiceError {
   )
 }
 
+function normalizedBrowserSource(value: string | undefined): string | undefined {
+  const normalized = value?.trim()
+  return normalized || undefined
+}
+
 function defaultFactory(): SandboxFactory {
   return {
     async create(params) {
@@ -246,8 +251,12 @@ export class SandboxWrapperService {
   constructor(options: SandboxWrapperServiceOptions = {}) {
     this.factory = options.factory ?? defaultFactory()
     this.resolveTarget = options.resolveTarget ?? resolvePublicTarget
-    this.snapshotId = options.snapshotId ?? process.env.WEBMCP_SANDBOX_SNAPSHOT_ID
-    this.image = options.image ?? process.env.WEBMCP_SANDBOX_IMAGE
+    this.snapshotId = normalizedBrowserSource(
+      options.snapshotId ?? process.env.WEBMCP_SANDBOX_SNAPSHOT_ID,
+    )
+    this.image = normalizedBrowserSource(
+      options.image ?? process.env.WEBMCP_SANDBOX_IMAGE,
+    )
     this.loadWorkerAssets = options.loadWorkerAssets ?? defaultLoadWorkerAssets
     this.now = options.now ?? Date.now
   }

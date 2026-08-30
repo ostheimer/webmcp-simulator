@@ -36,6 +36,48 @@ function request(
   })
 }
 
+function rawRequest(
+  path: string,
+  body: BodyInit,
+  options: {
+    clientId: string
+    sourceIp: string
+    signal?: AbortSignal
+  },
+): Request {
+  return new Request(`https://wrapper.example${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-WebMCP-Client': options.clientId,
+      'X-Vercel-Forwarded-For': options.sourceIp,
+      Origin: 'https://wrapper.example',
+      'Sec-Fetch-Site': 'same-origin',
+    },
+    body,
+    signal: options.signal,
+    duplex: 'half',
+  } as RequestInit & { duplex: 'half' })
+}
+
+function pendingAnalyzeRequest(options: { clientId: string, sourceIp: string }) {
+  const encoder = new TextEncoder()
+  let finish!: () => void
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode('{"url":"https://public.example.at"'))
+      finish = () => {
+        controller.enqueue(encoder.encode('}'))
+        controller.close()
+      }
+    },
+  })
+  return {
+    request: rawRequest('/api/wrapper/analyze', body, options),
+    finish,
+  }
+}
+
 function backend(overrides: Partial<ProductionWrapperBackend> = {}): ProductionWrapperBackend {
   return {
     analyze: vi.fn(async () => ({ ok: true })),
@@ -128,6 +170,80 @@ describe('production wrapper API boundaries', () => {
       }, { clientId: 'rate_limit_client_00001' }), rateTarget)).status)
     }
     expect(statuses).toEqual([200, 200, 200, 200, 429])
+  })
+
+  it('reserves a trusted source before streamed body parsing and releases every parsing failure', async () => {
+    const analyze = vi.fn(async () => ({ ok: true }))
+    const target = backend({ analyze })
+    const sourceIp = '198.51.100.91'
+    const firstBody = pendingAnalyzeRequest({ clientId: 'streaming_client_000001', sourceIp })
+    const secondBody = pendingAnalyzeRequest({ clientId: 'streaming_client_000002', sourceIp })
+    const first = handleAnalyzeRequest(firstBody.request, target)
+    const second = await handleAnalyzeRequest(secondBody.request, target)
+
+    expect(second.status).toBe(409)
+    expect(await second.json()).toMatchObject({ code: 'analysis_in_progress' })
+    expect(analyze).not.toHaveBeenCalled()
+    secondBody.finish()
+    firstBody.finish()
+    expect((await first).status).toBe(200)
+    expect(analyze).toHaveBeenCalledOnce()
+
+    const invalidSource = '198.51.100.92'
+    const invalid = await handleAnalyzeRequest(rawRequest(
+      '/api/wrapper/analyze',
+      '{',
+      { clientId: 'invalid_json_client_0001', sourceIp: invalidSource },
+    ), target)
+    expect(invalid.status).toBe(400)
+    expect(await invalid.json()).toMatchObject({ code: 'invalid_json' })
+    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, { clientId: 'invalid_json_client_0002', sourceIp: invalidSource }), target)).status).toBe(200)
+
+    const validationSource = '198.51.100.95'
+    const invalidUrl = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 42,
+    }, { clientId: 'invalid_url_client_00001', sourceIp: validationSource }), target)
+    expect(invalidUrl.status).toBe(400)
+    expect(await invalidUrl.json()).toMatchObject({ code: 'invalid_url' })
+    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, { clientId: 'invalid_url_client_00002', sourceIp: validationSource }), target)).status).toBe(200)
+
+    const bodyLimitSource = '198.51.100.93'
+    const oversized = await handleAnalyzeRequest(rawRequest(
+      '/api/wrapper/analyze',
+      'x'.repeat(WRAPPER_MAX_REQUEST_BODY_BYTES + 1),
+      { clientId: 'body_release_client_001', sourceIp: bodyLimitSource },
+    ), target)
+    expect(oversized.status).toBe(413)
+    expect(await oversized.json()).toMatchObject({ code: 'body_limit' })
+    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, { clientId: 'body_release_client_002', sourceIp: bodyLimitSource }), target)).status).toBe(200)
+  })
+
+  it('releases the source reservation after an aborted backend analysis', async () => {
+    const controller = new AbortController()
+    const analyze = vi.fn(async (_url: string, signal?: AbortSignal) => {
+      await new Promise((_resolve, reject) => signal?.addEventListener('abort', () => {
+        reject(new DOMException('Aborted', 'AbortError'))
+      }, { once: true }))
+    })
+    const target = backend({ analyze })
+    const sourceIp = '198.51.100.94'
+    const first = handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, { clientId: 'abort_analysis_client_01', sourceIp, signal: controller.signal }), target)
+    await vi.waitFor(() => expect(analyze).toHaveBeenCalledOnce())
+    controller.abort()
+    expect((await first).status).toBe(499)
+
+    const retry = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, { clientId: 'abort_analysis_client_02', sourceIp }), backend())
+    expect(retry.status).toBe(200)
   })
 
   it('does not let rotated browser client identifiers bypass the trusted-source rate guard', async () => {

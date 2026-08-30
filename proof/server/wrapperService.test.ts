@@ -50,6 +50,20 @@ async function startFixture(): Promise<Fixture> {
         ">`)
       return
     }
+    if (requestUrl === '/catalog-shift') {
+      response.end(`<!doctype html><title>Catalog shift fixture</title>
+        <input id="initial-search" data-webmcp-proof-id="copied-marker" type="search" aria-label="Initial search">
+        <input id="replacement-search" data-webmcp-proof-id="copied-marker" type="search" aria-label="Replacement search" hidden>
+        <script>
+          initialSearch = document.getElementById('initial-search');
+          replacementSearch = document.getElementById('replacement-search');
+          initialSearch.addEventListener('input', () => {
+            initialSearch.hidden = true;
+            replacementSearch.hidden = false;
+          });
+        </script>`)
+      return
+    }
     if (requestUrl === '/next') {
       response.end(`<!doctype html><title>Second page</title>
         <main><h1>Second page</h1><input type="search" aria-label="Search destination"></main>`)
@@ -82,6 +96,14 @@ async function startFixture(): Promise<Fixture> {
         <form><input type="week" name="start_week" aria-label="Start week"><input type="text" name="week_details" aria-label="Week details"></form>`)
       return
     }
+    if (requestUrl === '/numeric-bounds') {
+      response.end(`<!doctype html><title>Numeric bounds</title>
+        <form><input type="range" min="10" max="20" step="2" aria-label="Bounded range"><input type="text" aria-label="Range details"></form>
+        <form><input type="number" max="0.7" step="0.2" aria-label="Bounded decimal"><input type="text" aria-label="Decimal details"></form>
+        <form><input type="range" min="10" max="20" step="0" aria-label="Zero step"><input type="text" aria-label="Zero step details"></form>
+        <form><input type="range" min="10" max="20" step="-2" aria-label="Negative step"><input type="text" aria-label="Negative step details"></form>`)
+      return
+    }
     if (requestUrl === '/visibility') {
       response.end(`<!doctype html><title>Visibility fixture</title>
         <input type="search" aria-label="Visible search">
@@ -106,7 +128,45 @@ async function startFixture(): Promise<Fixture> {
           <input type="text" name="billingAddress" aria-label="Neutral field H">
           <input type="text" name="userPassword" aria-label="Neutral field I">
           <input type="text" name="userSSNValue" aria-label="Neutral field J">
+          <input type="text" id="creditCard" aria-label="Neutral field K">
+          <input type="text" id="userCredential" aria-label="Neutral field L">
+          <input type="text" id="apiToken" aria-label="Neutral field M">
         </form>`)
+      return
+    }
+    if (requestUrl === '/hostile-main-realm') {
+      response.end(`<!doctype html><title>Hostile main realm</title>
+        <form>
+          <input type="text" name="safe_one" aria-label="First safe value">
+          <input type="text" name="safe_two" aria-label="Second safe value">
+          <input type="text" id="creditCard" aria-label="Reference">
+          <input type="password" id="userCredential" aria-label="Hidden reference" style="display:none">
+        </form>
+        <script>
+          const replaceValue = (owner, key, value) => {
+            try { Object.defineProperty(owner, key, { configurable: true, value }); } catch {}
+          };
+          const replaceGetter = (owner, key, value) => {
+            try { Object.defineProperty(owner, key, { configurable: true, get: () => value }); } catch {}
+          };
+          replaceValue(Document.prototype, 'querySelectorAll', function () { return []; });
+          replaceValue(Element.prototype, 'querySelector', function () { return null; });
+          replaceValue(Element.prototype, 'getAttribute', function (name) {
+            return name === 'aria-label' ? 'Neutral reference' : '';
+          });
+          replaceValue(Element.prototype, 'hasAttribute', function () { return false; });
+          replaceValue(Element.prototype, 'getClientRects', function () { return [{ width: 120, height: 24 }]; });
+          replaceValue(window, 'getComputedStyle', function () {
+            return { display: 'block', visibility: 'visible', opacity: '1' };
+          });
+          replaceGetter(HTMLElement.prototype, 'hidden', false);
+          replaceGetter(HTMLInputElement.prototype, 'disabled', false);
+          replaceGetter(HTMLInputElement.prototype, 'readOnly', false);
+          replaceGetter(HTMLInputElement.prototype, 'type', 'text');
+          replaceGetter(HTMLInputElement.prototype, 'name', '');
+          replaceGetter(HTMLInputElement.prototype, 'labels', []);
+          replaceGetter(Element.prototype, 'id', '');
+        </script>`)
       return
     }
     if (requestUrl === '/unsafe-links') {
@@ -377,6 +437,90 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
+  it('publishes executable numeric samples within native bounds and step grids', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/numeric-bounds`)
+    const boundedRange = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(boundedRange.inputSchema).toMatchObject({
+      properties: { field_1: { type: 'number', minimum: 10, maximum: 20, multipleOf: 2 } },
+    })
+    expect(boundedRange.sampleInput.field_1).toBe(10)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      boundedRange.name,
+      { field_1: 11 },
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400 })
+    const rangeResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      boundedRange.name,
+      boundedRange.sampleInput,
+    )
+    expect(rangeResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = rangeResult.analysis
+
+    const boundedDecimal = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    expect(boundedDecimal.inputSchema).toMatchObject({
+      properties: { field_1: { type: 'number', maximum: 0.7, multipleOf: 0.2 } },
+    })
+    expect(boundedDecimal.sampleInput.field_1).toBe(0.6)
+    const decimalResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      boundedDecimal.name,
+      boundedDecimal.sampleInput,
+    )
+    expect(decimalResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = decimalResult.analysis
+
+    for (const toolName of ['prepare_visible_form_3', 'prepare_visible_form_4']) {
+      const invalidStepFallback = analysis.capabilities.find(({ name }) => name === toolName)!
+      expect(invalidStepFallback.inputSchema).toMatchObject({
+        properties: { field_1: { minimum: 10, maximum: 20, multipleOf: 1 } },
+      })
+      expect(invalidStepFallback.sampleInput.field_1).toBe(10)
+      const result = await service.execute(
+        analysis.sessionId,
+        analysis.sessionToken,
+        invalidStepFallback.name,
+        invalidStepFallback.sampleInput,
+      )
+      expect(result.structuredContent.targetStateVerified).toBe(true)
+      analysis = result.analysis
+    }
+  })
+
+  it('keeps follow-up actions usable when a marked control is hidden and replaced', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/catalog-shift`)
+    const firstSearch = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const shifted = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      firstSearch.name,
+      { query: 'first' },
+    )
+    expect(shifted.analysis.domEvidence.map(({ label }) => label)).toEqual(['Replacement search'])
+    expect(JSON.stringify(shifted.analysis)).not.toContain('data-webmcp-proof-id')
+
+    const replacementSearch = shifted.analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      replacementSearch.name,
+      { query: 'second' },
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
+  })
+
   it('excludes transparent and zero-geometry controls from visible evidence and capabilities', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -408,6 +552,9 @@ describe('WrapperProofService security boundaries', () => {
       'Neutral field H',
       'Neutral field I',
       'Neutral field J',
+      'Neutral field K',
+      'Neutral field L',
+      'Neutral field M',
     ])
 
     const linkAnalysis = await service.analyze(`${fixture.origin}/unsafe-links`)
@@ -416,6 +563,33 @@ describe('WrapperProofService security boundaries', () => {
     const safeLink = linkAnalysis.domEvidence.find(({ id }) => navigation.evidenceIds.includes(id))
     expect(safeLink?.label).toBe('History')
     expect(linkAnalysis.domEvidence.filter(({ type, sensitive }) => type === 'link' && sensitive)).toHaveLength(6)
+  })
+
+  it('classifies DOM evidence in an isolated realm and keeps backend node identities server-only', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/hostile-main-realm`)
+
+    expect(analysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))).toEqual([
+      { label: 'First safe value', sensitive: false },
+      { label: 'Second safe value', sensitive: false },
+      { label: 'Reference', sensitive: true },
+    ])
+    const form = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    expect(Object.keys((form.inputSchema.properties ?? {}) as object)).toEqual(['field_1', 'field_2'])
+    const serialized = JSON.stringify(analysis)
+    expect(serialized).not.toMatch(/creditCard|userCredential|backendNodeId|data-webmcp-proof-id/)
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
   })
 
   it('rejects repeated search and filter values before mutation while preserving the session', async () => {
@@ -487,7 +661,7 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toThrow('session expired')
   })
 
-  it('verifies the original marked control before hostile DOM reordering can rewrite selectors', async () => {
+  it('verifies the original backend node when hostile DOM reordering inserts a decoy', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
