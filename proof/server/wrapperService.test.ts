@@ -1200,6 +1200,22 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/card-verification-field-safety') {
+      response.end(`<!doctype html><title>Card verification field safety</title>
+        <form id="sensitive-card-verification-form">
+          <input type="text" name="reference_one" aria-label="C&#x200B;VV">
+          <input type="text" name="reference_two" aria-label="ＣＶＣ">
+        </form>
+        <form id="neutral-verification-boundary-form">
+          <input id="neutral-verification-one" type="text" name="cvvalue_reference" aria-label="CVValue reference">
+          <input type="text" name="cvcustom_note" aria-label="CVCustom note">
+        </form>
+        <form id="late-verification-form">
+          <input id="late-verification-one" type="text" name="project_reference" aria-label="Project reference">
+          <input id="late-verification-two" type="text" name="project_note" aria-label="Project note">
+        </form>`)
+      return
+    }
     if (requestUrl === '/visible-select-options') {
       response.end(`<!doctype html><title>Visible select options</title>
         <select id="visible-options-filter" aria-label="Visibility filter" onchange="document.title=this.value">
@@ -1480,6 +1496,28 @@ async function startFixture(): Promise<Fixture> {
           constructed.replaceSync('.constructed-control { color: rgb(20, 30, 40); }');
           document.adoptedStyleSheets = [...document.adoptedStyleSheets, constructed];
           window.fixtureConstructedSheet = constructed;
+        </script>`)
+      return
+    }
+    if (requestUrl === '/analysis-scroll-stability') {
+      response.end(`<!doctype html><title>Analysis scroll stability</title>
+        <style>
+          body { min-height: 2200px; margin: 0; }
+          #main-scroll-search { position: absolute; left: 30px; top: 360px; width: 220px; height: 36px; }
+          #nested-scroll-host { position: absolute; left: 30px; top: 470px; width: 420px; height: 180px; overflow: auto; border: 1px solid #333; }
+          #nested-scroll-search { display: block; width: 220px; height: 36px; margin-top: 60px; }
+          #nested-scroll-tail { height: 600px; }
+        </style>
+        <input id="main-scroll-search" type="search" aria-label="Main scroll search">
+        <div id="nested-scroll-host">
+          <input id="nested-scroll-search" type="search" aria-label="Nested scroll search">
+          <div id="nested-scroll-tail"></div>
+        </div>
+        <script>
+          addEventListener('load', () => {
+            scrollTo(0, 260);
+            document.getElementById('nested-scroll-host').scrollTop = 20;
+          });
         </script>`)
       return
     }
@@ -1871,6 +1909,7 @@ function createService(options: {
   maxTargetSessionBytes?: number
   beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
+  afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
 } = {}) {
   const resolveTarget = async (value: string): Promise<PublicTarget> => {
@@ -1893,6 +1932,7 @@ function createService(options: {
     maxTargetSessionBytes: options.maxTargetSessionBytes,
     beforeDomEvidenceCollection: options.beforeDomEvidenceCollection,
     beforeAnalysisScreenshot: options.beforeAnalysisScreenshot,
+    afterAnalysisScreenshot: options.afterAnalysisScreenshot,
     beforeRadioGroupWrite: options.beforeRadioGroupWrite,
   })
 }
@@ -3805,6 +3845,83 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
+  it('retries viewport capture after main and nested scroll-out restoration while preserving stable pre-scroll', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    let mainBaseline = 0
+    let nestedBaseline = 0
+    const service = createService({
+      beforeAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        const baseline = await page.evaluate(async () => {
+          const scroller = document.querySelector<HTMLElement>('#nested-scroll-host')!
+          const current = { main: window.scrollY, nested: scroller.scrollTop }
+          window.scrollTo(0, 1_300)
+          scroller.scrollTop = 500
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          return current
+        })
+        mainBaseline = baseline.main
+        nestedBaseline = baseline.nested
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate(async ({ main, nested }) => {
+          window.scrollTo(0, main)
+          document.querySelector<HTMLElement>('#nested-scroll-host')!.scrollTop = nested
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        }, { main: mainBaseline, nested: nestedBaseline })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/analysis-scroll-stability`)
+    const page = internalSession(service, analysis.sessionId).page
+    expect(captureCalls).toBe(2)
+    expect(await page.evaluate(() => ({
+      main: window.scrollY,
+      nested: document.querySelector<HTMLElement>('#nested-scroll-host')!.scrollTop,
+    }))).toEqual({ main: 260, nested: 20 })
+    expect(analysis.domEvidence.filter(({ label }) =>
+      label === 'Main scroll search' || label === 'Nested scroll search')).toHaveLength(2)
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_search')).toHaveLength(1)
+    expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
+  })
+
+  it('fails closed after bounded retries when a relevant nested scroller keeps moving during capture', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    let nestedBaseline = 0
+    const service = createService({
+      beforeAnalysisScreenshot: async (page) => {
+        captureCalls += 1
+        nestedBaseline = await page.locator('#nested-scroll-host').evaluate(async (scroller) => {
+          const current = scroller.scrollTop
+          scroller.scrollTop = 500
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          return current
+        })
+      },
+      afterAnalysisScreenshot: async (page) => {
+        await page.locator('#nested-scroll-host').evaluate(async (scroller, baseline) => {
+          scroller.scrollTop = baseline
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        }, nestedBaseline)
+      },
+    })
+    services.push(service)
+
+    await expect(service.analyze(`${fixture.origin}/analysis-scroll-stability`)).rejects.toMatchObject({
+      code: 'unsupported_page',
+      status: 422,
+    })
+    expect(captureCalls).toBe(2)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
   it('retries an analysis capture after screenshot-bound DOM drift and publishes only the stable state', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -4046,6 +4163,68 @@ describe('WrapperProofService security boundaries', () => {
     analysis = lateResult.analysis
 
     const neutralEvidenceId = analysis.domEvidence.find(({ label }) => label === 'Bicycle reference')!.id
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidenceId))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('classifies normalized card-verification tokens without matching neutral word substrings', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/card-verification-field-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(analysis.domEvidence.find(({ label }) => label.includes('C\u200bVV'))).toMatchObject({ sensitive: true })
+    expect(analysis.domEvidence.find(({ label }) => label === 'ＣＶＣ')).toMatchObject({ sensitive: true })
+    expect(analysis.domEvidence.find(({ label }) => label === 'CVValue reference')).toMatchObject({ sensitive: false })
+    expect(analysis.domEvidence.find(({ label }) => label === 'CVCustom note')).toMatchObject({ sensitive: false })
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+
+    const lateEvidenceId = analysis.domEvidence.find(({ label }) => label === 'Project reference')!.id
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidenceId))!
+    await page.locator('#late-verification-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'C\u200bVV')
+    })
+    await page.locator('#late-verification-two').evaluate((input) => {
+      input.setAttribute('aria-label', 'ＣＶＣ')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-verification-one').inputValue()).toBe('')
+    expect(await page.locator('#late-verification-two').inputValue()).toBe('')
+
+    await page.locator('#late-verification-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'Project reference')
+    })
+    await page.locator('#late-verification-two').evaluate((input) => {
+      input.setAttribute('aria-label', 'Project note')
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+
+    const neutralEvidenceId = analysis.domEvidence.find(({ label }) => label === 'CVValue reference')!.id
     const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidenceId))!
     await expect(service.execute(
       analysis.sessionId,

@@ -40,7 +40,8 @@ const CAPTURE_VIEWPORT_HEIGHT = 900
 const MAX_SAFETY_EVIDENCE_LENGTH = 4_096
 const MAX_TOTAL_SAFETY_EVIDENCE_LENGTH = 24 * 1_024
 const MAX_ANALYSIS_CAPTURE_ATTEMPTS = 2
-const UNSAFE_FIELD_HINT = /\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
+const MAX_ANALYSIS_SCROLL_NODES = 512
+const UNSAFE_FIELD_HINT = /(?:^|\s)(?:cvc|cvv)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|order|ordering|purchase|purchasing|reservation|reserve|subscribe|termin|bestellen|bestellung|buchen|buchung|kaufen|kasse|reservieren|reservierung|warenkorb)\b/i
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
   'additional-name',
@@ -145,6 +146,8 @@ export interface WrapperProofServiceOptions {
   beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   /** Test-only hook for deterministic DOM drift at the capture boundary. */
   beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
+  /** Test-only hook for deterministic viewport drift after screenshot capture. */
+  afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   /** Test-only hook for deterministic radio-group drift immediately before the atomic write. */
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
 }
@@ -2108,7 +2111,15 @@ async function isCdpPaintVisible(
   objectGroup: string,
 ): Promise<boolean> {
   let quads: number[][]
+  let viewportPageX = 0
+  let viewportPageY = 0
   try {
+    const metrics = await cdp.send('Page.getLayoutMetrics') as {
+      cssVisualViewport?: { pageX?: number, pageY?: number }
+    }
+    viewportPageX = Number(metrics.cssVisualViewport?.pageX ?? 0)
+    viewportPageY = Number(metrics.cssVisualViewport?.pageY ?? 0)
+    if (!Number.isFinite(viewportPageX) || !Number.isFinite(viewportPageY)) return false
     const result = await cdp.send('DOM.getContentQuads', { backendNodeId }) as { quads?: number[][] }
     quads = result.quads ?? []
   } catch {
@@ -2130,8 +2141,8 @@ async function isCdpPaintVisible(
         let hitBackendNodeId: number | undefined
         try {
           const hit = await cdp.send('DOM.getNodeForLocation', {
-            x,
-            y,
+            x: x + viewportPageX,
+            y: y + viewportPageY,
             ignorePointerEventsNone: true,
           }) as { backendNodeId?: number }
           hitBackendNodeId = hit.backendNodeId
@@ -2239,6 +2250,9 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
 interface AnalysisCaptureGuardSnapshot {
   mutationCount: number
   navigationCount: number
+  scrollChanged: boolean
+  scrollOverflow: boolean
+  scrollStateMismatch: boolean
   styleSheetChangeCount: number
   url: string
   title: string
@@ -2280,9 +2294,44 @@ async function createAnalysisCaptureGuard(
   cdp.on('CSS.styleSheetRemoved', recordStyleSheetChange)
   const initialized = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
-      const state = { mutationCount: 0, observer: null, watched: [] };
+      const state = {
+        mutationCount: 0,
+        observer: null,
+        watched: [],
+        controls: [],
+        scrollNodes: [],
+        scrollBaselines: [],
+        pendingScrollTargets: [],
+        scrollChanged: false,
+        scrollOverflow: false,
+        scrollArmed: false,
+        documentScrollListener: null,
+        windowScrollListener: null,
+      };
       const Observer = globalThis.MutationObserver;
-      if (typeof Observer !== 'function' || !document.documentElement) return false;
+      const addEventListener = EventTarget.prototype.addEventListener;
+      if (typeof Observer !== 'function' || typeof addEventListener !== 'function' || !document.documentElement) return false;
+      const recordScroll = (event) => {
+        const target = event?.target;
+        if (state.scrollArmed) {
+          if (
+            target === globalThis
+            || target === document
+            || state.scrollNodes.some((node) => node === target)
+          ) state.scrollChanged = true;
+          return;
+        }
+        if (!target || state.pendingScrollTargets.some((node) => node === target)) return;
+        if (state.pendingScrollTargets.length >= ${MAX_ANALYSIS_SCROLL_NODES}) {
+          state.scrollOverflow = true;
+          return;
+        }
+        state.pendingScrollTargets.push(target);
+      };
+      state.documentScrollListener = recordScroll;
+      state.windowScrollListener = recordScroll;
+      addEventListener.call(document, 'scroll', state.documentScrollListener, true);
+      addEventListener.call(globalThis, 'scroll', state.windowScrollListener, true);
       state.observer = new Observer((records) => {
         const contains = Node.prototype.contains;
         for (const record of records) {
@@ -2325,8 +2374,28 @@ async function createAnalysisCaptureGuard(
           const state = globalThis[${JSON.stringify(storageKey)}];
           const rawUrl = String(location.href ?? '');
           const rawTitle = String(document.title ?? '');
+          const scrollLeftGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')?.get;
+          const scrollTopGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')?.get;
+          const isConnectedGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected')?.get;
+          const scrollStateMismatch = !state
+            || !Array.isArray(state.scrollBaselines)
+            || !scrollLeftGetter
+            || !scrollTopGetter
+            || !isConnectedGetter
+            || state.scrollBaselines.some(([node, left, top]) => {
+              if (!(node instanceof Element) || !isConnectedGetter.call(node)) return true;
+              try {
+                return Number(scrollLeftGetter.call(node)) !== left
+                  || Number(scrollTopGetter.call(node)) !== top;
+              } catch {
+                return true;
+              }
+            });
           resolve({
             mutationCount: Number(state?.mutationCount ?? -1),
+            scrollChanged: Boolean(state?.scrollChanged),
+            scrollOverflow: Boolean(state?.scrollOverflow),
+            scrollStateMismatch,
             url: rawUrl.slice(0, 4097),
             title: rawTitle.slice(0, 4097),
             overflow: rawUrl.length > 4096 || rawTitle.length > 4096,
@@ -2358,6 +2427,7 @@ async function createAnalysisCaptureGuard(
             const state = globalThis[${JSON.stringify(storageKey)}];
             if (!state || !(this instanceof Element)) return false;
             state.watched.push(this);
+            state.controls.push(this);
             return true;
           }`,
           objectId,
@@ -2374,11 +2444,57 @@ async function createAnalysisCaptureGuard(
           if (!state?.observer) return false;
           const getAttribute = Element.prototype.getAttribute;
           const getElementById = Document.prototype.getElementById;
+          const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get;
+          const scrollingElementGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'scrollingElement')?.get;
+          const scrollLeftGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')?.get;
+          const scrollTopGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')?.get;
+          if (!parentElementGetter || !scrollingElementGetter || !scrollLeftGetter || !scrollTopGetter) {
+            state.scrollOverflow = true;
+            return false;
+          }
           const pushUnique = (node) => {
             if (node instanceof Node && !state.watched.includes(node)) state.watched.push(node);
           };
+          const pushScrollNode = (node) => {
+            if (!(node instanceof Element) || state.scrollNodes.includes(node)) return;
+            if (state.scrollNodes.length >= ${MAX_ANALYSIS_SCROLL_NODES}) {
+              state.scrollOverflow = true;
+              return;
+            }
+            state.scrollNodes.push(node);
+          };
+          pushScrollNode(scrollingElementGetter.call(document));
+          for (const control of state.controls.slice(0, ${WRAPPER_MAX_DOM_EVIDENCE})) {
+            let current = control;
+            let depth = 0;
+            while (
+              current instanceof Element
+              && depth < ${MAX_ANALYSIS_SCROLL_NODES}
+              && !state.scrollOverflow
+            ) {
+              pushScrollNode(current);
+              current = parentElementGetter.call(current);
+              depth += 1;
+            }
+            if (current instanceof Element) state.scrollOverflow = true;
+          }
+          state.scrollBaselines = state.scrollNodes.map((node) => [
+            node,
+            Number(scrollLeftGetter.call(node)),
+            Number(scrollTopGetter.call(node)),
+          ]);
+          if (state.scrollBaselines.some(([, left, top]) => !Number.isFinite(left) || !Number.isFinite(top))) {
+            state.scrollOverflow = true;
+          }
+          if (state.pendingScrollTargets.some((target) =>
+            target === globalThis
+            || target === document
+            || state.scrollNodes.some((node) => node === target)
+          )) state.scrollChanged = true;
+          state.pendingScrollTargets = [];
+          state.scrollArmed = true;
           pushUnique(document.querySelector('title'));
-          for (const control of state.watched.slice(0, ${WRAPPER_MAX_DOM_EVIDENCE})) {
+          for (const control of state.controls.slice(0, ${WRAPPER_MAX_DOM_EVIDENCE})) {
             if (!(control instanceof Element)) continue;
             for (const attribute of ['aria-labelledby', 'aria-describedby']) {
               const raw = String(getAttribute.call(control, attribute) ?? '').slice(0, ${MAX_SAFETY_EVIDENCE_LENGTH + 1});
@@ -2416,6 +2532,13 @@ async function createAnalysisCaptureGuard(
         expression: `(() => {
           const state = globalThis[${JSON.stringify(storageKey)}];
           state?.observer?.disconnect();
+          const removeEventListener = EventTarget.prototype.removeEventListener;
+          if (state?.documentScrollListener && typeof removeEventListener === 'function') {
+            removeEventListener.call(document, 'scroll', state.documentScrollListener, true);
+          }
+          if (state?.windowScrollListener && typeof removeEventListener === 'function') {
+            removeEventListener.call(globalThis, 'scroll', state.windowScrollListener, true);
+          }
           delete globalThis[${JSON.stringify(storageKey)}];
         })()`,
         contextId: executionContextId,
@@ -3645,6 +3768,7 @@ export class WrapperProofService {
   private readonly maxTargetSessionBytes: number
   private readonly beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   private readonly beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
+  private readonly afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   private readonly beforeRadioGroupWrite?: (page: Page) => Promise<void>
 
   constructor(options: WrapperProofServiceOptions = {}) {
@@ -3661,6 +3785,7 @@ export class WrapperProofService {
     this.maxTargetSessionBytes = options.maxTargetSessionBytes ?? WRAPPER_MAX_TARGET_SESSION_BYTES
     this.beforeDomEvidenceCollection = options.beforeDomEvidenceCollection
     this.beforeAnalysisScreenshot = options.beforeAnalysisScreenshot
+    this.afterAnalysisScreenshot = options.afterAnalysisScreenshot
     this.beforeRadioGroupWrite = options.beforeRadioGroupWrite
   }
 
@@ -3828,6 +3953,9 @@ export class WrapperProofService {
         const before = await guard.snapshot()
         if (
           before.overflow
+          || before.scrollChanged
+          || before.scrollOverflow
+          || before.scrollStateMismatch
           || !isSameOriginHttpUrl(before.url, session.targetOrigin)
           || isConsequentialNavigationUrl(before.url)
         ) throw new Error('The isolated analysis capture started from an unsafe page state.')
@@ -3837,6 +3965,7 @@ export class WrapperProofService {
         await guard.arm(candidateDomEvidence.map(({ backendNodeId }) => backendNodeId))
         await this.beforeAnalysisScreenshot?.(session.page, attempt)
         const candidateScreenshot = await guard.screenshot()
+        await this.afterAnalysisScreenshot?.(session.page, attempt)
         await revalidateDomEvidence(session.context, session.page, candidateDomEvidence)
         const candidateAxEvidence = await collectAxEvidence(
           session.context,
@@ -3850,6 +3979,9 @@ export class WrapperProofService {
           after.overflow
           || after.mutationCount !== 0
           || after.navigationCount !== 0
+          || after.scrollChanged
+          || after.scrollOverflow
+          || after.scrollStateMismatch
           || after.styleSheetChangeCount !== before.styleSheetChangeCount
           || after.url !== before.url
           || after.title !== before.title
