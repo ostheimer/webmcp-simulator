@@ -112,8 +112,12 @@ metadata.
   DOM, cross-origin frames, or interactions that require authentication.
 - Classification examines at most 5,000 DOM elements and retains at most 80
   controls. Per-control option, label, ARIA-reference, text-node, and safety-text
-  work is separately bounded; accessibility evidence uses partial CDP queries
-  only for retained controls. Overflow excludes the affected interaction.
+  work is separately bounded; Selects inspect at most 200 native options, retain
+  at most 30 enabled options, and fail closed when either capture is incomplete.
+  Multi-select and indeterminate-checkbox states are excluded and revalidated
+  before every isolated state operation. Accessibility evidence uses partial
+  CDP queries only for retained controls. Overflow excludes the affected
+  interaction.
 - Each successful navigation returns the current final URL, re-collects DOM and
   accessibility evidence, replaces the server capability map, and re-registers
   the destination tool catalog before the updated page is shown.

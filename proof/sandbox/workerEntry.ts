@@ -63,7 +63,10 @@ const config = JSON.parse(await readFile(configPath, 'utf8')) as WorkerConfig
 process.umask(0o077)
 await rm(config.socketPath, { force: true })
 
-const service = new WrapperProofService({ resolveTarget: async () => config.target })
+const service = new WrapperProofService({
+  resolveTarget: async () => config.target,
+  sessionExpiresAtMs: config.expiresAtMs,
+})
 let internalSessionId = ''
 let internalSessionToken = ''
 let closing = false
@@ -143,6 +146,15 @@ const server = createServer(async (request, response) => {
         abortController.signal,
         body.capabilityId,
       )
+      if (Date.now() >= config.expiresAtMs) {
+        await closeWorker()
+        throw new WrapperServiceError(
+          'session_expired',
+          'The isolated browser session expired.',
+          410,
+          { sessionInvalidated: true },
+        )
+      }
       sendJson(response, 200, {
         result,
         // This worker-owned value is the outer Sandbox/config deadline. The

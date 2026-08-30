@@ -385,6 +385,56 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/select-boundary-contracts') {
+      response.end(`<!doctype html><title>Select boundary contracts</title>
+        <select id="exact-boundary" aria-label="Boundary filter"></select>
+        <select id="enabled-overflow" aria-label="Overflow filter"></select>
+        <select id="initial-multiple" aria-label="Multiple filter" multiple>
+          <option value="one" selected>One</option>
+          <option value="two" selected>Two</option>
+          <option value="three">Three</option>
+        </select>
+        <input id="safe-select-boundary-search" type="search" aria-label="Safe boundary search">
+        <script>
+          const exact = document.getElementById('exact-boundary');
+          for (let index = 0; index < 30; index += 1) {
+            const option = document.createElement('option');
+            option.value = 'exact-' + index;
+            option.textContent = 'Exact option ' + index;
+            exact.append(option);
+          }
+          const overflow = document.getElementById('enabled-overflow');
+          for (let index = 0; index < 31; index += 1) {
+            const option = document.createElement('option');
+            option.value = 'value-' + index;
+            option.textContent = index === 30 ? 'Credit card' : 'Safe option ' + index;
+            if (index === 30) option.selected = true;
+            overflow.append(option);
+          }
+        </script>`)
+      return
+    }
+    if (requestUrl === '/late-control-contracts') {
+      response.end(`<!doctype html><title>Late control contracts</title>
+        <select id="late-multiple" aria-label="Late select filter">
+          <option value="one" selected>One</option><option value="two">Two</option>
+        </select>
+        <form id="late-checkbox-form">
+          <input id="late-checkbox" type="checkbox" aria-label="Late checkbox">
+          <input id="late-checkbox-detail" type="text" aria-label="Late checkbox detail">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/initial-indeterminate') {
+      response.end(`<!doctype html><title>Initial indeterminate checkbox</title>
+        <form>
+          <input id="initial-indeterminate" type="checkbox" aria-label="Indeterminate choice">
+          <input type="text" aria-label="Indeterminate detail">
+        </form>
+        <input id="safe-indeterminate-search" type="search" aria-label="Safe indeterminate search">
+        <script>document.getElementById('initial-indeterminate').indeterminate = true</script>`)
+      return
+    }
     if (requestUrl === '/aggregate-safety-budget') {
       response.end(`<!doctype html><title>Aggregate safety budget</title>
         <input id="label-budget" type="text" aria-label="Label budget">
@@ -781,6 +831,7 @@ async function startFixture(): Promise<Fixture> {
 function createService(options: {
   actionStartDelayMs?: number
   actionSettleMs?: number
+  sessionExpiresAtMs?: number
   maxTargetResourceBytes?: number
   maxTargetSessionBytes?: number
 } = {}) {
@@ -798,6 +849,7 @@ function createService(options: {
     resolveTarget,
     actionStartDelayMs: options.actionStartDelayMs,
     actionSettleMs: options.actionSettleMs ?? 80,
+    sessionExpiresAtMs: options.sessionExpiresAtMs,
     maxTargetResourceBytes: options.maxTargetResourceBytes,
     maxTargetSessionBytes: options.maxTargetSessionBytes,
   })
@@ -1101,7 +1153,7 @@ describe('WrapperProofService security boundaries', () => {
       { label: 'Category filter', sensitive: true },
       { label: 'Sort filter', sensitive: true },
       { label: 'Status filter', sensitive: false },
-      { label: 'Type filter', sensitive: false },
+      { label: 'Type filter', sensitive: true },
     ])
     const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
     expect(analysis.capabilities.filter(({ kind }) => kind === 'filter')).toHaveLength(1)
@@ -1124,6 +1176,175 @@ describe('WrapperProofService security boundaries', () => {
     expect(await internalSession(service, analysis.sessionId).page.locator('#safe-filter').evaluate(
       (select) => (select as HTMLSelectElement).selectedIndex,
     )).toBe(1)
+  })
+
+  it('fails closed on incomplete enabled-option capture and initial multi-select state while keeping a safe control usable', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/select-boundary-contracts`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(analysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))).toEqual([
+      { label: 'Boundary filter', sensitive: false },
+      { label: 'Overflow filter', sensitive: true },
+      { label: 'Multiple filter', sensitive: true },
+      { label: 'Safe boundary search', sensitive: false },
+    ])
+    expect(analysis.capabilities.map(({ name }) => name)).toEqual(['prepare_page_search', 'set_page_filter'])
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    expect(filter.inputSchema).toMatchObject({
+      properties: { optionIndex: { minimum: 0, maximum: 29 } },
+    })
+    const filterResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )
+    expect(filterResult.structuredContent).toMatchObject({ targetStateVerified: true })
+    expect(await page.locator('#enabled-overflow').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(30)
+    expect(await page.locator('#initial-multiple option').evaluateAll(
+      (options) => options.map((option) => (option as HTMLOptionElement).selected),
+    )).toEqual([true, true, false])
+
+    const search = filterResult.analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('revalidates native single-select state before mutation and preserves the selected set', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/late-control-contracts`)
+    const page = internalSession(service, analysis.sessionId).page
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+
+    await page.locator('#late-multiple').evaluate((select) => {
+      (select as HTMLSelectElement).multiple = true
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-multiple option').evaluateAll(
+      (options) => options.map((option) => (option as HTMLOptionElement).selected),
+    )).toEqual([true, false])
+
+    await page.locator('#late-multiple').evaluate((select) => {
+      (select as HTMLSelectElement).multiple = false
+    })
+    const result = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )
+    expect(result.structuredContent.targetStateVerified).toBe(true)
+    analysis = result.analysis
+    expect(await internalSession(service, analysis.sessionId).page.locator('#late-multiple').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(1)
+
+    const raceService = createService({ actionStartDelayMs: 120 })
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/late-control-contracts`)
+    const racePage = internalSession(raceService, raceAnalysis.sessionId).page
+    const raceFilter = raceAnalysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    let changeEvents = 0
+    await racePage.exposeFunction('recordSelectBoundaryChange', () => {
+      changeEvents += 1
+    })
+    await racePage.locator('#late-multiple').evaluate((select) => {
+      select.addEventListener('change', () => {
+        void (window as unknown as { recordSelectBoundaryChange(): Promise<void> }).recordSelectBoundaryChange()
+      })
+    })
+    const pending = raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceFilter.name,
+      raceFilter.sampleInput,
+      undefined,
+      raceFilter.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    await racePage.locator('#late-multiple').evaluate((select) => {
+      (select as HTMLSelectElement).multiple = true
+    })
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(changeEvents).toBe(0)
+    await expect(raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceFilter.name,
+      raceFilter.sampleInput,
+      undefined,
+      raceFilter.id,
+    )).rejects.toMatchObject({ code: 'session_expired', sessionInvalidated: true })
+  })
+
+  it('revalidates the complete enabled-option budget before action-time selection', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/late-control-contracts`)
+    const page = internalSession(service, analysis.sessionId).page
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+
+    await page.locator('#late-multiple').evaluate((select) => {
+      const element = select as HTMLSelectElement
+      for (let index = 0; index < 29; index += 1) {
+        const option = document.createElement('option')
+        option.value = `late-${index}`
+        option.textContent = index === 28 ? 'Credit card' : `Late option ${index}`
+        if (index === 28) option.selected = true
+        element.append(option)
+      }
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-multiple').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(30)
+
+    await page.locator('#late-multiple option').evaluateAll((options) => {
+      for (const option of options.slice(2)) option.remove()
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
   it('fails closed on cumulative per-control safety evidence while keeping another control usable', async () => {
@@ -1773,6 +1994,100 @@ describe('WrapperProofService security boundaries', () => {
     expect(await internalSession(service, analysis.sessionId).page.locator('#unchecked-one, #unchecked-two').evaluateAll(
       (controls) => controls.map((control) => (control as HTMLInputElement).checked),
     )).toEqual([true, true])
+  })
+
+  it('excludes initially indeterminate checkboxes while preserving another safe control and state', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/initial-indeterminate`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(analysis.domEvidence.find(({ label }) => label === 'Indeterminate choice')).toMatchObject({
+      sensitive: true,
+    })
+    expect(analysis.capabilities.map(({ name }) => name)).toEqual(['prepare_page_search'])
+    expect(await page.locator('#initial-indeterminate').evaluate((checkbox) => ({
+      checked: (checkbox as HTMLInputElement).checked,
+      indeterminate: (checkbox as HTMLInputElement).indeterminate,
+    }))).toEqual({ checked: false, indeterminate: true })
+
+    const search = analysis.capabilities[0]
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('revalidates checkbox indeterminate state before mutation and after begun page races', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/late-control-contracts`)
+    let page = internalSession(service, analysis.sessionId).page
+    let form = analysis.capabilities.find(({ kind }) => kind === 'prepare_form')!
+
+    await page.locator('#late-checkbox').evaluate((checkbox) => {
+      (checkbox as HTMLInputElement).indeterminate = true
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-checkbox').evaluate((checkbox) => ({
+      checked: (checkbox as HTMLInputElement).checked,
+      indeterminate: (checkbox as HTMLInputElement).indeterminate,
+    }))).toEqual({ checked: false, indeterminate: true })
+    expect(await page.locator('#late-checkbox-detail').inputValue()).toBe('')
+
+    await page.locator('#late-checkbox').evaluate((checkbox) => {
+      (checkbox as HTMLInputElement).indeterminate = false
+    })
+    const normal = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )
+    expect(normal.structuredContent.targetStateVerified).toBe(true)
+
+    analysis = await service.analyze(`${fixture.origin}/late-control-contracts`)
+    page = internalSession(service, analysis.sessionId).page
+    form = analysis.capabilities.find(({ kind }) => kind === 'prepare_form')!
+    await page.locator('#late-checkbox').evaluate((checkbox) => {
+      checkbox.addEventListener('input', () => {
+        (checkbox as HTMLInputElement).indeterminate = true
+      }, { once: true })
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service).sessions).toBe(1)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'session_expired', sessionInvalidated: true })
   })
 
   it('keeps follow-up actions usable when a marked control is hidden and replaced', async () => {
@@ -2570,7 +2885,120 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toThrow('session expired')
   })
 
-  it('expires a queued action after it acquires the queue without applying a second mutation', async () => {
+  it('bounds a delayed accepted action by the absolute session deadline before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionStartDelayMs: 150, actionSettleMs: 20 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const session = internalSession(service, analysis.sessionId)
+    let inputEvents = 0
+    await session.page.exposeFunction('recordExpiryInput', () => { inputEvents += 1 })
+    await session.page.locator('#search-control').evaluate((input) => {
+      input.addEventListener('input', () => {
+        void (window as unknown as { recordExpiryInput: () => Promise<void> }).recordExpiryInput()
+      })
+    })
+    session.expiresAt = Date.now() + 60
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'must not be applied' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({
+      code: 'session_expired',
+      status: 410,
+      sessionInvalidated: true,
+    })
+    expect(inputEvents).toBe(0)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('never returns success when the absolute session deadline expires after mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionSettleMs: 180 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const session = internalSession(service, analysis.sessionId)
+    let inputEvents = 0
+    await session.page.exposeFunction('recordLateExpiryInput', () => { inputEvents += 1 })
+    await session.page.locator('#search-control').evaluate((input) => {
+      input.addEventListener('input', () => {
+        void (window as unknown as { recordLateExpiryInput: () => Promise<void> }).recordLateExpiryInput()
+      })
+    })
+    session.expiresAt = Date.now() + 80
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'mutated before expiry' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({
+      code: 'session_expired',
+      status: 410,
+      sessionInvalidated: true,
+    })
+    expect(inputEvents).toBe(1)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('bounds same-origin navigation and its settling work by the absolute session deadline', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionSettleMs: 180 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/`)
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    internalSession(service, analysis.sessionId).expiresAt = Date.now() + 100
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      { linkIndex: 0 },
+      undefined,
+      navigation.id,
+    )).rejects.toMatchObject({
+      code: 'session_expired',
+      status: 410,
+      sessionInvalidated: true,
+    })
+    expect(fixture.requests).toContain('/next')
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('clamps the inner proof session to the outer worker deadline and keeps normal actions usable', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const outerDeadline = Date.now() + 2_000
+    const service = createService({ actionSettleMs: 20, sessionExpiresAtMs: outerDeadline })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    expect(Date.parse(analysis.expiresAt)).toBeLessThanOrEqual(outerDeadline)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'within the lifetime' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({
+      structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
+    })
+  })
+
+  it('expires queued actions at the shared absolute deadline and releases the queue', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService({ actionStartDelayMs: 650, actionSettleMs: 20 })
@@ -2585,6 +3013,11 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       search.id,
     )
+    const firstExpectation = expect(first).rejects.toMatchObject({
+      code: 'session_expired',
+      status: 410,
+      sessionInvalidated: true,
+    })
     await new Promise((resolve) => setTimeout(resolve, 25))
     const session = internalSession(service, analysis.sessionId)
     const admittedAt = Date.now()
@@ -2604,8 +3037,7 @@ describe('WrapperProofService security boundaries', () => {
       sessionInvalidated: true,
     })
 
-    const firstResult = await first
-    expect(firstResult.activity.summary).toContain('Agent prepared visible state')
+    await firstExpectation
     await secondExpectation
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })

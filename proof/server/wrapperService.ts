@@ -132,6 +132,7 @@ export interface WrapperProofServiceOptions {
   resolveTarget?: (value: string) => Promise<PublicTarget>
   actionStartDelayMs?: number
   actionSettleMs?: number
+  sessionExpiresAtMs?: number
   maxTargetResourceBytes?: number
   maxTargetSessionBytes?: number
 }
@@ -170,6 +171,15 @@ function analysisAbortError(): DOMException {
 
 function actionVerificationError(message: string): WrapperServiceError {
   return new WrapperServiceError('invalid_action', message, 409)
+}
+
+function sessionExpiredError(): WrapperServiceError {
+  return new WrapperServiceError(
+    'session_expired',
+    'The isolated browser session expired. Analyze the site again.',
+    410,
+    { sessionInvalidated: true },
+  )
 }
 
 function preActionError(
@@ -225,18 +235,37 @@ async function raceWithSessionPolicy<T>(
   promise: Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
-  if (session.targetTrafficError) throw session.targetTrafficError
-  if (session.navigationPolicyError) throw session.navigationPolicyError
+  const consumeRejectedOperation = () => { void promise.catch(() => undefined) }
+  if (session.targetTrafficError) {
+    consumeRejectedOperation()
+    throw session.targetTrafficError
+  }
+  if (session.navigationPolicyError) {
+    consumeRejectedOperation()
+    throw session.navigationPolicyError
+  }
+  const remainingLifetimeMs = session.expiresAt - Date.now()
+  if (remainingLifetimeMs <= 0) {
+    consumeRejectedOperation()
+    throw sessionExpiredError()
+  }
+  let expiryTimer: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<never>((_resolve, reject) => {
+    expiryTimer = setTimeout(() => reject(sessionExpiredError()), remainingLifetimeMs)
+  })
   let result: T
   try {
     result = await raceWithSignal(Promise.race([
       promise,
       session.targetTrafficFailure.then((error) => Promise.reject(error)),
+      expired,
     ]), signal)
   } catch (error) {
     if (session.targetTrafficError) throw session.targetTrafficError
     if (session.navigationPolicyError) throw session.navigationPolicyError
     throw error
+  } finally {
+    if (expiryTimer) clearTimeout(expiryTimer)
   }
   if (session.targetTrafficError) throw session.targetTrafficError
   if (session.navigationPolicyError) throw session.navigationPolicyError
@@ -498,29 +527,28 @@ function captureIsolatedSafetyEvidence(
   if (element instanceof HTMLSelectElement) {
     const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
     const options = optionsGetter?.call(element) as HTMLOptionsCollection | undefined
-    if (!options) optionOverflow = true
-    for (
-      let optionIndex = 0;
-      options
-        && !aggregateOverflow
-        && optionIndex < options.length
-        && optionIndex < maxSelectOptionsInspected
-        && optionEntries.length < 30;
-      optionIndex += 1
-    ) {
-      const option = options.item(optionIndex)
-      if (!(option instanceof HTMLOptionElement) || matches.call(option, ':disabled')) continue
-      const text = boundedNodeText(option)
-      const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
-      const valueAttribute = getAttribute.call(option, 'value')
-      const value = bounded(valueAttribute === null ? text.value : valueAttribute)
-      optionOverflow ||= text.overflow || labelAttribute.overflow || value.overflow
-      optionEntries.push({
-        optionIndex,
-        labelAttribute: labelAttribute.value,
-        text: text.value,
-        value: value.value,
-      })
+    if (!options || options.length > maxSelectOptionsInspected) {
+      optionOverflow = true
+    } else {
+      for (let optionIndex = 0; !aggregateOverflow && optionIndex < options.length; optionIndex += 1) {
+        const option = options.item(optionIndex)
+        if (!(option instanceof HTMLOptionElement) || matches.call(option, ':disabled')) continue
+        if (optionEntries.length >= 30) {
+          optionOverflow = true
+          break
+        }
+        const text = boundedNodeText(option)
+        const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
+        const valueAttribute = getAttribute.call(option, 'value')
+        const value = bounded(valueAttribute === null ? text.value : valueAttribute)
+        optionOverflow ||= text.overflow || labelAttribute.overflow || value.overflow
+        optionEntries.push({
+          optionIndex,
+          labelAttribute: labelAttribute.value,
+          text: text.value,
+          value: value.value,
+        })
+      }
     }
   }
   const overflow = aggregateOverflow
@@ -759,10 +787,16 @@ function classifyDomInIsolatedWorld({
         .toLowerCase()
         .split(/\s+/)
         .filter(Boolean)
+      const selectMultipleGetter = element instanceof HTMLSelectElement
+        ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple')?.get
+        : undefined
+      const selectMultiple = element instanceof HTMLSelectElement
+        ? !selectMultipleGetter || Boolean(selectMultipleGetter.call(element))
+        : false
       const type = element instanceof HTMLAnchorElement
         ? 'link'
         : element instanceof HTMLSelectElement
-          ? 'select-one'
+          ? selectMultiple ? 'select-multiple' : 'select-one'
           : element instanceof HTMLTextAreaElement
             ? 'textarea'
             : element.type.toLowerCase()
@@ -962,6 +996,12 @@ function classifyDomInIsolatedWorld({
             return getter ? Boolean(getter.call(element)) : undefined
           })()
         : undefined
+      const checkboxIndeterminate = element instanceof HTMLInputElement && type === 'checkbox'
+        ? (() => {
+            const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'indeterminate')?.get
+            return !getter || Boolean(getter.call(element))
+          })()
+        : false
       const textControl = (element instanceof HTMLInputElement && ['search', 'text'].includes(type))
         || element instanceof HTMLTextAreaElement
       let textMinLength: number | undefined
@@ -1041,6 +1081,8 @@ function classifyDomInIsolatedWorld({
         || token.startsWith('tel-')
         || /(address|birth|card|credential|email|name|otp|passcode|password|phone|postal|secret|token|username)/.test(token))
       const sensitive = ['email', 'file', 'password', 'tel'].includes(type)
+        || selectMultiple
+        || checkboxIndeterminate
         || autocompleteSource.length > maxSafetyEvidenceLength
         || numericAttributeOverflow
         || (dateLikeInput && !dateLikeValues)
@@ -1272,6 +1314,7 @@ function assertIsolatedSafetySnapshot(
 
 function assertIsolatedControlOperable(
   element: Element,
+  expectedType: string,
   expectedOptionIndex: number,
 ): void {
   const matches = Element.prototype.matches
@@ -1284,6 +1327,20 @@ function assertIsolatedControlOperable(
   } else if (element instanceof HTMLTextAreaElement) {
     const getter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'readOnly')?.get
     if (!getter || getter.call(element)) throw new Error('The isolated control is read-only.')
+  }
+  if (expectedType === 'select-one') {
+    if (!(element instanceof HTMLSelectElement)) throw new Error('The isolated control type changed.')
+    const multipleGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple')?.get
+    if (!multipleGetter || multipleGetter.call(element)) {
+      throw new Error('The isolated select became multi-select.')
+    }
+  }
+  if (expectedType === 'checkbox') {
+    if (!(element instanceof HTMLInputElement)) throw new Error('The isolated control type changed.')
+    const indeterminateGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'indeterminate')?.get
+    if (!indeterminateGetter || indeterminateGetter.call(element)) {
+      throw new Error('The isolated checkbox became indeterminate.')
+    }
   }
   if (expectedOptionIndex >= 0) {
     if (!(element instanceof HTMLSelectElement)) throw new Error('The isolated control type changed.')
@@ -1421,7 +1478,7 @@ function readIsolatedControlState(
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
   )
-  assertIsolatedControlOperable(this, expectedOptionIndex)
+  assertIsolatedControlOperable(this, expectedType, expectedOptionIndex)
   assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType)
   if (expectedType === 'select-one') {
@@ -1474,7 +1531,7 @@ function writeIsolatedControlState(
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
   )
-  assertIsolatedControlOperable(this, expectedOptionIndex)
+  assertIsolatedControlOperable(this, expectedType, expectedOptionIndex)
   assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType, value)
   assertIsolatedTextValueAllowed(this, expectedType, value)
@@ -1559,7 +1616,7 @@ async function callOnIsolatedNode<T>(
     return called.result?.value as T
   } finally {
     await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
-    await cdp.detach()
+    await cdp.detach().catch(() => undefined)
   }
 }
 
@@ -2216,6 +2273,7 @@ export class WrapperProofService {
   private readonly resolveTarget: (value: string) => Promise<PublicTarget>
   private readonly actionStartDelayMs: number
   private readonly actionSettleMs: number
+  private readonly sessionExpiresAtMs: number
   private readonly maxTargetResourceBytes: number
   private readonly maxTargetSessionBytes: number
 
@@ -2223,6 +2281,7 @@ export class WrapperProofService {
     this.resolveTarget = options.resolveTarget ?? resolvePublicTarget
     this.actionStartDelayMs = options.actionStartDelayMs ?? 0
     this.actionSettleMs = options.actionSettleMs ?? ACTION_SETTLE_MS
+    this.sessionExpiresAtMs = options.sessionExpiresAtMs ?? Number.POSITIVE_INFINITY
     this.maxTargetResourceBytes = options.maxTargetResourceBytes ?? WRAPPER_MAX_TARGET_RESOURCE_BYTES
     this.maxTargetSessionBytes = options.maxTargetSessionBytes ?? WRAPPER_MAX_TARGET_SESSION_BYTES
   }
@@ -2576,7 +2635,7 @@ export class WrapperProofService {
         targetOrigin: target.origin,
         capabilities: new Map(),
         queue: Promise.resolve(),
-        expiresAt: createdAtMs + WRAPPER_SESSION_TTL_MS,
+        expiresAt: Math.min(createdAtMs + WRAPPER_SESSION_TTL_MS, this.sessionExpiresAtMs),
         blockedRequests: 0,
         allowedRequests: 0,
         analyzedPages: 1,
@@ -2672,7 +2731,7 @@ export class WrapperProofService {
         }
         session.networkMode = 'blocked'
         await raceWithSessionPolicy(session, context.setOffline(true), signal)
-        await waitForNetworkQuiescence(session, signal)
+        await raceWithSessionPolicy(session, waitForNetworkQuiescence(session, signal), signal)
         const analysis = await raceWithSessionPolicy(session, this.collectAnalysis(session), signal)
         return analysis
       } catch (error) {
@@ -2827,7 +2886,7 @@ export class WrapperProofService {
         )
         session.networkMode = 'blocked'
         await raceWithSessionPolicy(session, session.context.setOffline(true), signal)
-        await waitForNetworkQuiescence(session, signal)
+        await raceWithSessionPolicy(session, waitForNetworkQuiescence(session, signal), signal)
         await raceWithSessionPolicy(session, waitFor(this.actionSettleMs), signal)
         return evidence
       })()
@@ -2849,17 +2908,13 @@ export class WrapperProofService {
       if (evidence.navigationOccurred) session.analyzedPages += 1
       const analysis = await raceWithSessionPolicy(session, this.collectAnalysis(session), signal)
       throwIfAborted(signal)
-      session.expiresAt = Math.min(
-        session.createdAtMs + WRAPPER_SESSION_TTL_MS,
-        Date.now() + WRAPPER_SESSION_TTL_MS,
-      )
       session.networkMode = 'blocked'
       session.activeNetworkMetrics = null
 
       const networkPolicy = capability.kind === 'navigation'
         ? 'same-origin-navigation'
         : 'blocked-after-preparation'
-      return {
+      const result: WrapperActionResult = {
         finalUrl: analysis.finalUrl,
         screenshotDataUrl: analysis.screenshotDataUrl,
         analysis,
@@ -2884,8 +2939,11 @@ export class WrapperProofService {
           navigationOccurred: evidence.navigationOccurred,
         },
       }
+      if (Date.now() >= session.expiresAt) throw sessionExpiredError()
+      return result
     } catch (error) {
-      if (actionStarted) {
+      const sessionExpired = error instanceof WrapperServiceError && error.code === 'session_expired'
+      if (actionStarted || sessionExpired) {
         await this.destroySession(sessionId)
         await actionPromise?.catch(() => undefined)
       }

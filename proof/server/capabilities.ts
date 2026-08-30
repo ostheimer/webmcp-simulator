@@ -95,6 +95,7 @@ function isSearch(control: DetectedControl): boolean {
 
 function isFilter(control: DetectedControl): boolean {
   return control.tag === 'select'
+    && control.type === 'select-one'
     && !control.sensitive
     && (control.optionValues?.length ?? 0) >= 2
     && control.selectSampleIndex !== undefined
