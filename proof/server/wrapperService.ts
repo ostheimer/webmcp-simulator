@@ -460,7 +460,7 @@ function captureIsolatedSafetyEvidence(
   snapshot: string
   overflow: boolean
   optionEntries: Array<{ optionIndex: number, labelAttribute: string, text: string, value: string }>
-  labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[] }>
+  labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControls: Array<{ kind: string, value: string, alt: string, accessibleValues: string[] }> }>
   ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
   ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[] }>
   anchorImageAlts: string[]
@@ -583,6 +583,104 @@ function captureIsolatedSafetyEvidence(
     ariaDisabledAncestors.push(captured.value)
     aggregateOverflow ||= captured.overflow
   }
+  const captureNativeControl = (node: Element, excludedNode?: Element) => {
+    let kind = bounded('')
+    let value = bounded('')
+    let alt = bounded('')
+    const accessibleValues: string[] = []
+    let accessibleOverflow = false
+    let recognized = false
+    const retainAccessibleValue = (candidate: unknown) => {
+      if (accessibleValues.length >= 16) {
+        accessibleOverflow = true
+        return
+      }
+      const captured = bounded(candidate)
+      accessibleValues.push(captured.value)
+      accessibleOverflow ||= captured.overflow
+    }
+    if (node === excludedNode) {
+      return { recognized, kind, value, alt, accessibleValues, overflow: false }
+    }
+    for (const attribute of ['aria-valuetext', 'aria-valuenow']) {
+      const candidate = getAttribute.call(node, attribute)
+      if (candidate !== null) retainAccessibleValue(candidate)
+    }
+    if (node instanceof HTMLInputElement) {
+      recognized = true
+      const typeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
+      if (!typeGetter) {
+        kind = bounded('', true)
+      } else {
+        const nativeType = bounded(typeGetter.call(node))
+        kind = nativeType
+        if (['button', 'submit', 'reset'].includes(nativeType.value)) {
+          const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+          value = valueGetter ? bounded(valueGetter.call(node)) : bounded('', true)
+        } else if (nativeType.value === 'image') {
+          const altGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'alt')?.get
+          alt = altGetter ? bounded(altGetter.call(node)) : bounded('', true)
+        } else if (['text', 'search', 'url', 'tel', 'email', 'password', 'number', 'date', 'month', 'time', 'week', 'range'].includes(nativeType.value)) {
+          const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+          if (valueGetter) retainAccessibleValue(valueGetter.call(node))
+          else accessibleOverflow = true
+        } else {
+          accessibleOverflow = true
+        }
+      }
+    } else if (node instanceof HTMLTextAreaElement) {
+      recognized = true
+      kind = bounded('textarea')
+      const valueGetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
+      if (valueGetter) retainAccessibleValue(valueGetter.call(node))
+      else accessibleOverflow = true
+    } else if (node instanceof HTMLSelectElement) {
+      recognized = true
+      const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
+      const multipleGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple')?.get
+      const selectedGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected')?.get
+      const options = optionsGetter?.call(node) as HTMLOptionsCollection | undefined
+      if (!options || !multipleGetter || !selectedGetter || options.length > maxSelectOptionsInspected) {
+        accessibleOverflow = true
+      } else {
+        kind = bounded(multipleGetter.call(node) ? 'select-multiple' : 'select-one')
+        let selectedCount = 0
+        for (let optionIndex = 0; optionIndex < options.length; optionIndex += 1) {
+          const option = options.item(optionIndex)
+          if (!(option instanceof HTMLOptionElement) || !selectedGetter.call(option)) continue
+          selectedCount += 1
+          if (selectedCount > 16) {
+            accessibleOverflow = true
+            break
+          }
+          const text = boundedNodeText(option)
+          const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
+          const valueAttribute = getAttribute.call(option, 'value')
+          const optionValue = bounded(valueAttribute === null ? text.value : valueAttribute)
+          accessibleValues.push(labelAttribute.value, text.value, optionValue.value)
+          accessibleOverflow ||= text.overflow || labelAttribute.overflow || optionValue.overflow
+        }
+      }
+    } else {
+      const rawRole = bounded(getAttribute.call(node, 'role') ?? '')
+      const role = rawRole.overflow ? rawRole : bounded(rawRole.value.trim().toLowerCase())
+      if (['combobox', 'listbox', 'slider', 'spinbutton', 'textbox'].includes(role.value)) {
+        recognized = true
+        kind = role
+        // Custom widgets can derive their value from arbitrary page state. A
+        // complete accessible-name proof is not available, so fail closed.
+        accessibleOverflow = true
+      }
+    }
+    return {
+      recognized,
+      kind,
+      value,
+      alt,
+      accessibleValues,
+      overflow: kind.overflow || value.overflow || alt.overflow || accessibleOverflow,
+    }
+  }
   const referenced = (root: Element, attribute: string) => {
     const rawSource = getAttribute.call(root, attribute) ?? ''
     const raw = bounded(rawSource)
@@ -623,114 +721,25 @@ function captureIsolatedSafetyEvidence(
       const generatedContent = node instanceof Element
         ? boundedGeneratedContent(node)
         : { values: [] as string[], overflow: false }
-      let nativeControlKind = bounded('')
-      let nativeControlValue = bounded('')
-      let nativeControlAlt = bounded('')
-      const nativeControlAccessibleValues: string[] = []
-      let nativeControlAccessibleOverflow = false
-      const retainNativeControlAccessibleValue = (value: unknown) => {
-        if (nativeControlAccessibleValues.length >= 16) {
-          nativeControlAccessibleOverflow = true
-          return
-        }
-        const captured = bounded(value)
-        nativeControlAccessibleValues.push(captured.value)
-        nativeControlAccessibleOverflow ||= captured.overflow
-      }
-      if (node instanceof Element) {
-        for (const attribute of ['aria-valuetext', 'aria-valuenow']) {
-          const value = getAttribute.call(node, attribute)
-          if (value !== null) retainNativeControlAccessibleValue(value)
-        }
-      }
-      if (node instanceof HTMLInputElement) {
-        const typeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
-        if (!typeGetter) {
-          nativeControlKind = bounded('', true)
-        } else {
-          const nativeType = bounded(typeGetter.call(node))
-          if (['button', 'submit', 'reset'].includes(nativeType.value)) {
-            nativeControlKind = nativeType
-            const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
-            nativeControlValue = valueGetter
-              ? bounded(valueGetter.call(node))
-              : bounded('', true)
-          } else if (nativeType.value === 'image') {
-            nativeControlKind = nativeType
-            const altGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'alt')?.get
-            nativeControlAlt = altGetter
-              ? bounded(altGetter.call(node))
-              : bounded('', true)
-          } else if (['text', 'search', 'url', 'tel', 'email', 'password', 'number', 'date', 'month', 'time', 'week', 'range'].includes(nativeType.value)) {
-            nativeControlKind = nativeType
-            const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
-            if (valueGetter) retainNativeControlAccessibleValue(valueGetter.call(node))
-            else nativeControlAccessibleOverflow = true
-          } else {
-            nativeControlKind = nativeType
-            nativeControlAccessibleOverflow = true
-          }
-        }
-      } else if (node instanceof HTMLTextAreaElement) {
-        nativeControlKind = bounded('textarea')
-        const valueGetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
-        if (valueGetter) retainNativeControlAccessibleValue(valueGetter.call(node))
-        else nativeControlAccessibleOverflow = true
-      } else if (node instanceof HTMLSelectElement) {
-        const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
-        const multipleGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple')?.get
-        const selectedGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected')?.get
-        const options = optionsGetter?.call(node) as HTMLOptionsCollection | undefined
-        if (!options || !multipleGetter || !selectedGetter || options.length > maxSelectOptionsInspected) {
-          nativeControlAccessibleOverflow = true
-        } else {
-          nativeControlKind = bounded(multipleGetter.call(node) ? 'select-multiple' : 'select-one')
-          let selectedCount = 0
-          for (let optionIndex = 0; optionIndex < options.length; optionIndex += 1) {
-            const option = options.item(optionIndex)
-            if (!(option instanceof HTMLOptionElement) || !selectedGetter.call(option)) continue
-            selectedCount += 1
-            if (selectedCount > 16) {
-              nativeControlAccessibleOverflow = true
-              break
-            }
-            const text = boundedNodeText(option)
-            const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
-            const valueAttribute = getAttribute.call(option, 'value')
-            const value = bounded(valueAttribute === null ? text.value : valueAttribute)
-            nativeControlAccessibleValues.push(labelAttribute.value, text.value, value.value)
-            nativeControlAccessibleOverflow ||= text.overflow || labelAttribute.overflow || value.overflow
-          }
-        }
-      } else if (node instanceof Element) {
-        const rawRole = bounded(getAttribute.call(node, 'role') ?? '')
-        const role = rawRole.overflow ? rawRole : bounded(rawRole.value.trim().toLowerCase())
-        if (['combobox', 'listbox', 'slider', 'spinbutton', 'textbox'].includes(role.value)) {
-          nativeControlKind = role
-          // Custom ARIA widgets can compute their value from page-authored descendant state.
-          // Exclude them rather than publish a partial accessible-name safety proof.
-          nativeControlAccessibleOverflow = true
-        }
-      }
+      const nativeControl = node instanceof Element
+        ? captureNativeControl(node)
+        : captureNativeControl(root, root)
       entries.push({
         text,
         imageAlts: imageAlts.values,
         ariaLabel,
         title,
         generatedContent: generatedContent.values,
-        nativeControlKind,
-        nativeControlValue,
-        nativeControlAlt,
-        nativeControlAccessibleValues,
+        nativeControlKind: nativeControl.kind,
+        nativeControlValue: nativeControl.value,
+        nativeControlAlt: nativeControl.alt,
+        nativeControlAccessibleValues: nativeControl.accessibleValues,
         overflow: text.overflow
           || imageAlts.overflow
           || ariaLabel.overflow
           || title.overflow
           || generatedContent.overflow
-          || nativeControlKind.overflow
-          || nativeControlValue.overflow
-          || nativeControlAlt.overflow
-          || nativeControlAccessibleOverflow,
+          || nativeControl.overflow,
       })
     }
     return {
@@ -910,6 +919,12 @@ function captureIsolatedSafetyEvidence(
     ariaLabel: { value: string, overflow: boolean }
     title: { value: string, overflow: boolean }
     generatedContent: string[]
+    nativeControls: Array<{
+      kind: { value: string, overflow: boolean }
+      value: { value: string, overflow: boolean }
+      alt: { value: string, overflow: boolean }
+      accessibleValues: string[]
+    }>
     overflow: boolean
   }> = []
   let labelsOverflow = false
@@ -932,17 +947,54 @@ function captureIsolatedSafetyEvidence(
         const ariaLabel = bounded(getAttribute.call(label, 'aria-label') ?? '')
         const title = bounded(getAttribute.call(label, 'title') ?? '')
         const generatedContent = boundedGeneratedContent(label)
+        const nativeControls: Array<{
+          kind: { value: string, overflow: boolean }
+          value: { value: string, overflow: boolean }
+          alt: { value: string, overflow: boolean }
+          accessibleValues: string[]
+        }> = []
+        const controlWalker = createTreeWalker.call(document, label, NodeFilter.SHOW_ELEMENT)
+        let controlNodesInspected = 0
+        let controlTraversalComplete = false
+        let nativeControlOverflow = false
+        while (controlNodesInspected < 256) {
+          const candidate = nextNode.call(controlWalker) as Element | null
+          if (!candidate) {
+            controlTraversalComplete = true
+            break
+          }
+          controlNodesInspected += 1
+          const nativeControl = captureNativeControl(candidate, element)
+          if (!nativeControl.recognized) continue
+          if (nativeControls.length >= 16) {
+            nativeControlOverflow = true
+            break
+          }
+          nativeControls.push({
+            kind: nativeControl.kind,
+            value: nativeControl.value,
+            alt: nativeControl.alt,
+            accessibleValues: nativeControl.accessibleValues,
+          })
+          nativeControlOverflow ||= nativeControl.overflow
+          if (nativeControlOverflow || aggregateOverflow) break
+        }
+        if (!controlTraversalComplete && !nativeControlOverflow && !aggregateOverflow && nextNode.call(controlWalker)) {
+          nativeControlOverflow = true
+        }
         labels.push({
           text,
           imageAlts: imageAlts.values,
           ariaLabel,
           title,
           generatedContent: generatedContent.values,
+          nativeControls,
           overflow: text.overflow
             || imageAlts.overflow
             || ariaLabel.overflow
             || title.overflow
-            || generatedContent.overflow,
+            || generatedContent.overflow
+            || nativeControlOverflow,
         })
       }
     }
@@ -951,10 +1003,16 @@ function captureIsolatedSafetyEvidence(
     ? boundedNodeText(element)
     : { value: '', overflow: false }
   let nativeRequired: boolean | null = null
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-    const prototype = element instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : HTMLInputElement.prototype
+  if (
+    element instanceof HTMLInputElement
+    || element instanceof HTMLSelectElement
+    || element instanceof HTMLTextAreaElement
+  ) {
+    const prototype = element instanceof HTMLSelectElement
+      ? HTMLSelectElement.prototype
+      : element instanceof HTMLTextAreaElement
+        ? HTMLTextAreaElement.prototype
+        : HTMLInputElement.prototype
     const requiredGetter = Object.getOwnPropertyDescriptor(prototype, 'required')?.get
     if (!requiredGetter) aggregateOverflow = true
     else nativeRequired = Boolean(requiredGetter.call(element))
@@ -973,19 +1031,32 @@ function captureIsolatedSafetyEvidence(
   if (element instanceof HTMLSelectElement) {
     const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
     const selectedGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected')?.get
+    const optionValueGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'value')?.get
     const options = optionsGetter?.call(element) as HTMLOptionsCollection | undefined
-    if (!options || !selectedGetter || options.length > maxSelectOptionsInspected) {
+    if (!options || !selectedGetter || !optionValueGetter || options.length > maxSelectOptionsInspected) {
       optionOverflow = true
     } else {
       for (let optionIndex = 0; !aggregateOverflow && optionIndex < options.length; optionIndex += 1) {
         const option = options.item(optionIndex)
+        const nativeValue = option instanceof HTMLOptionElement
+          ? bounded(optionValueGetter.call(option))
+          : bounded('', true)
+        const requiredEmptyOption = nativeRequired === true
+          && !nativeValue.overflow
+          && nativeValue.value === ''
         const retainable = !(
           !(option instanceof HTMLOptionElement)
           || matches.call(option, ':disabled')
           || !isEffectivelyVisibleSelectOption(option)
+          || requiredEmptyOption
         )
         if (!retainable) {
-          if (option instanceof HTMLOptionElement && selectedGetter.call(option)) optionOverflow = true
+          if (
+            option instanceof HTMLOptionElement
+            && selectedGetter.call(option)
+            && !requiredEmptyOption
+          ) optionOverflow = true
+          optionOverflow ||= nativeValue.overflow
           continue
         }
         if (optionEntries.length >= 30) {
@@ -994,8 +1065,7 @@ function captureIsolatedSafetyEvidence(
         }
         const text = boundedNodeText(option)
         const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
-        const valueAttribute = getAttribute.call(option, 'value')
-        const value = bounded(valueAttribute === null ? text.value : valueAttribute)
+        const value = nativeValue
         optionOverflow ||= text.overflow || labelAttribute.overflow || value.overflow
         optionEntries.push({
           optionIndex,
@@ -1031,12 +1101,18 @@ function captureIsolatedSafetyEvidence(
       ownerContextEvidence: [],
     }
   }
-  const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title, generatedContent }) => ({
+  const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControls }) => ({
     text: text.value,
     imageAlts,
     ariaLabel: ariaLabel.value,
     title: title.value,
     generatedContent,
+    nativeControls: nativeControls.map(({ kind, value, alt, accessibleValues }) => ({
+      kind: kind.value,
+      value: value.value,
+      alt: alt.value,
+      accessibleValues,
+    })),
   }))
   const ariaLabelledEntries = ariaLabelled.entries
     .map(({ text, imageAlts, ariaLabel, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues }) => ({
@@ -1570,6 +1646,12 @@ function classifyDomInIsolatedWorld({
             return getter ? Boolean(getter.call(element)) : undefined
           })()
         : undefined
+      const selectRequired = element instanceof HTMLSelectElement
+        ? (() => {
+            const getter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'required')?.get
+            return getter ? Boolean(getter.call(element)) : undefined
+          })()
+        : undefined
       const textControl = (element instanceof HTMLInputElement && ['search', 'text'].includes(type))
         || element instanceof HTMLTextAreaElement
       let textMinLength: number | undefined
@@ -1649,12 +1731,18 @@ function classifyDomInIsolatedWorld({
           ...nativeControlAccessibleValues,
           ...generatedContent,
         ]),
-        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title, generatedContent }) => [
+        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title, generatedContent, nativeControls }) => [
           labelText,
           ...imageAlts,
           ariaLabel,
           title,
           ...generatedContent,
+          ...nativeControls.flatMap(({ kind, value, alt, accessibleValues }) => [
+            kind,
+            value,
+            alt,
+            ...accessibleValues,
+          ]),
         ]),
         element.getAttribute('placeholder') ?? '',
         'name' in element ? element.name : '',
@@ -1741,7 +1829,7 @@ function classifyDomInIsolatedWorld({
         dateLikeValues,
         dateLikeSample,
         checked,
-        required: checkboxRequired,
+        required: type === 'select-one' ? selectRequired : checkboxRequired,
         textMinLength,
         textMaxLength,
         textSample,
@@ -2133,8 +2221,18 @@ function assertIsolatedControlOperable(
   if (expectedType === 'select-one') {
     if (!(element instanceof HTMLSelectElement)) throw new Error('The isolated control type changed.')
     const multipleGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple')?.get
-    if (!multipleGetter || multipleGetter.call(element)) {
+    const requiredGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'required')?.get
+    if (!multipleGetter || !requiredGetter || multipleGetter.call(element)) {
       throw new Error('The isolated select became multi-select.')
+    }
+    if (expectedOptionIndex >= 0 && requiredGetter.call(element)) {
+      const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
+      const optionValueGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'value')?.get
+      const options = optionsGetter?.call(element) as HTMLOptionsCollection | undefined
+      const option = options?.item(expectedOptionIndex)
+      if (!(option instanceof HTMLOptionElement) || !optionValueGetter || optionValueGetter.call(option) === '') {
+        throw new Error('The isolated select value violates its native required contract.')
+      }
     }
   }
   if (expectedType === 'checkbox') {
@@ -2365,8 +2463,11 @@ function writeIsolatedControlState(
   assertIsolatedTextValueAllowed(this, expectedType, value)
   if (expectedType === 'select-one') {
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.set
-    if (!setter) throw new Error('The isolated select setter is unavailable.')
+    const validityGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'validity')?.get
+    if (!setter || !validityGetter) throw new Error('The isolated select setter is unavailable.')
     setter.call(this, Number(value))
+    const validity = validityGetter.call(this) as ValidityState
+    if (!validity.valid) throw new Error('The isolated select did not retain a valid required value.')
   } else if (expectedType === 'checkbox' || expectedType === 'radio') {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set
     if (!setter) throw new Error('The isolated checked setter is unavailable.')

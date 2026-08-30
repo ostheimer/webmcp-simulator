@@ -51,10 +51,11 @@ function rawRequest(
     clientId: string
     sourceIp: string
     signal?: AbortSignal
+    method?: string
   },
 ): Request {
   return new Request(`https://wrapper.example${path}`, {
-    method: 'POST',
+    method: options.method ?? 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-WebMCP-Client': options.clientId,
@@ -106,6 +107,24 @@ function pendingActionRequest(options: { clientId: string, sourceIp: string, sig
   })
   return {
     request: rawRequest('/api/wrapper/action', body, options),
+    finish,
+  }
+}
+
+function pendingCloseRequest(options: { clientId: string, sourceIp: string, signal?: AbortSignal }) {
+  const encoder = new TextEncoder()
+  let finish!: () => void
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode('{"sessionId":"webmcp-wrapper-abcdefghijklmnopqrstuvwx"'))
+      finish = () => {
+        controller.enqueue(encoder.encode(`,"sessionToken":"${'B'.repeat(43)}"}`))
+        controller.close()
+      }
+    },
+  })
+  return {
+    request: rawRequest('/api/wrapper/session', body, { ...options, method: 'DELETE' }),
     finish,
   }
 }
@@ -648,16 +667,17 @@ describe('production wrapper API boundaries', () => {
       sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
       sessionToken: 'B'.repeat(43),
     }, { clientId: 'close_client_000000001', method: 'DELETE' }), target)
-    expect(close.status).toBe(401)
+    expect(close.status).toBe(200)
+    expect(await close.json()).toEqual({ closed: true })
     expect(closeSession).toHaveBeenCalledOnce()
   })
 
-  it('rate-limits close attempts by trusted source only after a valid bounded body', async () => {
+  it('consumes close quota before reading an untrusted body and bounds random valid-shaped attempts', async () => {
     const closeSession = vi.fn(async () => true)
     const target = backend({ closeSession })
     const sourceIp = '198.51.100.141'
 
-    for (let index = 0; index < 40; index += 1) {
+    for (let index = 0; index < 30; index += 1) {
       const invalid = await handleCloseRequest(request('/api/wrapper/session', {
         sessionId: `missing-token-${index}`,
       }, {
@@ -667,8 +687,17 @@ describe('production wrapper API boundaries', () => {
       }), target)
       expect(invalid.status).toBe(400)
     }
+    const limitedInvalid = await handleCloseRequest(request('/api/wrapper/session', {
+      sessionId: 'still-missing-token',
+    }, {
+      clientId: 'invalid_close_limit_001',
+      sourceIp,
+      method: 'DELETE',
+    }), target)
+    expect(limitedInvalid.status).toBe(429)
     expect(closeSession).not.toHaveBeenCalled()
 
+    const validSourceIp = '198.51.100.142'
     const statuses: number[] = []
     for (let index = 0; index < 31; index += 1) {
       statuses.push((await handleCloseRequest(request('/api/wrapper/session', {
@@ -676,12 +705,103 @@ describe('production wrapper API boundaries', () => {
         sessionToken: `${String(index).padStart(2, '0')}${'A'.repeat(41)}`,
       }, {
         clientId: `rotated_close_${String(index).padStart(8, '0')}`,
-        sourceIp,
+        sourceIp: validSourceIp,
         method: 'DELETE',
       }), target)).status)
     }
     expect(statuses).toEqual([...Array.from({ length: 30 }, () => 200), 429])
     expect(closeSession).toHaveBeenCalledTimes(30)
+  })
+
+  it('applies the close quota and absolute deadline before a streamed body reaches the backend', async () => {
+    const closeSession = vi.fn(async () => true)
+    const target = backend({ closeSession })
+    const sourceIp = '198.51.100.250'
+    const slowBody = pendingCloseRequest({
+      clientId: 'close_deadline_stream_01',
+      sourceIp,
+    })
+
+    const timedOut = await handleCloseRequest(slowBody.request, target, { closeTimeoutMs: 20 })
+    expect(timedOut.status).toBe(504)
+    expect(await timedOut.json()).toEqual({
+      error: 'The isolated browser close operation exceeded its fixed time limit.',
+      code: 'close_timeout',
+    })
+    expect(closeSession).not.toHaveBeenCalled()
+
+    for (let index = 0; index < 29; index += 1) {
+      const response = await handleCloseRequest(request('/api/wrapper/session', {
+        sessionId: `webmcp-wrapper-close-retry-${String(index).padStart(8, '0')}`,
+        sessionToken: `${String(index).padStart(2, '0')}${'B'.repeat(41)}`,
+      }, {
+        clientId: `close_retry_${String(index).padStart(10, '0')}`,
+        sourceIp,
+        method: 'DELETE',
+      }), target, { closeTimeoutMs: 1_000 })
+      expect(response.status).toBe(200)
+    }
+    const limited = await handleCloseRequest(request('/api/wrapper/session', {
+      sessionId: 'webmcp-wrapper-close-retry-limited',
+      sessionToken: 'C'.repeat(43),
+    }, {
+      clientId: 'close_retry_limited_001',
+      sourceIp,
+      method: 'DELETE',
+    }), target, { closeTimeoutMs: 1_000 })
+    expect(limited.status).toBe(429)
+    expect(closeSession).toHaveBeenCalledTimes(29)
+  })
+
+  it('distinguishes a client-aborted close body from the fixed close deadline', async () => {
+    const controller = new AbortController()
+    const closeSession = vi.fn(async () => true)
+    const target = backend({ closeSession })
+    const slowBody = pendingCloseRequest({
+      clientId: 'close_cancel_stream_0001',
+      sourceIp: '198.51.100.251',
+      signal: controller.signal,
+    })
+    const pending = handleCloseRequest(slowBody.request, target, { closeTimeoutMs: 1_000 })
+    controller.abort()
+
+    const cancelled = await pending
+    expect(cancelled.status).toBe(499)
+    expect(await cancelled.json()).toEqual({
+      error: 'The isolated browser operation was cancelled.',
+      code: 'cancelled',
+    })
+    expect(closeSession).not.toHaveBeenCalled()
+  })
+
+  it('does not return a late close success after the handler deadline starts the backend', async () => {
+    let resolveClose!: (value: boolean) => void
+    const closeSession = vi.fn(async () => new Promise<boolean>((resolve) => {
+      resolveClose = resolve
+    }))
+    const target = backend({ closeSession })
+    const response = await handleCloseRequest(request('/api/wrapper/session', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'B'.repeat(43),
+    }, {
+      clientId: 'close_late_result_00001',
+      sourceIp: '198.51.100.252',
+      method: 'DELETE',
+    }), target, { closeTimeoutMs: 20 })
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser close operation exceeded its fixed time limit.',
+      code: 'close_timeout',
+    })
+    expect(closeSession).toHaveBeenCalledOnce()
+    expect(closeSession).toHaveBeenCalledWith(
+      'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      'B'.repeat(43),
+      expect.any(AbortSignal),
+    )
+    resolveClose(true)
+    await new Promise((resolve) => setTimeout(resolve, 0))
   })
 
   it('returns a sanitized typed production analysis timeout', async () => {

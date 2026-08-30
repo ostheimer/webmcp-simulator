@@ -82,7 +82,7 @@ No authentication, payments, multi-tenancy, or database are required for the MVP
 
 ## Local development
 
-Requirements: Node.js 22 or newer and npm.
+Requirements: Node.js `^22.22.2`, `^24.15.0`, or `>=26.0.0`, plus npm.
 
 ```bash
 npm install

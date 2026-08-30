@@ -5,7 +5,7 @@
   "description": "Paste a URL. Experience the WebMCP version.",
   "license": "MIT",
   "engines": {
-    "node": ">=22"
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
   },
   "type": "module",
   "scripts": {

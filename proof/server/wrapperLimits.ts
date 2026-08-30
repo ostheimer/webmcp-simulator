@@ -22,6 +22,9 @@ export const WRAPPER_MAX_AX_EVIDENCE = 40
 export const WRAPPER_MAX_RATE_IDENTITIES_PER_FUNCTION = 512
 export const WRAPPER_ANALYSIS_TIMEOUT_MS = 35_000
 export const WRAPPER_ACTION_TIMEOUT_MS = 15_000
+// Leave platform time for a sanitized response and cleanup inside the 15 s
+// session Function limit.
+export const WRAPPER_CLOSE_TIMEOUT_MS = 10_000
 
 const ACTIVE_CPU_USD_PER_VCPU_HOUR = 0.128
 const MEMORY_USD_PER_GB_HOUR = 0.0212

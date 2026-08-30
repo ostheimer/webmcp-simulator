@@ -5,6 +5,7 @@ import { WrapperServiceError } from './wrapperErrors.ts'
 import {
   WRAPPER_ACTION_TIMEOUT_MS,
   WRAPPER_ANALYSIS_TIMEOUT_MS,
+  WRAPPER_CLOSE_TIMEOUT_MS,
   WRAPPER_MAX_REQUEST_BODY_BYTES,
   WRAPPER_MAX_RATE_IDENTITIES_PER_FUNCTION,
   WRAPPER_MAX_RESPONSE_BYTES,
@@ -83,6 +84,8 @@ export interface ProductionRequestOptions {
   analysisTimeoutMs?: number
   /** Test-only override; production uses the fixed absolute action deadline. */
   actionTimeoutMs?: number
+  /** Test-only override; production uses the fixed absolute close deadline. */
+  closeTimeoutMs?: number
 }
 
 class HttpError extends Error {
@@ -489,18 +492,68 @@ export function handleActionRequest(
 export function handleCloseRequest(
   request: Request,
   backend: ProductionWrapperBackend = service,
+  options: ProductionRequestOptions = {},
 ): Promise<Response> {
+  const timeoutMs = options.closeTimeoutMs ?? WRAPPER_CLOSE_TIMEOUT_MS
+  const deadlineAtMs = Date.now() + Math.max(0, timeoutMs)
+  let deadlineExpired = false
+  const operationController = new AbortController()
+  const onRequestAbort = () => operationController.abort()
+  request.signal.addEventListener('abort', onRequestAbort, { once: true })
+  if (request.signal.aborted) operationController.abort()
+  const deadlineTimer = setTimeout(() => {
+    deadlineExpired = true
+    operationController.abort()
+  }, Math.max(0, timeoutMs))
+  deadlineTimer.unref?.()
+  const deadlineReached = () => deadlineExpired || Date.now() >= deadlineAtMs
+  const closeTimeoutError = () => new HttpError(
+    'The isolated browser close operation exceeded its fixed time limit.',
+    504,
+    'close_timeout',
+  )
+  const closeCancelledError = () => new HttpError(
+    'The isolated browser operation was cancelled.',
+    499,
+    'cancelled',
+  )
+  const assertCloseResponseAllowed = () => {
+    if (!deadlineReached() && !request.signal.aborted) return
+    operationController.abort()
+    if (deadlineReached()) throw closeTimeoutError()
+    throw closeCancelledError()
+  }
   return handle(async () => {
-    assertRequestMethod(request, 'DELETE')
-    const { sourceId } = assertRequestBoundary(request)
-    const body = await readJson(request)
-    if (typeof body.sessionId !== 'string' || typeof body.sessionToken !== 'string') {
-      throw new HttpError('sessionId and sessionToken are required.', 400, 'invalid_session')
+    try {
+      assertRequestMethod(request, 'DELETE')
+      const { sourceId } = assertRequestBoundary(request)
+      // A close attempt consumes its trusted-source budget before any untrusted
+      // streamed body is read, so random locator/token bodies cannot cheaply
+      // occupy the handler or drive provider reconnects without a bounded quota.
+      consumeRateLimit(closeRates, sourceId, MAX_CLOSES_PER_WINDOW, CLOSE_RATE_WINDOW_MS)
+      const body = await readJson(request, operationController.signal)
+      if (typeof body.sessionId !== 'string' || typeof body.sessionToken !== 'string') {
+        throw new HttpError('sessionId and sessionToken are required.', 400, 'invalid_session')
+      }
+      if (deadlineReached()) throw closeTimeoutError()
+      const closePromise = backend.closeSession(
+        body.sessionId,
+        body.sessionToken,
+        operationController.signal,
+      )
+      await raceRequestOperation(closePromise, operationController.signal)
+      if (deadlineReached()) throw closeTimeoutError()
+      // Closing an already absent/expired session is intentionally idempotent.
+      // Do not expose whether a random valid-shaped locator/token pair existed.
+      return { closed: true }
+    } catch (error) {
+      if (deadlineReached()) throw closeTimeoutError()
+      if (request.signal.aborted) throw closeCancelledError()
+      throw error
     }
-    consumeRateLimit(closeRates, sourceId, MAX_CLOSES_PER_WINDOW, CLOSE_RATE_WINDOW_MS)
-    const closed = await backend.closeSession(body.sessionId, body.sessionToken, request.signal)
-    if (!closed) throw new HttpError('The isolated browser session capability is invalid.', 401, 'invalid_capability')
-    return { closed: true }
+  }, assertCloseResponseAllowed).finally(() => {
+    clearTimeout(deadlineTimer)
+    request.signal.removeEventListener('abort', onRequestAbort)
   })
 }
 

@@ -775,6 +775,51 @@ async function startFixture(): Promise<Fixture> {
         <script>document.getElementById('overflow-textbox-value').value = 'x'.repeat(4097)</script>`)
       return
     }
+    if (requestUrl === '/label-embedded-control-safety') {
+      response.end(`<!doctype html><title>Label embedded control safety</title>
+        <style>.embedded-source{position:absolute;left:-10000px;top:0}</style>
+        <form id="sensitive-label-text-form">
+          <label for="sensitive-label-text-target">Reference <input class="embedded-source" type="text" value="Credit card number"></label>
+          <input id="sensitive-label-text-target" type="text" aria-label="Sensitive label text field">
+          <input type="text" aria-label="Sensitive label text detail">
+        </form>
+        <form id="sensitive-label-select-form">
+          <label for="sensitive-label-select-target">Reference <select class="embedded-source"><option selected>BIC</option><option>Reference</option></select></label>
+          <input id="sensitive-label-select-target" type="text" aria-label="Sensitive label select field">
+          <input type="text" aria-label="Sensitive label select detail">
+        </form>
+        <form id="sensitive-label-range-form">
+          <label for="sensitive-label-range-target">Reference <input class="embedded-source" type="range" value="25" aria-valuetext="Bank account"></label>
+          <input id="sensitive-label-range-target" type="text" aria-label="Sensitive label range field">
+          <input type="text" aria-label="Sensitive label range detail">
+        </form>
+        <form id="late-label-native-form">
+          <label for="late-label-native-target">Reference <textarea id="late-label-native-source" class="embedded-source">Reference note</textarea></label>
+          <input id="late-label-native-target" type="text" aria-label="Late label native field">
+          <input id="late-label-native-detail" type="text" aria-label="Late label native detail">
+        </form>
+        <form id="neutral-label-native-form">
+          <label for="neutral-label-native-target">Reference <input class="embedded-source" type="text" value="Reference note"></label>
+          <input id="neutral-label-native-target" type="text" aria-label="Neutral label native field">
+          <input id="neutral-label-native-detail" type="text" aria-label="Neutral label native detail">
+        </form>
+        <form id="wrapped-label-target-form">
+          <label>Wrapped target <input id="wrapped-label-target" type="text" aria-label="Wrapped label target"></label>
+          <input id="wrapped-label-target-detail" type="text" aria-label="Wrapped label target detail">
+        </form>
+        <form id="custom-label-native-form">
+          <label for="custom-label-native-target">Reference <span class="embedded-source" role="textbox">Reference widget</span></label>
+          <input id="custom-label-native-target" type="text" aria-label="Custom label native field">
+          <input type="text" aria-label="Custom label native detail">
+        </form>
+        <form id="overflow-label-native-form">
+          <label for="overflow-label-native-target">Reference <input id="overflow-label-native-source" class="embedded-source" type="text"></label>
+          <input id="overflow-label-native-target" type="text" aria-label="Overflow label native field">
+          <input type="text" aria-label="Overflow label native detail">
+        </form>
+        <script>document.getElementById('overflow-label-native-source').value = 'x'.repeat(4097)</script>`)
+      return
+    }
     if (requestUrl === '/aria-description-safety') {
       response.end(`<!doctype html><title>ARIA description safety</title>
         <form id="sensitive-description-form">
@@ -1014,6 +1059,44 @@ async function startFixture(): Promise<Fixture> {
             <option value="form-two">Form two</option>
           </select>
           <input type="text" aria-label="Visible select detail">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/required-select-contracts') {
+      response.end(`<!doctype html><title>Required select contracts</title>
+        <select id="required-filter" aria-label="Category filter" required>
+          <option value="" selected>Choose category</option>
+          <option value="alpha">Alpha</option>
+          <option value="beta">Beta</option>
+        </select>
+        <form id="required-select-form">
+          <select id="required-form-select" aria-label="Required form choice" required>
+            <option value="" selected>Choose option</option>
+            <option value="one">One</option>
+            <option value="two">Two</option>
+          </select>
+          <input type="text" aria-label="Required select detail">
+        </form>
+        <form id="only-empty-required-form">
+          <select id="only-empty-required" aria-label="Only empty required" required>
+            <option value="" selected>Choose only option</option>
+          </select>
+          <input type="text" aria-label="Only empty detail">
+        </form>
+        <form id="nonrequired-empty-form">
+          <select id="nonrequired-empty" aria-label="Optional empty choice">
+            <option value="">No selection</option>
+            <option value="one" selected>One</option>
+          </select>
+          <input type="text" aria-label="Optional empty detail">
+        </form>
+        <form id="late-required-select-form">
+          <select id="late-required-select" aria-label="Late required choice">
+            <option value="">No selection</option>
+            <option value="one" selected>One</option>
+            <option value="two">Two</option>
+          </select>
+          <input id="late-required-select-detail" type="text" aria-label="Late required detail">
         </form>`)
       return
     }
@@ -1895,6 +1978,117 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
   })
 
+  it('keeps required single-select mappings, samples, validation, and native validity aligned', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/required-select-contracts`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    expect(filter.inputSchema).toMatchObject({
+      properties: { optionIndex: { type: 'integer', minimum: 0, maximum: 1 } },
+    })
+    expect(filter.sampleInput).toEqual({ optionIndex: 0 })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      { optionIndex: 2 },
+      undefined,
+      filter.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
+    expect(await page.locator('#required-filter').inputValue()).toBe('')
+
+    const capabilityFor = (label: string) => {
+      const evidenceId = analysis.domEvidence.find((evidence) => evidence.label === label)!.id
+      return analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidenceId))
+    }
+    const requiredForm = capabilityFor('Required form choice')!
+    expect(requiredForm.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'integer', minimum: 0, maximum: 1 },
+        field_2: { type: 'string' },
+      },
+    })
+    expect(requiredForm.sampleInput).toEqual({ field_1: 0, field_2: 'A' })
+    expect(JSON.stringify(requiredForm)).not.toContain('Choose option')
+    const requiredResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      requiredForm.name,
+      requiredForm.sampleInput,
+      undefined,
+      requiredForm.id,
+    )
+    expect(requiredResult.structuredContent).toMatchObject({
+      isolatedStateChanged: true,
+      targetStateVerified: true,
+    })
+    expect(await page.locator('#required-form-select').inputValue()).toBe('one')
+    expect(await page.locator('#required-form-select').evaluate((select) =>
+      (select as HTMLSelectElement).validity.valid)).toBe(true)
+
+    expect(capabilityFor('Only empty required')).toBeUndefined()
+    const updatedCapabilityFor = (label: string) => {
+      const evidenceId = requiredResult.analysis.domEvidence.find((evidence) => evidence.label === label)!.id
+      return requiredResult.analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidenceId))
+    }
+    const optionalForm = updatedCapabilityFor('Optional empty choice')!
+    expect(optionalForm.inputSchema).toMatchObject({
+      properties: { field_1: { minimum: 0, maximum: 1 } },
+    })
+    expect(optionalForm.sampleInput.field_1).toBe(0)
+    const optionalResult = await service.execute(
+      requiredResult.analysis.sessionId,
+      requiredResult.analysis.sessionToken,
+      optionalForm.name,
+      optionalForm.sampleInput,
+      undefined,
+      optionalForm.id,
+    )
+    expect(optionalResult).toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await page.locator('#nonrequired-empty').inputValue()).toBe('')
+
+    const lateEvidence = optionalResult.analysis.domEvidence.find(({ label }) => label === 'Late required choice')!
+    const lateForm = optionalResult.analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidence.id))!
+    await page.locator('#late-required-select').evaluate((select) => {
+      (select as HTMLSelectElement).required = true
+    })
+    await expect(service.execute(
+      optionalResult.analysis.sessionId,
+      optionalResult.analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-required-select').inputValue()).toBe('one')
+    expect(await page.locator('#late-required-select-detail').inputValue()).toBe('')
+
+    const raceService = createService({ actionStartDelayMs: 200 })
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/required-select-contracts`)
+    const raceEvidence = raceAnalysis.domEvidence.find(({ label }) => label === 'Required form choice')!
+    const raceCapability = raceAnalysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(raceEvidence.id))!
+    const racePage = internalSession(raceService, raceAnalysis.sessionId).page
+    const pending = raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceCapability.name,
+      raceCapability.sampleInput,
+      undefined,
+      raceCapability.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await racePage.locator('#required-form-select option[value="one"]').evaluate((option) => {
+      (option as HTMLOptionElement).value = ''
+    })
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
   it('classifies every retained select label, text, and value and samples a different safe option', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -2544,6 +2738,101 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       neutral.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('keeps associated-label embedded native values private and revalidates them before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/label-embedded-control-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    for (const label of [
+      'Sensitive label text field',
+      'Sensitive label select field',
+      'Sensitive label range field',
+      'Custom label native field',
+      'Overflow label native field',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
+    }
+    const publicPayload = JSON.stringify({
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+      capabilities: analysis.capabilities,
+    })
+    expect(publicPayload).not.toMatch(/Credit card number|Bank account|BIC|Reference note|Reference widget/)
+
+    const capabilityFor = (label: string) => {
+      const evidenceId = analysis.domEvidence.find((evidence) => evidence.label === label)!.id
+      return analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidenceId))!
+    }
+    const late = capabilityFor('Late label native field')
+    await page.locator('#late-label-native-source').evaluate((control) => {
+      (control as HTMLTextAreaElement).value = 'User password'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      late.name,
+      late.sampleInput,
+      undefined,
+      late.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-label-native-target, #late-label-native-detail').evaluateAll((controls) =>
+      controls.map((control) => (control as HTMLInputElement).value))).toEqual(['', ''])
+    await page.locator('#late-label-native-source').evaluate((control) => {
+      (control as HTMLTextAreaElement).value = 'Reference note'
+    })
+
+    const neutral = capabilityFor('Neutral label native field')
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutral.name,
+      neutral.sampleInput,
+      undefined,
+      neutral.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const wrappedService = createService()
+    services.push(wrappedService)
+    const wrappedAnalysis = await wrappedService.analyze(`${fixture.origin}/label-embedded-control-safety`)
+    const wrappedEvidence = wrappedAnalysis.domEvidence.find(({ label }) => label === 'Wrapped label target')!
+    const wrapped = wrappedAnalysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(wrappedEvidence.id))!
+    const wrappedResult = await wrappedService.execute(
+      wrappedAnalysis.sessionId,
+      wrappedAnalysis.sessionToken,
+      wrapped.name,
+      wrapped.sampleInput,
+      undefined,
+      wrapped.id,
+    )
+    expect(wrappedResult).toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await internalSession(wrappedService, wrappedAnalysis.sessionId).page
+      .locator('#wrapped-label-target').inputValue()).not.toBe('')
+
+    const raceService = createService({ actionStartDelayMs: 200 })
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/label-embedded-control-safety`)
+    const raceEvidence = raceAnalysis.domEvidence.find(({ label }) => label === 'Late label native field')!
+    const raceCapability = raceAnalysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(raceEvidence.id))!
+    const racePage = internalSession(raceService, raceAnalysis.sessionId).page
+    const pending = raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceCapability.name,
+      raceCapability.sampleInput,
+      undefined,
+      raceCapability.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await racePage.locator('#late-label-native-source').evaluate((control) => {
+      (control as HTMLTextAreaElement).value = 'Credit card number'
+    })
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('classifies bounded aria-description evidence and revalidates late mutations', async () => {
