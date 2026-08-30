@@ -281,8 +281,29 @@ export function isSameOriginHttpUrl(value: string, expectedOrigin: string): bool
   }
 }
 
-function tokenizeUntrustedEvidence(value: string): string {
-  return value
+function normalizeUntrustedSafetyEvidence(
+  value: unknown,
+  maxLength: number,
+): { value: string, overflow: boolean } {
+  const raw = String(value ?? '')
+  if (raw.length > maxLength) return { value: '', overflow: true }
+  let normalized: string
+  try {
+    normalized = String.prototype.normalize.call(raw, 'NFKC')
+  } catch {
+    return { value: '', overflow: true }
+  }
+  if (normalized.length > maxLength) return { value: '', overflow: true }
+  normalized = normalized.replace(/[\p{Default_Ignorable_Code_Point}\p{Cf}]/gu, '')
+  return normalized.length > maxLength
+    ? { value: '', overflow: true }
+    : { value: normalized, overflow: false }
+}
+
+function tokenizeUntrustedEvidence(value: string): string | undefined {
+  const normalized = normalizeUntrustedSafetyEvidence(value, MAX_SAFETY_EVIDENCE_LENGTH)
+  if (normalized.overflow) return undefined
+  return normalized.value
     .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
     .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, '$1 $2')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
@@ -301,11 +322,35 @@ export function isConsequentialNavigationUrl(value: string): boolean {
       }
     }
     const evidence = decoded.join('')
+    const tokenized = tokenizeUntrustedEvidence(evidence)
     return evidence.length > MAX_SAFETY_EVIDENCE_LENGTH
-      || UNSAFE_NAVIGATION_HINT.test(tokenizeUntrustedEvidence(evidence))
+      || tokenized === undefined
+      || UNSAFE_NAVIGATION_HINT.test(tokenized)
   } catch {
     return true
   }
+}
+
+function isEffectivelyVisibleSelectOption(option: Element): boolean {
+  if (!(option instanceof HTMLOptionElement) || !option.isConnected) return false
+  const hiddenGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'hidden')?.get
+  const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get
+  const getComputedStyle = Object.getOwnPropertyDescriptor(window, 'getComputedStyle')?.value
+  if (!hiddenGetter || !parentElementGetter || !getComputedStyle) return false
+  let current: Element | null = option
+  while (current && !(current instanceof HTMLSelectElement)) {
+    if (!(current instanceof HTMLElement) || hiddenGetter.call(current)) return false
+    const style = getComputedStyle.call(window, current)
+    if (
+      style.display === 'none'
+      || style.visibility === 'hidden'
+      || style.visibility === 'collapse'
+      || style.contentVisibility === 'hidden'
+      || Number.parseFloat(style.opacity || '1') <= 0
+    ) return false
+    current = parentElementGetter.call(current)
+  }
+  return current instanceof HTMLSelectElement
 }
 
 function assertSafeActionUrl(value: string, expectedOrigin: string): void {
@@ -399,6 +444,8 @@ function captureIsolatedSafetyEvidence(
   overflow: boolean
   optionEntries: Array<{ optionIndex: number, labelAttribute: string, text: string, value: string }>
   labelEntries: Array<{ text: string, imageAlts: string[] }>
+  ariaLabelledEntries: Array<{ text: string, imageAlts: string[] }>
+  ariaDescribedEntries: Array<{ text: string, imageAlts: string[] }>
 } {
   const getAttribute = Element.prototype.getAttribute
   const matches = Element.prototype.matches
@@ -442,18 +489,23 @@ function captureIsolatedSafetyEvidence(
     const values: string[] = []
     let nodesInspected = 0
     let overflow = false
-    while (nodesInspected < 256) {
-      const node = nextNode.call(walker)
-      if (!node) break
-      nodesInspected += 1
-      if (!(node instanceof HTMLImageElement)) continue
+    const retainAlt = (node: Element) => {
+      if (!(node instanceof HTMLImageElement)) return
       if (values.length >= 16) {
         overflow = true
-        break
+        return
       }
       const alt = bounded(getAttribute.call(node, 'alt') ?? '')
       values.push(alt.value)
       overflow ||= alt.overflow
+    }
+    retainAlt(root)
+    while (nodesInspected < 256) {
+      const node = nextNode.call(walker)
+      if (!node) break
+      nodesInspected += 1
+      retainAlt(node as Element)
+      if (overflow) break
       if (aggregateOverflow) break
     }
     if (!overflow && nodesInspected === 256 && nextNode.call(walker)) overflow = true
@@ -475,17 +527,29 @@ function captureIsolatedSafetyEvidence(
     }
     const overflow = raw.overflow || ids.length > 16
     if (ids.length > 16) ids.length = 16
-    const texts: Array<{ value: string, overflow: boolean }> = []
+    const entries: Array<{
+      text: { value: string, overflow: boolean }
+      imageAlts: string[]
+      overflow: boolean
+    }> = []
     for (const id of ids) {
       if (aggregateOverflow) break
       const node = document.getElementById(id)
-      texts.push(node instanceof Element ? boundedNodeText(node) : bounded(''))
+      const text = node instanceof Element ? boundedNodeText(node) : bounded('')
+      const imageAlts = node instanceof Element
+        ? boundedDescendantImageAlts(node)
+        : { values: [] as string[], overflow: false }
+      entries.push({
+        text,
+        imageAlts: imageAlts.values,
+        overflow: text.overflow || imageAlts.overflow,
+      })
     }
     return {
       raw: raw.value,
       ids,
-      texts,
-      overflow: aggregateOverflow || overflow || texts.some((text) => text.overflow),
+      entries,
+      overflow: aggregateOverflow || overflow || entries.some((entry) => entry.overflow),
     }
   }
   const attributeNames = [
@@ -591,7 +655,11 @@ function captureIsolatedSafetyEvidence(
     } else {
       for (let optionIndex = 0; !aggregateOverflow && optionIndex < options.length; optionIndex += 1) {
         const option = options.item(optionIndex)
-        if (!(option instanceof HTMLOptionElement) || matches.call(option, ':disabled')) continue
+        if (
+          !(option instanceof HTMLOptionElement)
+          || matches.call(option, ':disabled')
+          || !isEffectivelyVisibleSelectOption(option)
+        ) continue
         if (optionEntries.length >= 30) {
           optionOverflow = true
           break
@@ -619,8 +687,21 @@ function captureIsolatedSafetyEvidence(
     || anchorText.overflow
     || imageAlt.overflow
     || optionOverflow
-  if (overflow) return { snapshot: '', overflow: true, optionEntries: [], labelEntries: [] }
+  if (overflow) {
+    return {
+      snapshot: '',
+      overflow: true,
+      optionEntries: [],
+      labelEntries: [],
+      ariaLabelledEntries: [],
+      ariaDescribedEntries: [],
+    }
+  }
   const labelEntries = labels.map(({ text, imageAlts }) => ({ text: text.value, imageAlts }))
+  const ariaLabelledEntries = ariaLabelled.entries
+    .map(({ text, imageAlts }) => ({ text: text.value, imageAlts }))
+  const ariaDescribedEntries = ariaDescribed.entries
+    .map(({ text, imageAlts }) => ({ text: text.value, imageAlts }))
   const snapshot = JSON.stringify({
       attributes: attributes.map(({ name, value }) => [name, value]),
       ariaLabelled,
@@ -633,9 +714,23 @@ function captureIsolatedSafetyEvidence(
       overflow,
     })
   if (snapshot.length > maxTotalSafetyEvidenceLength) {
-    return { snapshot: '', overflow: true, optionEntries: [], labelEntries: [] }
+    return {
+      snapshot: '',
+      overflow: true,
+      optionEntries: [],
+      labelEntries: [],
+      ariaLabelledEntries: [],
+      ariaDescribedEntries: [],
+    }
   }
-  return { snapshot, overflow: false, optionEntries, labelEntries }
+  return {
+    snapshot,
+    overflow: false,
+    optionEntries,
+    labelEntries,
+    ariaLabelledEntries,
+    ariaDescribedEntries,
+  }
 }
 
 function classifyDomInIsolatedWorld({
@@ -671,10 +766,14 @@ function classifyDomInIsolatedWorld({
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, limit)
-    const tokenizeEvidence = (value: unknown) => boundedRaw(value)
-      .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
-      .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, '$1 $2')
-      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    const tokenizeEvidence = (value: unknown): string | undefined => {
+      const normalized = normalizeUntrustedSafetyEvidence(value, maxSafetyEvidenceLength)
+      if (normalized.overflow) return undefined
+      return normalized.value
+        .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
+        .replace(/(\p{Lu}+)(\p{Lu}\p{Ll})/gu, '$1 $2')
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    }
     const finiteNumber = (value: unknown): number | undefined => {
       const bounded = boundedRaw(value)
       if (bounded.length > maxSafetyEvidenceLength) return undefined
@@ -1114,9 +1213,11 @@ function classifyDomInIsolatedWorld({
         ariaLabelled.raw,
         ...ariaLabelled.ids,
         ...ariaLabelled.nodes.map(accessibleNodeText),
+        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts }) => imageAlts),
         ariaDescribed.raw,
         ...ariaDescribed.ids,
         ...ariaDescribed.nodes.map(accessibleNodeText),
+        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts }) => imageAlts),
         ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts }) => [labelText, ...imageAlts]),
         element.getAttribute('placeholder') ?? '',
         'name' in element ? element.name : '',
@@ -1132,11 +1233,19 @@ function classifyDomInIsolatedWorld({
           optionValue,
         ]),
       ].map((value) => String(value ?? ''))
-      const hasUnsafeEvidence = safetyEvidenceSources.some((value) =>
-        value.length > maxSafetyEvidenceLength || unsafePattern.test(tokenizeEvidence(value)))
+      const hasUnsafeEvidence = safetyEvidenceSources.some((value) => {
+        const tokenized = tokenizeEvidence(value)
+        return value.length > maxSafetyEvidenceLength
+          || tokenized === undefined
+          || unsafePattern.test(tokenized)
+      })
       const hasUnsafeNavigationEvidence = element instanceof HTMLAnchorElement
-        && safetyEvidenceSources.some((value) =>
-          value.length > maxSafetyEvidenceLength || unsafeNavigationPattern.test(tokenizeEvidence(value)))
+        && safetyEvidenceSources.some((value) => {
+          const tokenized = tokenizeEvidence(value)
+          return value.length > maxSafetyEvidenceLength
+            || tokenized === undefined
+            || unsafeNavigationPattern.test(tokenized)
+        })
       const hasSensitiveAutocomplete = autocompleteTokens.some((token) =>
         sensitiveAutocomplete.has(token)
         || token.startsWith('cc-')
@@ -1299,7 +1408,7 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
     }
     const classification = await cdp.send('Runtime.evaluate', {
-      expression: `(() => { const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
+      expression: `(() => { const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
       contextId: executionContextId,
       objectGroup,
       returnByValue: true,
@@ -1408,7 +1517,11 @@ function assertIsolatedControlOperable(
     const optionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
     const options = optionsGetter?.call(element) as HTMLOptionsCollection | undefined
     const option = options?.item(expectedOptionIndex)
-    if (!(option instanceof HTMLOptionElement) || matches.call(option, ':disabled')) {
+    if (
+      !(option instanceof HTMLOptionElement)
+      || matches.call(option, ':disabled')
+      || !isEffectivelyVisibleSelectOption(option)
+    ) {
       throw new Error('The isolated select option is disabled.')
     }
   }
@@ -1671,7 +1784,7 @@ async function callOnIsolatedNode<T>(
       throw new Error('The isolated browser control is not visibly painted.')
     }
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
       arguments: args.map((value) => ({ value })),
       objectGroup,

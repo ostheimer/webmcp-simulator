@@ -551,6 +551,85 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/aria-reference-image-alt-safety') {
+      response.end(`<!doctype html><title>ARIA image alt safety</title>
+        <span id="sensitive-aria-reference"><img alt="Neutral diagram"><img alt="Credit card number"></span>
+        <img id="direct-sensitive-reference" alt="User password">
+        <span id="late-aria-reference"><img id="late-aria-image" alt="Reference diagram"></span>
+        <span id="neutral-aria-reference"><img alt="Helpful overview"></span>
+        <span id="overflow-aria-reference"></span>
+        <form id="sensitive-aria-form">
+          <input id="sensitive-aria-input" type="text" name="reference" aria-labelledby="sensitive-aria-reference">
+          <input type="text" aria-label="Sensitive ARIA detail">
+        </form>
+        <form id="direct-sensitive-aria-form">
+          <input type="text" name="reference" aria-describedby="direct-sensitive-reference">
+          <input type="text" aria-label="Direct sensitive ARIA detail">
+        </form>
+        <form id="late-aria-form">
+          <input id="late-aria-input" type="text" name="reference" aria-describedby="late-aria-reference">
+          <input id="late-aria-detail" type="text" aria-label="Late ARIA detail">
+        </form>
+        <form id="neutral-aria-form">
+          <input id="neutral-aria-input" type="text" name="reference" aria-labelledby="neutral-aria-reference">
+          <input type="text" aria-label="Neutral ARIA detail">
+        </form>
+        <form id="overflow-aria-form">
+          <input type="text" name="reference" aria-describedby="overflow-aria-reference">
+          <input type="text" aria-label="Overflow ARIA detail">
+        </form>
+        <script>
+          const overflowReference = document.getElementById('overflow-aria-reference');
+          for (let index = 0; index < 17; index += 1) {
+            const image = document.createElement('img');
+            image.alt = 'Bounded ARIA image ' + index;
+            overflowReference.append(image);
+          }
+        </script>`)
+      return
+    }
+    if (requestUrl === '/unicode-safety-normalization') {
+      response.end(`<!doctype html><title>Unicode safety normalization</title>
+        <form id="zero-width-sensitive-form">
+          <input type="text" name="reference" aria-label="Credit ca&#x200B;rd number">
+          <input type="text" aria-label="Zero width detail">
+        </form>
+        <form id="compatibility-sensitive-form">
+          <input type="text" name="reference" aria-label="Ｐａｓｓｗｏｒｄ reference">
+          <input type="text" aria-label="Compatibility detail">
+        </form>
+        <form id="unicode-late-form">
+          <input id="unicode-late-input" type="text" name="reference" aria-label="Überblick Referenz">
+          <input type="text" aria-label="Unicode late detail">
+        </form>
+        <form id="unicode-race-form">
+          <input id="unicode-race-input" type="text" name="reference" aria-label="ASCII reference"
+            oninput="this.setAttribute('aria-label', 'Credit ca\u200Brd')">
+          <input type="text" aria-label="Unicode race detail">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/visible-select-options') {
+      response.end(`<!doctype html><title>Visible select options</title>
+        <select id="visible-options-filter" aria-label="Visibility filter" onchange="document.title=this.value">
+          <option value="visible-one" selected>Visible one</option>
+          <option value="hidden-direct" hidden>Hidden direct</option>
+          <optgroup label="Hidden group" hidden><option value="hidden-group">Hidden group option</option></optgroup>
+          <optgroup label="CSS hidden group" style="display:none"><option value="hidden-css-group">CSS hidden group option</option></optgroup>
+          <option value="hidden-css" style="visibility:hidden">Hidden CSS option</option>
+          <option id="visible-filter-two" value="visible-two">Visible two</option>
+        </select>
+        <form id="visible-select-form">
+          <select id="visible-form-select" aria-label="Visible form choice">
+            <option value="form-one" selected>Form one</option>
+            <option value="form-hidden" hidden>Form hidden</option>
+            <optgroup label="Form hidden group" hidden><option value="form-group-hidden">Form group hidden</option></optgroup>
+            <option value="form-two">Form two</option>
+          </select>
+          <input type="text" aria-label="Visible select detail">
+        </form>`)
+      return
+    }
     if (requestUrl === '/preparation-url-state') {
       response.end(`<!doctype html><title>Preparation URL state</title>
         <input id="url-state-search" type="search" aria-label="URL state search" oninput="
@@ -978,7 +1057,11 @@ describe('isConsequentialNavigationUrl', () => {
     expect(isConsequentialNavigationUrl('https://public.example.at/about#/checkout')).toBe(true)
     expect(isConsequentialNavigationUrl('https://public.example.at/about#/%62ooking')).toBe(true)
     expect(isConsequentialNavigationUrl('https://public.example.at/safe%ZZ?next=%63heckout')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://public.example.at/about#/chec%E2%80%8Bkout')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://public.example.at/about#/%EF%BD%83%EF%BD%88%EF%BD%85%EF%BD%83%EF%BD%8B%EF%BD%8F%EF%BD%95%EF%BD%94')).toBe(true)
+    expect(isConsequentialNavigationUrl(`https://public.example.at/${encodeURIComponent('\uFDFA'.repeat(300))}`)).toBe(true)
     expect(isConsequentialNavigationUrl('https://public.example.at/about#overview')).toBe(false)
+    expect(isConsequentialNavigationUrl('https://public.example.at/%C3%9Cberblick')).toBe(false)
   })
 })
 
@@ -1494,6 +1577,186 @@ describe('WrapperProofService security boundaries', () => {
       neutralForm.sampleInput,
       undefined,
       neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('classifies every ARIA-referenced image alt and revalidates late mutations and budgets', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/aria-reference-image-alt-safety`)
+
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    expect(analysis.domEvidence.filter(({ sensitive }) => sensitive)).toHaveLength(3)
+    const lateForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const page = internalSession(service, analysis.sessionId).page
+
+    await page.locator('#late-aria-image').evaluate((image) => {
+      image.setAttribute('alt', 'Credit card number')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-aria-input').inputValue()).toBe('')
+    expect(await page.locator('#late-aria-detail').inputValue()).toBe('')
+
+    await page.locator('#late-aria-image').evaluate((image) => {
+      image.setAttribute('alt', 'Reference diagram')
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+
+    const neutralForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('normalizes Unicode safety evidence identically and fails closed on late disguised terms', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/unicode-safety-normalization`)
+
+    expect(analysis.domEvidence.filter(({ sensitive }) => sensitive)).toHaveLength(2)
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    const safeForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const page = internalSession(service, analysis.sessionId).page
+
+    await page.locator('#unicode-late-input').evaluate((input) => {
+      input.setAttribute('aria-label', 'Credit ca\u200Brd number')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      safeForm.name,
+      safeForm.sampleInput,
+      undefined,
+      safeForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#unicode-late-input').inputValue()).toBe('')
+
+    await page.locator('#unicode-late-input').evaluate((input) => {
+      input.setAttribute('aria-label', 'Überblick Referenz')
+    })
+    const safeResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      safeForm.name,
+      safeForm.sampleInput,
+      undefined,
+      safeForm.id,
+    )
+    expect(safeResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = safeResult.analysis
+
+    const raceService = createService()
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/unicode-safety-normalization`)
+    const raceForm = raceAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    await expect(raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceForm.name,
+      raceForm.sampleInput,
+      undefined,
+      raceForm.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('maps only effectively visible select options and rejects late hiding before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/visible-select-options`)
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    const form = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+
+    expect(filter.inputSchema).toMatchObject({
+      properties: { optionIndex: { minimum: 0, maximum: 1 } },
+    })
+    expect(filter.sampleInput).toEqual({ optionIndex: 1 })
+    expect(form.inputSchema).toMatchObject({
+      properties: { field_1: { minimum: 0, maximum: 1 } },
+    })
+    expect(form.sampleInput).toEqual({ field_1: 1, field_2: 'A' })
+
+    const filterResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )
+    expect(filterResult.analysis.title).toBe('visible-two')
+    analysis = filterResult.analysis
+    const currentForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const formResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      currentForm.name,
+      currentForm.sampleInput,
+      undefined,
+      currentForm.id,
+    )
+    expect(formResult.structuredContent.targetStateVerified).toBe(true)
+    expect(await internalSession(service, analysis.sessionId).page.locator('#visible-form-select').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(3)
+
+    const lateService = createService()
+    services.push(lateService)
+    const lateAnalysis = await lateService.analyze(`${fixture.origin}/visible-select-options`)
+    const lateFilter = lateAnalysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    const latePage = internalSession(lateService, lateAnalysis.sessionId).page
+    await latePage.locator('#visible-filter-two').evaluate((option) => {
+      ;(option as HTMLOptionElement).hidden = true
+    })
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      lateFilter.name,
+      lateFilter.sampleInput,
+      undefined,
+      lateFilter.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await latePage.locator('#visible-options-filter').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(0)
+
+    await latePage.locator('#visible-filter-two').evaluate((option) => {
+      ;(option as HTMLOptionElement).hidden = false
+    })
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      lateFilter.name,
+      lateFilter.sampleInput,
+      undefined,
+      lateFilter.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
