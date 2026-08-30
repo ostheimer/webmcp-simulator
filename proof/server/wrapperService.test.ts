@@ -1075,6 +1075,78 @@ async function startFixture(): Promise<Fixture> {
         <a href="/about#neutral-inert">Neutral destination</a>`)
       return
     }
+    if (requestUrl === '/active-modal-inertness') {
+      response.end(`<!doctype html><title>Active modal inertness</title>
+        <form id="modal-background-form">
+          <input id="modal-background-value" type="text" aria-label="Background modal value">
+          <input id="modal-background-detail" type="text" aria-label="Background modal detail">
+        </form>
+        <a id="modal-background-link" href="/about#background-modal">Background modal destination</a>
+        <dialog id="active-modal">
+          <form id="modal-dialog-form">
+            <input id="modal-dialog-value" type="text" aria-label="Dialog modal value">
+            <input id="modal-dialog-detail" type="text" aria-label="Dialog modal detail">
+          </form>
+          <a id="modal-dialog-link" href="/about#dialog-modal">Dialog modal destination</a>
+        </dialog>
+        <script>
+          document.getElementById('active-modal').showModal();
+          const overrides = [
+            [Document.prototype, 'querySelector', function () { return null; }],
+            [Document.prototype, 'createTreeWalker', function () { throw new Error('hostile main-realm walker'); }],
+            [TreeWalker.prototype, 'nextNode', function () { return null; }],
+            [Node.prototype, 'contains', function () { return true; }],
+            [Element.prototype, 'matches', function () { return false; }],
+          ];
+          for (const [prototype, name, value] of overrides) {
+            try { Object.defineProperty(prototype, name, { configurable: true, value }); } catch {}
+          }
+        </script>`)
+      return
+    }
+    if (requestUrl === '/late-modal-inertness') {
+      response.end(`<!doctype html><title>Late modal inertness</title>
+        <form id="late-modal-form">
+          <input id="late-modal-value" type="text" aria-label="Late modal value">
+          <input id="late-modal-detail" type="text" aria-label="Late modal detail">
+        </form>
+        <a id="late-modal-link" href="/about#late-modal">Late modal destination</a>
+        <dialog id="late-modal"><p>Modal notice</p></dialog>`)
+      return
+    }
+    if (requestUrl === '/shadow-modal-inertness') {
+      response.end(`<!doctype html><title>Shadow modal inertness</title>
+        <form>
+          <input type="text" aria-label="Shadow background value">
+          <input type="text" aria-label="Shadow background detail">
+        </form>
+        <a href="/about#shadow-background">Shadow background destination</a>
+        <div id="shadow-modal-host"></div>
+        <script>
+          const root = document.getElementById('shadow-modal-host').attachShadow({ mode: 'closed' });
+          const dialog = document.createElement('dialog');
+          dialog.innerHTML = '<p>Shadow modal notice</p>';
+          root.append(dialog);
+          dialog.showModal();
+        </script>`)
+      return
+    }
+    if (requestUrl === '/shadow-modal-capture-race') {
+      response.end(`<!doctype html><title>Shadow modal capture race</title>
+        <form>
+          <input type="text" aria-label="Shadow race value">
+          <input type="text" aria-label="Shadow race detail">
+        </form>
+        <div id="shadow-race-host"></div>
+        <script>
+          const root = document.getElementById('shadow-race-host').attachShadow({ mode: 'closed' });
+          const dialog = document.createElement('dialog');
+          dialog.innerHTML = '<p>Shadow race notice</p>';
+          root.append(dialog);
+          globalThis.__shadowModalForTest = dialog;
+        </script>`)
+      return
+    }
     if (requestUrl === '/analysis-native-state') {
       response.end(`<!doctype html><title>Analysis native state</title>
         <form>
@@ -2006,6 +2078,7 @@ function createService(options: {
   beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
+  afterActionRecapture?: (page: Page) => Promise<void>
 } = {}) {
   const resolveTarget = async (value: string): Promise<PublicTarget> => {
     const url = new URL(value)
@@ -2029,6 +2102,7 @@ function createService(options: {
     beforeAnalysisScreenshot: options.beforeAnalysisScreenshot,
     afterAnalysisScreenshot: options.afterAnalysisScreenshot,
     beforeRadioGroupWrite: options.beforeRadioGroupWrite,
+    afterActionRecapture: options.afterActionRecapture,
   })
 }
 
@@ -2042,6 +2116,7 @@ function createBudgetedService() {
 interface InternalProofSession {
   page: Page
   cdp: CDPSession
+  context: { newCDPSession: (page: Page) => Promise<CDPSession> }
   expiresAt: number
   createdAtMs: number
 }
@@ -2625,7 +2700,7 @@ describe('WrapperProofService security boundaries', () => {
       validationMessage: 'Page-owned custom warning',
     })
     expect(customEvents).toBe(0)
-  })
+  }, 10_000)
 
   it('classifies every retained select label, text, and value and samples a different safe option', async () => {
     const fixture = await startFixture()
@@ -2772,7 +2847,7 @@ describe('WrapperProofService security boundaries', () => {
     })
     await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
-  })
+  }, 10_000)
 
   it('fails closed on incomplete enabled-option capture and initial multi-select state while keeping a safe control usable', async () => {
     const fixture = await startFixture()
@@ -3888,6 +3963,112 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
+  it('excludes implicitly inert background targets while an active modal is open', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/active-modal-inertness`)
+
+    const labels = analysis.domEvidence.map(({ label }) => label)
+    expect(labels).not.toContain('Background modal value')
+    expect(labels).not.toContain('Background modal destination')
+    expect(labels).toEqual(expect.arrayContaining([
+      'Dialog modal value',
+      'Dialog modal detail',
+      'Dialog modal destination',
+    ]))
+    expect(JSON.stringify(analysis)).not.toMatch(/modal:(?:none|\d+:)/)
+    const modalForm = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Dialog modal value'))!
+    expect(modalForm).toBeDefined()
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      modalForm.name,
+      modalForm.sampleInput,
+      undefined,
+      modalForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const shadowAnalysis = await service.analyze(`${fixture.origin}/shadow-modal-inertness`)
+    expect(shadowAnalysis.domEvidence.map(({ label }) => label)).not.toEqual(expect.arrayContaining([
+      'Shadow background value',
+      'Shadow background destination',
+    ]))
+    expect(JSON.stringify(shadowAnalysis)).not.toMatch(/modal:(?:none|\d+:)/)
+  })
+
+  it('revalidates late modal inertness before mutation and allows a fresh analysis after close', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/late-modal-inertness`)
+    const form = analysis.capabilities.find(({ kind }) => kind === 'prepare_form')!
+    const page = internalSession(service, analysis.sessionId).page
+
+    await page.locator('#late-modal').evaluate((dialog) => (dialog as HTMLDialogElement).showModal())
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-modal-value').inputValue()).toBe('')
+    expect(await page.locator('#late-modal-detail').inputValue()).toBe('')
+
+    await page.locator('#late-modal').evaluate((dialog) => (dialog as HTMLDialogElement).close())
+    expect(await service.closeSession(analysis.sessionId, analysis.sessionToken)).toBe(true)
+    const freshAnalysis = await service.analyze(`${fixture.origin}/late-modal-inertness`)
+    const freshForm = freshAnalysis.capabilities.find(({ kind }) => kind === 'prepare_form')!
+    await expect(service.execute(
+      freshAnalysis.sessionId,
+      freshAnalysis.sessionToken,
+      freshForm.name,
+      freshForm.sampleInput,
+      undefined,
+      freshForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('retries when a closed-shadow modal opens and closes across the screenshot boundary', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      beforeAnalysisScreenshot: async (page) => {
+        captureCalls += 1
+        if (captureCalls !== 1) return
+        await page.evaluate(() => {
+          ;(globalThis as typeof globalThis & { __shadowModalForTest: HTMLDialogElement })
+            .__shadowModalForTest.showModal()
+        })
+      },
+      afterAnalysisScreenshot: async (page) => {
+        if (captureCalls !== 1) return
+        await page.evaluate(() => {
+          ;(globalThis as typeof globalThis & { __shadowModalForTest: HTMLDialogElement })
+            .__shadowModalForTest.close()
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/shadow-modal-capture-race`)
+    expect(captureCalls).toBe(2)
+    const form = analysis.capabilities.find(({ kind }) => kind === 'prepare_form')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
   it('retries on native descriptor-state drift and never publishes stale private control values', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -3975,6 +4156,196 @@ describe('WrapperProofService security boundaries', () => {
       stableCapability.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
+
+  it('revalidates every requested form field after action recapture before reporting success', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let stateBeforeReset: string[] = []
+    const service = createService({
+      actionSettleMs: 20,
+      afterActionRecapture: async (page) => {
+        stateBeforeReset = await page.locator('#stable-first, #stable-second').evaluateAll((controls) =>
+          controls.map((control) => (control as HTMLInputElement).value))
+        await page.locator('#stable-first').evaluate((control) => {
+          ;(control as HTMLInputElement).value = ''
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/atomic-form-verification`)
+    const stableForm = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Stable first'))!
+    const expectedValues = Object.values(stableForm.sampleInput).map(String)
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      stableForm.name,
+      stableForm.sampleInput,
+      undefined,
+      stableForm.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(stateBeforeReset).toEqual(expectedValues)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+
+    const stableService = createService({ actionSettleMs: 20 })
+    services.push(stableService)
+    const stableAnalysis = await stableService.analyze(`${fixture.origin}/atomic-form-verification`)
+    const stableCapability = stableAnalysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => stableAnalysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Stable first'))!
+    await expect(stableService.execute(
+      stableAnalysis.sessionId,
+      stableAnalysis.sessionToken,
+      stableCapability.name,
+      stableCapability.sampleInput,
+      undefined,
+      stableCapability.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('invalidates the session if isolated script execution cannot be restored', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionSettleMs: 20 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/atomic-form-verification`)
+    const form = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Stable first'))!
+    const context = internalSession(service, analysis.sessionId).context
+    const newCDPSession = context.newCDPSession.bind(context)
+    let failRestore = true
+    context.newCDPSession = async (page) => {
+      const cdp = await newCDPSession(page)
+      const send = cdp.send.bind(cdp) as (method: string, params?: Record<string, unknown>) => Promise<unknown>
+      ;(cdp as unknown as { send: typeof send }).send = async (method, params) => {
+        if (
+          failRestore
+          && method === 'Emulation.setScriptExecutionDisabled'
+          && params?.value === false
+        ) {
+          failRestore = false
+          throw new Error('test-only restore failure')
+        }
+        return send(method, params)
+      }
+      return cdp
+    }
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(failRestore).toBe(false)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('propagates a script-restore invalidation out of action recapture without retrying it away', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let armRestoreFailure = false
+    let failRestore = false
+    const service = createService({
+      actionSettleMs: 20,
+      afterAnalysisScreenshot: async () => {
+        if (!armRestoreFailure) return
+        armRestoreFailure = false
+        failRestore = true
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/atomic-form-verification`)
+    const form = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Stable first'))!
+    const context = internalSession(service, analysis.sessionId).context
+    const newCDPSession = context.newCDPSession.bind(context)
+    context.newCDPSession = async (page) => {
+      const cdp = await newCDPSession(page)
+      const send = cdp.send.bind(cdp) as (method: string, params?: Record<string, unknown>) => Promise<unknown>
+      ;(cdp as unknown as { send: typeof send }).send = async (method, params) => {
+        if (
+          failRestore
+          && method === 'Emulation.setScriptExecutionDisabled'
+          && params?.value === false
+        ) {
+          failRestore = false
+          throw new Error('test-only recapture restore failure')
+        }
+        return send(method, params)
+      }
+      return cdp
+    }
+    armRestoreFailure = true
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(armRestoreFailure).toBe(false)
+    expect(failRestore).toBe(false)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  }, 10_000)
+
+  it('restores script execution after an ambiguous disable response before preserving the session', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({ actionSettleMs: 20 })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/atomic-form-verification`)
+    const form = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Stable first'))!
+    const context = internalSession(service, analysis.sessionId).context
+    const newCDPSession = context.newCDPSession.bind(context)
+    let failDisableResponse = true
+    let restoreCalls = 0
+    context.newCDPSession = async (page) => {
+      const cdp = await newCDPSession(page)
+      const send = cdp.send.bind(cdp) as (method: string, params?: Record<string, unknown>) => Promise<unknown>
+      ;(cdp as unknown as { send: typeof send }).send = async (method, params) => {
+        if (method === 'Emulation.setScriptExecutionDisabled' && params?.value === false) {
+          restoreCalls += 1
+        }
+        if (
+          failDisableResponse
+          && method === 'Emulation.setScriptExecutionDisabled'
+          && params?.value === true
+        ) {
+          failDisableResponse = false
+          await send(method, params)
+          throw new Error('test-only ambiguous disable response')
+        }
+        return send(method, params)
+      }
+      return cdp
+    }
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(failDisableResponse).toBe(false)
+    expect(restoreCalls).toBeGreaterThanOrEqual(1)
+    expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  }, 10_000)
 
   it('classifies every bounded descendant image alt on links and revalidates late mutations', async () => {
     const fixture = await startFixture()
@@ -4213,7 +4584,7 @@ describe('WrapperProofService security boundaries', () => {
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
-  it('retries an analysis capture after screenshot-bound DOM drift and publishes only the stable state', async () => {
+  it('rejects when action recapture stabilizes on a different requested-control safety identity', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     let captureCalls = 0
@@ -4233,19 +4604,17 @@ describe('WrapperProofService security boundaries', () => {
     const analysis = await service.analyze(`${fixture.origin}/`)
     const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
 
-    const result = await service.execute(
+    await expect(service.execute(
       analysis.sessionId,
       analysis.sessionToken,
       search.name,
       search.sampleInput,
       undefined,
       search.id,
-    )
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
 
     expect(captureCalls).toBe(3)
-    expect(result.analysis.capabilities.some(({ kind }) => kind === 'prepare_search')).toBe(false)
-    expect(result.analysis.capabilities.some(({ kind }) => kind === 'filter')).toBe(false)
-    expect(result.analysis.domEvidence.find(({ label }) => label === 'User password')).toMatchObject({ sensitive: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('fails closed after bounded analysis-capture retries on continuous DOM drift', async () => {
@@ -6693,7 +7062,7 @@ describe('WrapperProofService security boundaries', () => {
         targetStateVerified: true,
       },
     })
-  })
+  }, 10_000)
 
   it('blocks consequential subframes without invalidating a safe main-frame navigation', async () => {
     const fixture = await startFixture()

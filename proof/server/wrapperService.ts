@@ -41,6 +41,7 @@ const MAX_SAFETY_EVIDENCE_LENGTH = 4_096
 const MAX_TOTAL_SAFETY_EVIDENCE_LENGTH = 24 * 1_024
 const MAX_ANALYSIS_CAPTURE_ATTEMPTS = 2
 const MAX_ANALYSIS_SCROLL_NODES = 512
+const MAX_ACTIVE_TOP_LAYER_ELEMENTS = 32
 const UNSAFE_FIELD_HINT = /(?:^|\s)(?:cvc|cvv)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|order|ordering|purchase|purchasing|reservation|reserve|subscribe|termin|bestellen|bestellung|buchen|buchung|kaufen|kasse|reservieren|reservierung|warenkorb)\b/i
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
@@ -150,6 +151,8 @@ export interface WrapperProofServiceOptions {
   afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   /** Test-only hook for deterministic radio-group drift immediately before the atomic write. */
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
+  /** Test-only hook for deterministic target-state drift immediately after action recapture. */
+  afterActionRecapture?: (page: Page) => Promise<void>
 }
 
 interface PendingActionEvidence {
@@ -547,6 +550,7 @@ function captureIsolatedSafetyEvidence(
   maxSafetyEvidenceLength: number,
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
+  modalState: { elements: Element[], overflow: boolean, limit: number },
 ): {
   snapshot: string
   overflow: boolean
@@ -684,6 +688,7 @@ function captureIsolatedSafetyEvidence(
     element,
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
+    modalState,
   )
   const inertAncestors: string[] = []
   for (const value of effectiveInert.values) {
@@ -1522,11 +1527,19 @@ function captureEffectiveInert(
   element: Element,
   maxSafetyEvidenceLength: number,
   maxTotalSafetyEvidenceLength: number,
+  modalState: { elements: Element[], overflow: boolean, limit: number },
 ): { inert: boolean, values: string[], overflow: boolean } {
   const getAttribute = Element.prototype.getAttribute
   const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get
   const inertGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'inert')?.get
-  if (!parentElementGetter || !inertGetter) return { inert: true, values: [], overflow: true }
+  const contains = Node.prototype.contains
+  const matches = Element.prototype.matches
+  if (
+    !parentElementGetter
+    || !inertGetter
+    || !contains
+    || !matches
+  ) return { inert: true, values: [], overflow: true }
   const values: string[] = []
   let inert = false
   let retainedLength = 0
@@ -1551,7 +1564,46 @@ function captureEffectiveInert(
     current = parentElementGetter.call(current) as Element | null
     inspected += 1
   }
-  return { inert, values, overflow: current !== null }
+  if (current !== null) return { inert: true, values, overflow: true }
+
+  if (
+    !modalState
+    || !Array.isArray(modalState.elements)
+    || modalState.overflow
+    || !Number.isInteger(modalState.limit)
+    || modalState.limit < 1
+    || modalState.elements.length > modalState.limit
+  ) {
+    return { inert: true, values, overflow: true }
+  }
+  let modalCount = 0
+  for (let index = 0; index < modalState.elements.length; index += 1) {
+    const node = modalState.elements[index]
+    if (!(node instanceof Element)) return { inert: true, values, overflow: true }
+    if (!(node instanceof HTMLDialogElement) || !matches.call(node, ':modal')) continue
+    modalCount += 1
+    const containsTarget = node === element || contains.call(node, element)
+    const marker = `modal:${index}:${containsTarget ? 'inside' : 'outside'}`
+    retainedLength += JSON.stringify(marker).length + 8
+    if (retainedLength > maxTotalSafetyEvidenceLength) {
+      return { inert: true, values, overflow: true }
+    }
+    values.push(marker)
+    if (!containsTarget) inert = true
+  }
+  if (modalCount === 0) {
+    const marker = 'modal:none'
+    retainedLength += JSON.stringify(marker).length + 8
+    if (retainedLength > maxTotalSafetyEvidenceLength) {
+      return { inert: true, values, overflow: true }
+    }
+    values.push(marker)
+  }
+  return {
+    inert,
+    values,
+    overflow: false,
+  }
 }
 
 function classifyDomInIsolatedWorld({
@@ -1578,7 +1630,7 @@ function classifyDomInIsolatedWorld({
   viewportWidth: number
   viewportHeight: number
   maxSafetyEvidenceLength: number
-}): { descriptors: Array<Omit<DetectedControl, 'backendNodeId'>>, elements: Element[] } {
+}, modalState: { elements: Element[], overflow: boolean, limit: number }): { descriptors: Array<Omit<DetectedControl, 'backendNodeId'>>, elements: Element[] } {
     const unsafePattern = new RegExp(unsafePatternSource, 'i')
     const unsafeNavigationPattern = new RegExp(unsafeNavigationPatternSource, 'i')
     const sensitiveAutocomplete = new Set<string>(sensitiveAutocompleteTokens)
@@ -1687,6 +1739,7 @@ function classifyDomInIsolatedWorld({
         node,
         maxSafetyEvidenceLength,
         maxTotalSafetyEvidenceLength,
+        modalState,
       )
       if (
         controls.length < maxControls
@@ -1720,6 +1773,7 @@ function classifyDomInIsolatedWorld({
         maxSafetyEvidenceLength,
         maxTotalSafetyEvidenceLength,
         maxSelectOptionsInspected,
+        modalState,
       )
       const referencedElements = (attribute: string) => {
         const source = element.getAttribute(attribute) ?? ''
@@ -2242,6 +2296,65 @@ async function createIsolatedWorld(cdp: CDPSession): Promise<number> {
   return world.executionContextId
 }
 
+async function createIsolatedModalState(
+  cdp: CDPSession,
+  executionContextId: number,
+  objectGroup: string,
+  storageKey?: string,
+): Promise<string> {
+  await cdp.send('DOM.enable')
+  const topLayer = await cdp.send('DOM.getTopLayerElements') as { nodeIds?: number[] }
+  const nodeIds = Array.isArray(topLayer.nodeIds) ? topLayer.nodeIds : []
+  const overflow = nodeIds.length > MAX_ACTIVE_TOP_LAYER_ELEMENTS
+  const expression = storageKey
+    ? `globalThis[${JSON.stringify(storageKey)}] = ({ elements: [], overflow: ${overflow}, limit: ${MAX_ACTIVE_TOP_LAYER_ELEMENTS} })`
+    : `({ elements: [], overflow: ${overflow}, limit: ${MAX_ACTIVE_TOP_LAYER_ELEMENTS} })`
+  const created = await cdp.send('Runtime.evaluate', {
+    expression,
+    contextId: executionContextId,
+    objectGroup,
+  }) as { result?: { objectId?: string }, exceptionDetails?: unknown }
+  const stateObjectId = created.result?.objectId
+  if (created.exceptionDetails || !stateObjectId) {
+    throw new Error('The isolated modal state could not be created.')
+  }
+  if (overflow) return stateObjectId
+
+  for (const nodeId of nodeIds) {
+    const resolved = await cdp.send('DOM.resolveNode', {
+      nodeId,
+      executionContextId,
+      objectGroup,
+    }) as { object?: { objectId?: string } }
+    const objectId = resolved.object?.objectId
+    if (!objectId) throw new Error('The isolated top-layer identity is unavailable.')
+    const retained = await cdp.send('Runtime.callFunctionOn', {
+      functionDeclaration: 'function(element) { if (!(element instanceof Element)) throw new Error("Invalid top-layer element"); this.elements.push(element); }',
+      objectId: stateObjectId,
+      arguments: [{ objectId }],
+      objectGroup,
+      returnByValue: true,
+    }) as { exceptionDetails?: unknown }
+    if (retained.exceptionDetails) {
+      throw new Error('The isolated top-layer state could not be retained.')
+    }
+  }
+  return stateObjectId
+}
+
+async function restoreIsolatedScriptExecution(cdp: CDPSession): Promise<void> {
+  try {
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: false })
+  } catch {
+    throw new WrapperServiceError(
+      'action_failed',
+      'The isolated browser could not safely resume the page.',
+      409,
+      { sessionInvalidated: true },
+    )
+  }
+}
+
 async function isCdpPaintVisible(
   cdp: CDPSession,
   executionContextId: number,
@@ -2315,9 +2428,11 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
   const cdp = await context.newCDPSession(page)
   const objectGroup = `webmcp-proof-${randomUUID()}`
   const storageKey = `__webmcp_elements_${randomUUID().replaceAll('-', '')}`
+  const modalStorageKey = `__webmcp_modals_${randomUUID().replaceAll('-', '')}`
   let executionContextId: number | undefined
   try {
     executionContextId = await createIsolatedWorld(cdp)
+    await createIsolatedModalState(cdp, executionContextId, objectGroup, modalStorageKey)
     const classifierInput = {
       unsafePatternSource: UNSAFE_FIELD_HINT.source,
       unsafeNavigationPatternSource: UNSAFE_NAVIGATION_HINT.source,
@@ -2332,7 +2447,7 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
     }
     const classification = await cdp.send('Runtime.evaluate', {
-      expression: `(() => { const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
+      expression: `(() => { const WRAPPER_MAX_DOM_ELEMENTS_INSPECTED = ${WRAPPER_MAX_DOM_ELEMENTS_INSPECTED}; const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}, globalThis[${JSON.stringify(modalStorageKey)}]); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
       contextId: executionContextId,
       objectGroup,
       returnByValue: true,
@@ -2376,7 +2491,7 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
   } finally {
     if (executionContextId) {
       await cdp.send('Runtime.evaluate', {
-        expression: `delete globalThis[${JSON.stringify(storageKey)}]`,
+        expression: `delete globalThis[${JSON.stringify(storageKey)}]; delete globalThis[${JSON.stringify(modalStorageKey)}]`,
         contextId: executionContextId,
         returnByValue: true,
       }).catch(() => undefined)
@@ -2396,6 +2511,9 @@ interface AnalysisCaptureGuardSnapshot {
   url: string
   title: string
   overflow: boolean
+  topLayerChangeCount: number
+  topLayerSignature: string
+  topLayerOverflow: boolean
 }
 
 async function createAnalysisCaptureGuard(
@@ -2421,6 +2539,7 @@ async function createAnalysisCaptureGuard(
   const executionContextId = await createIsolatedWorld(cdp)
   let navigationCount = 0
   let styleSheetChangeCount = 0
+  let topLayerChangeCount = 0
   const recordNavigation = (rawEvent: unknown) => {
     const event = rawEvent as { frame?: { id?: string }, frameId?: string }
     if ((event.frame?.id ?? event.frameId) === mainFrameId) navigationCount += 1
@@ -2431,6 +2550,8 @@ async function createAnalysisCaptureGuard(
   cdp.on('CSS.styleSheetAdded', recordStyleSheetChange)
   cdp.on('CSS.styleSheetChanged', recordStyleSheetChange)
   cdp.on('CSS.styleSheetRemoved', recordStyleSheetChange)
+  const recordTopLayerChange = () => { topLayerChangeCount += 1 }
+  cdp.on('DOM.topLayerElementsUpdated', recordTopLayerChange)
   const initialized = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
       const state = {
@@ -2508,6 +2629,9 @@ async function createAnalysisCaptureGuard(
 
   return {
     snapshot: async () => {
+      const topLayer = await cdp.send('DOM.getTopLayerElements') as { nodeIds?: number[] }
+      const topLayerNodeIds = Array.isArray(topLayer.nodeIds) ? topLayer.nodeIds : []
+      const topLayerOverflow = topLayerNodeIds.length > MAX_ACTIVE_TOP_LAYER_ELEMENTS
       const captured = await cdp.send('Runtime.evaluate', {
         expression: `new Promise((resolve) => queueMicrotask(() => {
           const state = globalThis[${JSON.stringify(storageKey)}];
@@ -2544,13 +2668,20 @@ async function createAnalysisCaptureGuard(
         awaitPromise: true,
         returnByValue: true,
       }) as {
-        result?: { value?: Omit<AnalysisCaptureGuardSnapshot, 'navigationCount'> }
+        result?: { value?: Omit<AnalysisCaptureGuardSnapshot, 'navigationCount' | 'styleSheetChangeCount' | 'topLayerChangeCount' | 'topLayerSignature' | 'topLayerOverflow'> }
         exceptionDetails?: unknown
       }
       if (captured.exceptionDetails || !captured.result?.value) {
         throw new Error('The isolated analysis mutation guard became unavailable.')
       }
-      return { ...captured.result.value, navigationCount, styleSheetChangeCount }
+      return {
+        ...captured.result.value,
+        navigationCount,
+        styleSheetChangeCount,
+        topLayerChangeCount,
+        topLayerSignature: topLayerOverflow ? '' : JSON.stringify(topLayerNodeIds),
+        topLayerOverflow,
+      }
     },
     arm: async (backendNodeIds) => {
       for (const backendNodeId of backendNodeIds) {
@@ -2686,6 +2817,7 @@ async function createAnalysisCaptureGuard(
       await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
       await cdp.send('CSS.disable').catch(() => undefined)
       await cdp.send('DOM.disable').catch(() => undefined)
+      cdp.off('DOM.topLayerElementsUpdated', recordTopLayerChange)
       await cdp.detach().catch(() => undefined)
     },
   }
@@ -2709,12 +2841,14 @@ function assertIsolatedSafetySnapshot(
   maxSafetyEvidenceLength: number,
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
+  modalState: { elements: Element[], overflow: boolean, limit: number },
 ): void {
   const current = captureIsolatedSafetyEvidence(
     element,
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
+    modalState,
   )
   if (!expectedSnapshot || current.overflow || current.snapshot !== expectedSnapshot) {
     throw new Error('The isolated control safety evidence changed.')
@@ -2727,6 +2861,7 @@ function assertIsolatedControlOperable(
   expectedOptionIndex: number,
   maxSafetyEvidenceLength: number,
   maxTotalSafetyEvidenceLength: number,
+  modalState: { elements: Element[], overflow: boolean, limit: number },
   expectedValue?: IsolatedControlState,
 ): void {
   const matches = Element.prototype.matches
@@ -2745,6 +2880,7 @@ function assertIsolatedControlOperable(
     element,
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
+    modalState,
   )
   if (effectiveInert.inert || effectiveInert.overflow) {
     throw new Error('The isolated control is inert.')
@@ -2920,6 +3056,7 @@ function assertIsolatedTextValueAllowed(
 
 function readIsolatedControlState(
   this: Element,
+  modalState: { elements: Element[], overflow: boolean, limit: number },
   expectedType: string,
   requireVisible: boolean,
   viewportWidth: number,
@@ -2945,6 +3082,7 @@ function readIsolatedControlState(
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
+    modalState,
   )
   assertIsolatedControlOperable(
     this,
@@ -2952,6 +3090,7 @@ function readIsolatedControlState(
     expectedOptionIndex,
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
+    modalState,
   )
   assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType)
@@ -2971,6 +3110,7 @@ function readIsolatedControlState(
 
 function writeIsolatedControlState(
   this: Element,
+  modalState: { elements: Element[], overflow: boolean, limit: number },
   expectedType: string,
   value: IsolatedControlState,
   viewportWidth: number,
@@ -3004,6 +3144,7 @@ function writeIsolatedControlState(
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
+    modalState,
   )
   assertIsolatedControlOperable(
     this,
@@ -3011,6 +3152,7 @@ function writeIsolatedControlState(
     expectedOptionIndex,
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
+    modalState,
     value,
   )
   assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
@@ -3044,6 +3186,7 @@ function writeIsolatedControlState(
 
 function writeIsolatedRadioGroupState(
   this: Element,
+  modalState: { elements: Element[], overflow: boolean, limit: number },
   selectedIndex: number,
   expectedGroupSize: number,
   expectedSafetySnapshotsJson: string,
@@ -3089,6 +3232,7 @@ function writeIsolatedRadioGroupState(
       maxSafetyEvidenceLength,
       maxTotalSafetyEvidenceLength,
       maxSelectOptionsInspected,
+      modalState,
     )
     assertIsolatedControlOperable(
       member,
@@ -3096,6 +3240,7 @@ function writeIsolatedRadioGroupState(
       -1,
       maxSafetyEvidenceLength,
       maxTotalSafetyEvidenceLength,
+      modalState,
     )
     assertIsolatedRadioGroupBound(member, expectedGroupSize, maxElementsInspected)
     before.push(Boolean(checkedGetter.call(member)))
@@ -3111,6 +3256,7 @@ function writeIsolatedRadioGroupState(
 
 function verifyIsolatedFormState(
   this: Element,
+  modalState: { elements: Element[], overflow: boolean, limit: number },
   bindingsJson: string,
   viewportWidth: number,
   viewportHeight: number,
@@ -3155,6 +3301,7 @@ function verifyIsolatedFormState(
     for (let index = 0; index < members.length; index += 1) {
       const state = readIsolatedControlState.call(
         members[index],
+        modalState,
         binding.expectedTypes[index],
         true,
         viewportWidth,
@@ -3181,6 +3328,7 @@ function verifyIsolatedFormState(
 
 function readIsolatedLinkTarget(
   this: Element,
+  modalState: { elements: Element[], overflow: boolean, limit: number },
   expectedUrl: string,
   viewportWidth: number,
   viewportHeight: number,
@@ -3198,6 +3346,7 @@ function readIsolatedLinkTarget(
     this,
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
+    modalState,
   )
   if (
     !(this instanceof HTMLAnchorElement)
@@ -3216,6 +3365,7 @@ function readIsolatedLinkTarget(
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
+    modalState,
   )
   return this.href
 }
@@ -3229,8 +3379,12 @@ async function callOnIsolatedNode<T>(
 ): Promise<T> {
   const cdp = await context.newCDPSession(page)
   const objectGroup = `webmcp-action-${randomUUID()}`
+  let scriptExecutionDisabled = false
   try {
     const executionContextId = await createIsolatedWorld(cdp)
+    scriptExecutionDisabled = true
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: true })
+    const modalStateObjectId = await createIsolatedModalState(cdp, executionContextId, objectGroup)
     const resolved = await cdp.send('DOM.resolveNode', {
       backendNodeId,
       executionContextId,
@@ -3242,9 +3396,9 @@ async function callOnIsolatedNode<T>(
       throw new Error('The isolated browser control is not visibly painted.')
     }
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const WRAPPER_MAX_DOM_ELEMENTS_INSPECTED = ${WRAPPER_MAX_DOM_ELEMENTS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
-      arguments: args.map((value) => ({ value })),
+      arguments: [{ objectId: modalStateObjectId }, ...args.map((value) => ({ value }))],
       objectGroup,
       returnByValue: true,
       awaitPromise: true,
@@ -3252,8 +3406,14 @@ async function callOnIsolatedNode<T>(
     if (called.exceptionDetails) throw new Error('The isolated browser control operation failed.')
     return called.result?.value as T
   } finally {
-    await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
-    await cdp.detach().catch(() => undefined)
+    try {
+      if (scriptExecutionDisabled) {
+        await restoreIsolatedScriptExecution(cdp)
+      }
+    } finally {
+      await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+      await cdp.detach().catch(() => undefined)
+    }
   }
 }
 
@@ -3334,8 +3494,12 @@ async function writeRadioGroupState(
   ) throw new Error('The isolated radio group binding is incomplete.')
   const cdp = await context.newCDPSession(page)
   const objectGroup = `webmcp-radio-action-${randomUUID()}`
+  let scriptExecutionDisabled = false
   try {
     const executionContextId = await createIsolatedWorld(cdp)
+    scriptExecutionDisabled = true
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: true })
+    const modalStateObjectId = await createIsolatedModalState(cdp, executionContextId, objectGroup)
     const resolved = await Promise.all(backendNodeIds.map(async (backendNodeId) => {
       const result = await cdp.send('DOM.resolveNode', {
         backendNodeId,
@@ -3351,9 +3515,10 @@ async function writeRadioGroupState(
     }))
     const selectedObjectId = resolved[selectedIndex]
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); return (${writeIsolatedRadioGroupState.toString()}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const WRAPPER_MAX_DOM_ELEMENTS_INSPECTED = ${WRAPPER_MAX_DOM_ELEMENTS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); return (${writeIsolatedRadioGroupState.toString()}).apply(this, args); }`,
       objectId: selectedObjectId,
       arguments: [
+        { objectId: modalStateObjectId },
         { value: selectedIndex },
         { value: expectedGroupSize },
         { value: JSON.stringify(expectedSafetySnapshots) },
@@ -3374,8 +3539,14 @@ async function writeRadioGroupState(
     }
     return called.result.value
   } finally {
-    await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
-    await cdp.detach().catch(() => undefined)
+    try {
+      if (scriptExecutionDisabled) {
+        await restoreIsolatedScriptExecution(cdp)
+      }
+    } finally {
+      await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+      await cdp.detach().catch(() => undefined)
+    }
   }
 }
 
@@ -3388,8 +3559,12 @@ async function verifyFormState(
   const flattened = bindings.flatMap(({ backendNodeIds }) => backendNodeIds)
   const cdp = await context.newCDPSession(page)
   const objectGroup = `webmcp-form-verification-${randomUUID()}`
+  let scriptExecutionDisabled = false
   try {
     const executionContextId = await createIsolatedWorld(cdp)
+    scriptExecutionDisabled = true
+    await cdp.send('Emulation.setScriptExecutionDisabled', { value: true })
+    const modalStateObjectId = await createIsolatedModalState(cdp, executionContextId, objectGroup)
     const resolved = await Promise.all(flattened.map(async (backendNodeId) => {
       const result = await cdp.send('DOM.resolveNode', {
         backendNodeId,
@@ -3404,9 +3579,10 @@ async function verifyFormState(
       return objectId
     }))
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const readIsolatedControlState = (${readIsolatedControlState.toString()}); return (${verifyIsolatedFormState.toString()}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const WRAPPER_MAX_DOM_ELEMENTS_INSPECTED = ${WRAPPER_MAX_DOM_ELEMENTS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const readIsolatedControlState = (${readIsolatedControlState.toString()}); return (${verifyIsolatedFormState.toString()}).apply(this, args); }`,
       objectId: resolved[0],
       arguments: [
+        { objectId: modalStateObjectId },
         {
           value: JSON.stringify(bindings.map(({ backendNodeIds, ...binding }) => ({
             ...binding,
@@ -3430,8 +3606,14 @@ async function verifyFormState(
     }
     return { changed: called.result.value.changed }
   } finally {
-    await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
-    await cdp.detach().catch(() => undefined)
+    try {
+      if (scriptExecutionDisabled) {
+        await restoreIsolatedScriptExecution(cdp)
+      }
+    } finally {
+      await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+      await cdp.detach().catch(() => undefined)
+    }
   }
 }
 
@@ -3464,35 +3646,33 @@ async function revalidateDomEvidence(
   page: Page,
   evidence: DetectedControl[],
 ): Promise<void> {
-  await Promise.all(evidence
-    .filter(({ sensitive }) => !sensitive)
-    .map(async (control) => {
-      if (control.tag === 'a') {
-        const expectedUrl = control.optionValues?.[0]
-        if (!expectedUrl) throw new Error('The isolated link identity is incomplete.')
-        await readLinkTarget(
-          context,
-          page,
-          control.backendNodeId,
-          expectedUrl,
-          control.safetySnapshot,
-        )
-        return
-      }
-      const currentState = await readControlState(
+  for (const control of evidence.filter(({ sensitive }) => !sensitive)) {
+    if (control.tag === 'a') {
+      const expectedUrl = control.optionValues?.[0]
+      if (!expectedUrl) throw new Error('The isolated link identity is incomplete.')
+      await readLinkTarget(
         context,
         page,
         control.backendNodeId,
-        control.type,
-        true,
+        expectedUrl,
         control.safetySnapshot,
-        -1,
-        control.type === 'radio' ? control.radioGroupSize ?? -1 : -1,
       )
-      if (currentState !== control.analysisState) {
-        throw new Error('The isolated control state changed while analysis evidence was captured.')
-      }
-    }))
+      continue
+    }
+    const currentState = await readControlState(
+      context,
+      page,
+      control.backendNodeId,
+      control.type,
+      true,
+      control.safetySnapshot,
+      -1,
+      control.type === 'radio' ? control.radioGroupSize ?? -1 : -1,
+    )
+    if (currentState !== control.analysisState) {
+      throw new Error('The isolated control state changed while analysis evidence was captured.')
+    }
+  }
 }
 
 async function collectAxEvidence(
@@ -3941,17 +4121,19 @@ async function actionWouldChange(
       const safetySnapshots = field.safetySnapshots ?? []
       const selectedIndex = Number(value)
       if (!backendNodeIds[selectedIndex]) return true
-      const states = await Promise.all(backendNodeIds.map((backendNodeId, index) =>
-        readControlState(
+      const states: IsolatedControlState[] = []
+      for (let index = 0; index < backendNodeIds.length; index += 1) {
+        states.push(await readControlState(
           context,
           page,
-          backendNodeId,
+          backendNodeIds[index],
           'radio',
           true,
           safetySnapshots[index],
           -1,
           field.radioGroupSize ?? -1,
-        )))
+        ))
+      }
       if (!states[selectedIndex] || states.filter(Boolean).length !== 1) return true
     } else if (field.type === 'checkbox' || field.type === 'radio') {
       if (await readControlState(
@@ -3993,6 +4175,7 @@ export class WrapperProofService {
   private readonly beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   private readonly afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   private readonly beforeRadioGroupWrite?: (page: Page) => Promise<void>
+  private readonly afterActionRecapture?: (page: Page) => Promise<void>
 
   constructor(options: WrapperProofServiceOptions = {}) {
     this.resolveTarget = options.resolveTarget ?? resolvePublicTarget
@@ -4010,6 +4193,7 @@ export class WrapperProofService {
     this.beforeAnalysisScreenshot = options.beforeAnalysisScreenshot
     this.afterAnalysisScreenshot = options.afterAnalysisScreenshot
     this.beforeRadioGroupWrite = options.beforeRadioGroupWrite
+    this.afterActionRecapture = options.afterActionRecapture
   }
 
   private reserveAnalysisSlot(): void {
@@ -4181,6 +4365,7 @@ export class WrapperProofService {
         const before = await guard.snapshot()
         if (
           before.overflow
+          || before.topLayerOverflow
           || before.scrollChanged
           || before.scrollOverflow
           || before.scrollStateMismatch
@@ -4205,6 +4390,9 @@ export class WrapperProofService {
         const after = await guard.snapshot()
         if (
           after.overflow
+          || after.topLayerOverflow
+          || after.topLayerChangeCount !== before.topLayerChangeCount
+          || after.topLayerSignature !== before.topLayerSignature
           || after.mutationCount !== 0
           || after.navigationCount !== 0
           || after.scrollChanged
@@ -4224,6 +4412,7 @@ export class WrapperProofService {
         screenshot = candidateScreenshot
         break
       } catch (error) {
+        if (error instanceof WrapperServiceError && error.sessionInvalidated === true) throw error
         lastCaptureError = error
       } finally {
         await guard.stop()
@@ -4756,6 +4945,13 @@ export class WrapperProofService {
       const analysis = await raceWithSessionPolicy(session, this.collectAnalysis(session), signal)
       throwIfAborted(signal)
       assertSafeActionUrl(session.page.url(), session.targetOrigin)
+      await raceWithSessionPolicy(
+        session,
+        this.afterActionRecapture?.(session.page) ?? Promise.resolve(),
+        signal,
+      )
+      await raceWithSessionPolicy(session, evidence.verify(), signal)
+      throwIfAborted(signal)
       let targetChanged = beforeActionTargetDigests === null
         && analysis.screenshotDataUrl !== beforeActionScreenshotDataUrl
       if (beforeActionTargetDigests !== null) {
@@ -4811,11 +5007,13 @@ export class WrapperProofService {
       pausedAnimations = null
       if (animationRestoreFailed) actionStarted = true
       const sessionExpired = error instanceof WrapperServiceError && error.code === 'session_expired'
-      if (actionStarted || sessionExpired) {
+      const explicitlyInvalidated = error instanceof WrapperServiceError && error.sessionInvalidated === true
+      if (actionStarted || sessionExpired || explicitlyInvalidated) {
         await this.destroySession(sessionId)
         await actionPromise?.catch(() => undefined)
       }
       if (signal?.aborted) throw abortError()
+      if (explicitlyInvalidated && error instanceof WrapperServiceError) throw error
       if (actionStarted && error instanceof WrapperServiceError) {
         throw new WrapperServiceError(error.code, error.message, error.status, { sessionInvalidated: true })
       }
