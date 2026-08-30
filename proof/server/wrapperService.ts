@@ -572,6 +572,17 @@ function captureIsolatedSafetyEvidence(
     if (!traversalComplete && !overflow && !aggregateOverflow && nextNode.call(walker)) overflow = true
     return { values, overflow: aggregateOverflow || overflow }
   }
+  const effectiveAriaDisabled = captureEffectiveAriaDisabled(
+    element,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+  )
+  const ariaDisabledAncestors: string[] = []
+  for (const value of effectiveAriaDisabled.values) {
+    const captured = bounded(value)
+    ariaDisabledAncestors.push(captured.value)
+    aggregateOverflow ||= captured.overflow
+  }
   const referenced = (root: Element, attribute: string) => {
     const rawSource = getAttribute.call(root, attribute) ?? ''
     const raw = bounded(rawSource)
@@ -1006,6 +1017,7 @@ function captureIsolatedSafetyEvidence(
     || generatedContent.overflow
     || optionOverflow
     || ownerContextOverflow
+    || effectiveAriaDisabled.overflow
   if (overflow) {
     return {
       snapshot: '',
@@ -1061,6 +1073,7 @@ function captureIsolatedSafetyEvidence(
       generatedContent: generatedContent.values,
       optionEntries,
       ownerContext: ownerContextSnapshots,
+      ariaDisabledAncestors,
       overflow,
     })
   if (snapshot.length > maxTotalSafetyEvidenceLength) {
@@ -1089,10 +1102,38 @@ function captureIsolatedSafetyEvidence(
   }
 }
 
-function isExplicitlyAriaDisabled(element: Element, maxSafetyEvidenceLength: number): boolean {
-  const source = Element.prototype.getAttribute.call(element, 'aria-disabled') ?? ''
-  return source.length > maxSafetyEvidenceLength
-    || source.trim().toLowerCase() === 'true'
+function captureEffectiveAriaDisabled(
+  element: Element,
+  maxSafetyEvidenceLength: number,
+  maxTotalSafetyEvidenceLength: number,
+): { disabled: boolean, values: string[], overflow: boolean } {
+  const getAttribute = Element.prototype.getAttribute
+  const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get
+  if (!parentElementGetter) return { disabled: true, values: [], overflow: true }
+  const values: string[] = []
+  let disabled = false
+  let retainedLength = 0
+  let current: Element | null = element
+  let inspected = 0
+  while (current && inspected < 256) {
+    const source = String(getAttribute.call(current, 'aria-disabled') ?? '')
+    if (source.length > maxSafetyEvidenceLength) {
+      return { disabled: true, values, overflow: true }
+    }
+    retainedLength += JSON.stringify(source).length + 8
+    if (retainedLength > maxTotalSafetyEvidenceLength) {
+      return { disabled: true, values, overflow: true }
+    }
+    values.push(source)
+    if (source.trim().toLowerCase() === 'true') disabled = true
+    current = parentElementGetter.call(current) as Element | null
+    inspected += 1
+  }
+  return {
+    disabled,
+    values,
+    overflow: current !== null,
+  }
 }
 
 function classifyDomInIsolatedWorld({
@@ -1219,12 +1260,18 @@ function classifyDomInIsolatedWorld({
         && !(node instanceof HTMLAnchorElement)
       ) continue
       if (node instanceof HTMLAnchorElement && !node.hasAttribute('href')) continue
+      const ariaDisabled = captureEffectiveAriaDisabled(
+        node,
+        maxSafetyEvidenceLength,
+        maxTotalSafetyEvidenceLength,
+      )
       if (
         controls.length < maxControls
         &&
         isElementScreenshotVisible(node, viewportWidth, viewportHeight)
         && !matches.call(node, ':disabled')
-        && !isExplicitlyAriaDisabled(node, maxSafetyEvidenceLength)
+        && !ariaDisabled.disabled
+        && !ariaDisabled.overflow
         && !isReadOnlyControl(node)
       ) controls.push(node)
     }
@@ -1803,7 +1850,7 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
     }
     const classification = await cdp.send('Runtime.evaluate', {
-      expression: `(() => { const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const isExplicitlyAriaDisabled = (${isExplicitlyAriaDisabled.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
+      expression: `(() => { const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
       contextId: executionContextId,
       objectGroup,
       returnByValue: true,
@@ -2061,13 +2108,19 @@ function assertIsolatedControlOperable(
   expectedType: string,
   expectedOptionIndex: number,
   maxSafetyEvidenceLength: number,
+  maxTotalSafetyEvidenceLength: number,
   expectedValue?: IsolatedControlState,
 ): void {
   const matches = Element.prototype.matches
   if (matches.call(element, ':disabled')) {
     throw new Error('The isolated control is disabled.')
   }
-  if (isExplicitlyAriaDisabled(element, maxSafetyEvidenceLength)) {
+  const ariaDisabled = captureEffectiveAriaDisabled(
+    element,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+  )
+  if (ariaDisabled.disabled || ariaDisabled.overflow) {
     throw new Error('The isolated control is aria-disabled.')
   }
   if (element instanceof HTMLInputElement) {
@@ -2240,7 +2293,13 @@ function readIsolatedControlState(
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
   )
-  assertIsolatedControlOperable(this, expectedType, expectedOptionIndex, maxSafetyEvidenceLength)
+  assertIsolatedControlOperable(
+    this,
+    expectedType,
+    expectedOptionIndex,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+  )
   assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType)
   if (expectedType === 'select-one') {
@@ -2293,7 +2352,14 @@ function writeIsolatedControlState(
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
   )
-  assertIsolatedControlOperable(this, expectedType, expectedOptionIndex, maxSafetyEvidenceLength, value)
+  assertIsolatedControlOperable(
+    this,
+    expectedType,
+    expectedOptionIndex,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+    value,
+  )
   assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType, value)
   assertIsolatedTextValueAllowed(this, expectedType, value)
@@ -2366,7 +2432,13 @@ function writeIsolatedRadioGroupState(
       maxTotalSafetyEvidenceLength,
       maxSelectOptionsInspected,
     )
-    assertIsolatedControlOperable(member, 'radio', -1, maxSafetyEvidenceLength)
+    assertIsolatedControlOperable(
+      member,
+      'radio',
+      -1,
+      maxSafetyEvidenceLength,
+      maxTotalSafetyEvidenceLength,
+    )
     assertIsolatedRadioGroupBound(member, expectedGroupSize, maxElementsInspected)
     before.push(Boolean(checkedGetter.call(member)))
   }
@@ -2388,10 +2460,16 @@ function readIsolatedLinkTarget(
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
 ): string {
+  const ariaDisabled = captureEffectiveAriaDisabled(
+    this,
+    maxSafetyEvidenceLength,
+    maxTotalSafetyEvidenceLength,
+  )
   if (
     !(this instanceof HTMLAnchorElement)
     || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)
-    || isExplicitlyAriaDisabled(this, maxSafetyEvidenceLength)
+    || ariaDisabled.disabled
+    || ariaDisabled.overflow
     || this.href !== expectedUrl
   ) {
     throw new Error('The isolated visible link is no longer available.')
@@ -2428,7 +2506,7 @@ async function callOnIsolatedNode<T>(
       throw new Error('The isolated browser control is not visibly painted.')
     }
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const isExplicitlyAriaDisabled = (${isExplicitlyAriaDisabled.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); const assertIsolatedDateLikeValueAllowed = (${assertIsolatedDateLikeValueAllowed.toString()}); const assertIsolatedTextValueAllowed = (${assertIsolatedTextValueAllowed.toString()}); return (${functionDeclaration}).apply(this, args); }`,
       objectId,
       arguments: args.map((value) => ({ value })),
       objectGroup,
@@ -2537,7 +2615,7 @@ async function writeRadioGroupState(
     }))
     const selectedObjectId = resolved[selectedIndex]
     const called = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const isExplicitlyAriaDisabled = (${isExplicitlyAriaDisabled.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); return (${writeIsolatedRadioGroupState.toString()}).apply(this, args); }`,
+      functionDeclaration: `function(...args) { const MAX_SAFETY_EVIDENCE_LENGTH = ${MAX_SAFETY_EVIDENCE_LENGTH}; const WRAPPER_MAX_SELECT_OPTIONS_INSPECTED = ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED}; const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const assertIsolatedSafetySnapshot = (${assertIsolatedSafetySnapshot.toString()}); const assertIsolatedControlOperable = (${assertIsolatedControlOperable.toString()}); const assertIsolatedRadioGroupBound = (${assertIsolatedRadioGroupBound.toString()}); return (${writeIsolatedRadioGroupState.toString()}).apply(this, args); }`,
       objectId: selectedObjectId,
       arguments: [
         { value: selectedIndex },

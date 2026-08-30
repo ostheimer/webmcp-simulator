@@ -86,6 +86,30 @@ function pendingAnalyzeRequest(options: { clientId: string, sourceIp: string, si
   }
 }
 
+function pendingActionRequest(options: { clientId: string, sourceIp: string, signal?: AbortSignal }) {
+  const encoder = new TextEncoder()
+  let finish!: () => void
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(JSON.stringify({
+        sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+        sessionToken: 'A'.repeat(43),
+        capabilityId: 'capability-streamed-action',
+        toolName: 'prepare_page_search',
+        input: { query: 'safe' },
+      }).slice(0, -1)))
+      finish = () => {
+        controller.enqueue(encoder.encode('}'))
+        controller.close()
+      }
+    },
+  })
+  return {
+    request: rawRequest('/api/wrapper/action', body, options),
+    finish,
+  }
+}
+
 function observeBodyAccess(targetRequest: Request): { request: Request, count: () => number } {
   const body = targetRequest.body
   let accesses = 0
@@ -712,6 +736,170 @@ describe('production wrapper API boundaries', () => {
     })
   })
 
+  it('applies the absolute action deadline to streamed bodies without touching the session', async () => {
+    const execute = vi.fn(async () => ({ ok: true }))
+    const target = backend({ execute })
+    const sourceIp = '198.51.100.245'
+    const slowBody = pendingActionRequest({
+      clientId: 'action_deadline_stream_01',
+      sourceIp,
+    })
+
+    const timedOut = await handleActionRequest(slowBody.request, target, { actionTimeoutMs: 20 })
+    expect(timedOut.status).toBe(504)
+    expect(await timedOut.json()).toEqual({
+      error: 'The isolated browser action exceeded its fixed time limit.',
+      code: 'action_timeout',
+      sessionInvalidated: false,
+    })
+    expect(execute).not.toHaveBeenCalled()
+
+    const retry = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-streamed-action',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, {
+      clientId: 'action_deadline_stream_02',
+      sourceIp,
+    }), target, { actionTimeoutMs: 1_000 })
+    expect(retry.status).toBe(200)
+    expect(execute).toHaveBeenCalledOnce()
+  })
+
+  it('distinguishes a client-aborted action body from the action deadline', async () => {
+    const controller = new AbortController()
+    const execute = vi.fn(async () => ({ ok: true }))
+    const target = backend({ execute })
+    const slowBody = pendingActionRequest({
+      clientId: 'action_cancel_stream_001',
+      sourceIp: '198.51.100.246',
+      signal: controller.signal,
+    })
+    const pending = handleActionRequest(slowBody.request, target, { actionTimeoutMs: 1_000 })
+    controller.abort()
+
+    const cancelled = await pending
+    expect(cancelled.status).toBe(499)
+    expect(await cancelled.json()).toEqual({
+      error: 'The isolated browser operation was cancelled.',
+      code: 'cancelled',
+      sessionInvalidated: false,
+    })
+    expect(execute).not.toHaveBeenCalled()
+  })
+
+  it('invalidates and closes a late action result when the handler deadline expires after backend start', async () => {
+    let resolveLate!: (value: unknown) => void
+    const execute = vi.fn(async () => new Promise<unknown>((resolve) => {
+      resolveLate = resolve
+    }))
+    const closeSession = vi.fn(async () => true)
+    const target = backend({ execute, closeSession })
+    const response = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-late-action',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, {
+      clientId: 'action_late_result_0001',
+      sourceIp: '198.51.100.247',
+    }), target, { actionTimeoutMs: 20 })
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser action exceeded its fixed time limit.',
+      code: 'action_timeout',
+      sessionInvalidated: true,
+    })
+    expect(execute).toHaveBeenCalledOnce()
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+    expect(closeSession).toHaveBeenCalledWith(
+      'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      'A'.repeat(43),
+    )
+
+    resolveLate({
+      finalUrl: 'https://public.example.at/',
+      analysis: {
+        sessionId: 'late-action-session',
+        sessionToken: 'late-action-token',
+      },
+    })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(closeSession).toHaveBeenCalledOnce()
+  })
+
+  it('does not return success when the absolute action deadline expires during response serialization', async () => {
+    const closeSession = vi.fn(async () => true)
+    const target = backend({
+      closeSession,
+      execute: vi.fn(async () => ({
+        analysis: {
+          sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+          sessionToken: 'A'.repeat(43),
+        },
+        toJSON() {
+          const stopAt = Date.now() + 20
+          while (Date.now() < stopAt) { /* deterministic synchronous response stall */ }
+          return { ok: true }
+        },
+      })),
+    })
+    const response = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-response-deadline',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, {
+      clientId: 'action_response_deadline_1',
+      sourceIp: '198.51.100.248',
+    }), target, { actionTimeoutMs: 5 })
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser action exceeded its fixed time limit.',
+      code: 'action_timeout',
+      sessionInvalidated: true,
+    })
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+  })
+
+  it('keeps timeout and cleanup semantics when response serialization throws after the action deadline', async () => {
+    const closeSession = vi.fn(async () => true)
+    const target = backend({
+      closeSession,
+      execute: vi.fn(async () => ({
+        toJSON() {
+          const stopAt = Date.now() + 20
+          while (Date.now() < stopAt) { /* deterministic synchronous response stall */ }
+          throw new Error('hostile serialization detail')
+        },
+      })),
+    })
+    const response = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-response-throw',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, {
+      clientId: 'action_response_throw_001',
+      sourceIp: '198.51.100.249',
+    }), target, { actionTimeoutMs: 5 })
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser action exceeded its fixed time limit.',
+      code: 'action_timeout',
+      sessionInvalidated: true,
+    })
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+  })
+
   it('marks only typed pre-backend action failures as non-invalidating', async () => {
     const validBody = {
       sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
@@ -859,12 +1047,15 @@ describe('production wrapper API boundaries', () => {
     expect(await abortedResponse.json()).toEqual({
       error: 'The isolated browser operation was cancelled.',
       code: 'cancelled',
+      sessionInvalidated: false,
     })
   })
 
   it('propagates request abort and reports structured provider capacity failures honestly', async () => {
     const controller = new AbortController()
+    const closeSession = vi.fn(async () => true)
     const aborting = backend({
+      closeSession,
       execute: vi.fn(async (_id, _token, _tool, _input, signal) => {
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
         await new Promise((_resolve, reject) => signal?.addEventListener('abort', () => {
@@ -879,8 +1070,20 @@ describe('production wrapper API boundaries', () => {
       toolName: 'prepare_page_search',
       input: { query: 'x' },
     }, { clientId: 'abort_client_000000001', signal: controller.signal }), aborting)
+    await vi.waitFor(() => expect(aborting.execute).toHaveBeenCalledOnce())
     controller.abort()
-    expect((await responsePromise).status).toBe(499)
+    const aborted = await responsePromise
+    expect(aborted.status).toBe(499)
+    expect(await aborted.json()).toEqual({
+      error: 'The isolated browser operation was cancelled.',
+      code: 'cancelled',
+      sessionInvalidated: true,
+    })
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+    expect(closeSession).toHaveBeenCalledWith(
+      'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      'A'.repeat(43),
+    )
 
     const quota = backend({
       analyze: vi.fn(async () => {

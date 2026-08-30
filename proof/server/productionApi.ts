@@ -3,6 +3,7 @@ import { isIP } from 'node:net'
 import { SandboxWrapperService } from './sandboxWrapperService.ts'
 import { WrapperServiceError } from './wrapperErrors.ts'
 import {
+  WRAPPER_ACTION_TIMEOUT_MS,
   WRAPPER_ANALYSIS_TIMEOUT_MS,
   WRAPPER_MAX_REQUEST_BODY_BYTES,
   WRAPPER_MAX_RATE_IDENTITIES_PER_FUNCTION,
@@ -80,6 +81,8 @@ export interface ProductionWrapperBackend {
 export interface ProductionRequestOptions {
   /** Test-only override; production uses the fixed absolute analysis deadline. */
   analysisTimeoutMs?: number
+  /** Test-only override; production uses the fixed absolute action deadline. */
+  actionTimeoutMs?: number
 }
 
 class HttpError extends Error {
@@ -269,9 +272,22 @@ function publicError(error: unknown): HttpError {
   return new HttpError('The isolated browser operation failed.', 500, 'internal_error')
 }
 
-async function handle(operation: () => Promise<unknown>): Promise<Response> {
+async function handle(
+  operation: () => Promise<unknown>,
+  assertSuccessResponseAllowed?: () => void,
+): Promise<Response> {
   try {
-    return jsonResponse(200, await operation())
+    const value = await operation()
+    assertSuccessResponseAllowed?.()
+    let response: Response
+    try {
+      response = jsonResponse(200, value)
+    } catch (error) {
+      assertSuccessResponseAllowed?.()
+      throw error
+    }
+    assertSuccessResponseAllowed?.()
+    return response
   } catch (error) {
     const safe = publicError(error)
     return jsonResponse(safe.status, {
@@ -358,14 +374,66 @@ export function handleAnalyzeRequest(
 export function handleActionRequest(
   request: Request,
   backend: ProductionWrapperBackend = service,
+  options: ProductionRequestOptions = {},
 ): Promise<Response> {
+  const timeoutMs = options.actionTimeoutMs ?? WRAPPER_ACTION_TIMEOUT_MS
+  const deadlineAtMs = Date.now() + Math.max(0, timeoutMs)
+  let deadlineExpired = false
+  let backendStarted = false
+  let acceptedSession: { sessionId: string, sessionToken: string } | undefined
+  const operationController = new AbortController()
+  const onRequestAbort = () => operationController.abort()
+  request.signal.addEventListener('abort', onRequestAbort, { once: true })
+  if (request.signal.aborted) operationController.abort()
+  const deadlineTimer = setTimeout(() => {
+    deadlineExpired = true
+    operationController.abort()
+  }, Math.max(0, timeoutMs))
+  deadlineTimer.unref?.()
+  const deadlineReached = () => deadlineExpired || Date.now() >= deadlineAtMs
+  const actionTimeoutError = () => new HttpError(
+    'The isolated browser action exceeded its fixed time limit.',
+    504,
+    'action_timeout',
+    { sessionInvalidated: backendStarted },
+  )
+  const actionCancelledError = () => new HttpError(
+    'The isolated browser operation was cancelled.',
+    499,
+    'cancelled',
+    { sessionInvalidated: backendStarted },
+  )
+  let cleanupStarted = false
+  const cleanupActionSession = (sessionId: string, sessionToken: string) => {
+    if (cleanupStarted) return
+    cleanupStarted = true
+    void backend.closeSession(sessionId, sessionToken).catch(() => undefined)
+  }
+  const cleanupLateAction = (value: unknown) => {
+    if (acceptedSession) {
+      cleanupActionSession(acceptedSession.sessionId, acceptedSession.sessionToken)
+      return
+    }
+    if (!value || typeof value !== 'object') return
+    const analysis = (value as { analysis?: unknown }).analysis
+    if (!analysis || typeof analysis !== 'object') return
+    const result = analysis as { sessionId?: unknown, sessionToken?: unknown }
+    if (typeof result.sessionId !== 'string' || typeof result.sessionToken !== 'string') return
+    cleanupActionSession(result.sessionId, result.sessionToken)
+  }
+  const assertActionResponseAllowed = () => {
+    if (!deadlineReached() && !request.signal.aborted) return
+    operationController.abort()
+    if (acceptedSession) cleanupActionSession(acceptedSession.sessionId, acceptedSession.sessionToken)
+    if (deadlineReached()) throw actionTimeoutError()
+    throw actionCancelledError()
+  }
   return handle(async () => {
-    let body: Record<string, unknown>
     try {
       assertRequestMethod(request, 'POST')
       const { sourceId } = assertRequestBoundary(request)
       consumeRateLimit(actionRates, sourceId, MAX_ACTIONS_PER_WINDOW, ACTION_RATE_WINDOW_MS)
-      body = await readJson(request)
+      const body = await readJson(request, operationController.signal)
       if (
         typeof body.sessionId !== 'string'
         || typeof body.sessionToken !== 'string'
@@ -375,8 +443,36 @@ export function handleActionRequest(
         || typeof body.input !== 'object'
         || Array.isArray(body.input)
       ) throw new HttpError('sessionId, sessionToken, capabilityId, toolName, and input are required.', 400, 'invalid_action')
+      if (deadlineReached()) throw actionTimeoutError()
+      acceptedSession = { sessionId: body.sessionId, sessionToken: body.sessionToken }
+      backendStarted = true
+      const actionPromise = backend.execute(
+        body.sessionId,
+        body.sessionToken,
+        body.toolName,
+        body.input as Record<string, unknown>,
+        operationController.signal,
+        body.capabilityId,
+      )
+      let result: unknown
+      try {
+        result = await raceRequestOperation(actionPromise, operationController.signal)
+      } catch (error) {
+        if (operationController.signal.aborted) {
+          if (acceptedSession) cleanupActionSession(acceptedSession.sessionId, acceptedSession.sessionToken)
+          void actionPromise.then(cleanupLateAction).catch(() => undefined)
+        }
+        throw error
+      }
+      if (deadlineReached()) {
+        cleanupActionSession(body.sessionId, body.sessionToken)
+        throw actionTimeoutError()
+      }
+      return result
     } catch (error) {
-      if (error instanceof HttpError) {
+      if (deadlineReached()) throw actionTimeoutError()
+      if (request.signal.aborted) throw actionCancelledError()
+      if (!backendStarted && error instanceof HttpError) {
         throw new HttpError(error.message, error.status, error.code, {
           sessionInvalidated: false,
           headers: error.headers,
@@ -384,14 +480,9 @@ export function handleActionRequest(
       }
       throw error
     }
-    return backend.execute(
-      body.sessionId,
-      body.sessionToken,
-      body.toolName,
-      body.input as Record<string, unknown>,
-      request.signal,
-      body.capabilityId,
-    )
+  }, assertActionResponseAllowed).finally(() => {
+    clearTimeout(deadlineTimer)
+    request.signal.removeEventListener('abort', onRequestAbort)
   })
 }
 

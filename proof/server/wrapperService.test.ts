@@ -1080,7 +1080,51 @@ async function startFixture(): Promise<Fixture> {
         <form id="aria-false-form">
           <input id="aria-false-control" type="text" aria-label="ARIA false value" aria-disabled="false">
           <input type="text" aria-label="ARIA false detail">
+        </form>
+        <form id="ancestor-disabled-form" aria-disabled="true">
+          <input id="ancestor-disabled-control" type="text" aria-label="Ancestor unavailable value" aria-disabled="false">
+          <input type="text" aria-label="Ancestor unavailable detail">
+        </form>
+        <div id="ancestor-disabled-navigation" aria-disabled="true">
+          <a id="ancestor-disabled-link" href="/safe-target">Ancestor unavailable link</a>
+        </div>
+        <div id="ancestor-false-navigation" aria-disabled="false">
+          <a id="ancestor-false-link" href="/safe-target">Ancestor false link</a>
+        </div>
+        <form id="ancestor-disabled-radio-form" aria-disabled="true">
+          <input id="ancestor-radio-a" type="radio" name="ancestor_mode" value="a"><label for="ancestor-radio-a">Ancestor A</label>
+          <input id="ancestor-radio-b" type="radio" name="ancestor_mode" value="b"><label for="ancestor-radio-b">Ancestor B</label>
+          <input type="text" aria-label="Ancestor radio detail">
+        </form>
+        <form id="ancestor-false-radio-form" aria-disabled="false">
+          <input id="ancestor-safe-radio-a" type="radio" name="safe_ancestor_mode" value="a" checked><label for="ancestor-safe-radio-a">Ancestor safe A</label>
+          <input id="ancestor-safe-radio-b" type="radio" name="safe_ancestor_mode" value="b"><label for="ancestor-safe-radio-b">Ancestor safe B</label>
+          <input type="text" aria-label="Ancestor safe radio detail">
         </form>`)
+      return
+    }
+    if (requestUrl === '/aria-disabled-depth') {
+      response.end(`<!doctype html><title>ARIA disabled depth</title>
+        <form id="deep-form"></form>
+        <form id="safe-depth-form">
+          <input id="safe-depth-control" type="text" aria-label="Safe depth value">
+          <input type="text" aria-label="Safe depth detail">
+        </form>
+        <script>
+          const deepForm = document.getElementById('deep-form');
+          let parent = deepForm;
+          for (let index = 0; index < 270; index += 1) {
+            const wrapper = document.createElement('div');
+            parent.appendChild(wrapper);
+            parent = wrapper;
+          }
+          for (const label of ['Too deep value', 'Too deep detail']) {
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.setAttribute('aria-label', label);
+            parent.appendChild(input);
+          }
+        </script>`)
       return
     }
     if (requestUrl === '/date-like-forms') {
@@ -2720,8 +2764,6 @@ describe('WrapperProofService security boundaries', () => {
       'Sensitive legend detail',
       'Reference overflow value',
       'Reference overflow detail',
-      'Depth overflow value',
-      'Depth overflow detail',
       'Text overflow value',
       'Text overflow detail',
       'Aggregate overflow value',
@@ -2729,6 +2771,8 @@ describe('WrapperProofService security boundaries', () => {
       'Fieldset overflow value',
       'Fieldset overflow detail',
     ]) expect(evidenceByLabel.get(label)?.sensitive).toBe(true)
+    expect(evidenceByLabel.get('Depth overflow value')).toBeUndefined()
+    expect(evidenceByLabel.get('Depth overflow detail')).toBeUndefined()
 
     const forms = analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')
     expect(forms).toHaveLength(2)
@@ -3638,10 +3682,51 @@ describe('WrapperProofService security boundaries', () => {
 
     const ariaFalse = analysis.domEvidence.find(({ label }) => label === 'ARIA false value')!
     expect(analysis.capabilities.some(({ evidenceIds }) => evidenceIds.includes(ariaFalse.id))).toBe(true)
+    expect(analysis.domEvidence.find(({ label }) => label === 'Ancestor unavailable value')).toBeUndefined()
+    expect(analysis.domEvidence.find(({ label }) => label === 'Ancestor unavailable link')).toBeUndefined()
+    expect(analysis.domEvidence.find(({ label }) => label === 'Ancestor A')).toBeUndefined()
+    const ancestorFalseLink = analysis.domEvidence.find(({ label }) => label === 'Ancestor false link')!
+    const ancestorFalseNavigation = analysis.capabilities.find(({ evidenceIds }) =>
+      evidenceIds.includes(ancestorFalseLink.id))!
+    expect(ancestorFalseNavigation).toBeDefined()
+    const ancestorSafeRadio = analysis.domEvidence.find(({ label }) => label === 'Ancestor safe A')!
+    const ancestorSafeRadioForm = analysis.capabilities.find(({ evidenceIds }) =>
+      evidenceIds.includes(ancestorSafeRadio.id))!
+    expect(ancestorSafeRadioForm).toBeDefined()
+    expect(JSON.stringify(analysis)).not.toContain('ariaDisabledAncestors')
     const enabledEvidence = analysis.domEvidence.find(({ label }) => label === 'Enabled value')!
     const enabledForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(enabledEvidence.id))!
     const page = internalSession(service, analysis.sessionId).page
-    await page.locator('#enabled-control').evaluate((control) => control.setAttribute('aria-disabled', 'true'))
+    await page.locator('#ancestor-false-navigation').evaluate((container) =>
+      container.setAttribute('aria-disabled', 'true'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      ancestorFalseNavigation.name,
+      ancestorFalseNavigation.sampleInput,
+      undefined,
+      ancestorFalseNavigation.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409, sessionInvalidated: false })
+    expect(page.url()).toBe(`${fixture.origin}/action-operability`)
+    await page.locator('#ancestor-false-navigation').evaluate((container) =>
+      container.setAttribute('aria-disabled', 'false'))
+
+    await page.locator('#ancestor-false-radio-form').evaluate((form) =>
+      form.setAttribute('aria-disabled', 'true'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      ancestorSafeRadioForm.name,
+      ancestorSafeRadioForm.sampleInput,
+      undefined,
+      ancestorSafeRadioForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409, sessionInvalidated: false })
+    expect(await page.locator('#ancestor-safe-radio-a').isChecked()).toBe(true)
+    expect(await page.locator('#ancestor-safe-radio-b').isChecked()).toBe(false)
+    await page.locator('#ancestor-false-radio-form').evaluate((form) =>
+      form.setAttribute('aria-disabled', 'false'))
+
+    await page.locator('#enabled-form').evaluate((form) => form.setAttribute('aria-disabled', 'true'))
 
     await expect(service.execute(
       analysis.sessionId,
@@ -3654,7 +3739,7 @@ describe('WrapperProofService security boundaries', () => {
     expect(await page.locator('#enabled-control').inputValue()).toBe('')
     expect(await page.locator('#enabled-form input').nth(1).inputValue()).toBe('')
 
-    await page.locator('#enabled-control').evaluate((control) => control.removeAttribute('aria-disabled'))
+    await page.locator('#enabled-form').evaluate((form) => form.removeAttribute('aria-disabled'))
     await expect(service.execute(
       analysis.sessionId,
       analysis.sessionToken,
@@ -3683,10 +3768,30 @@ describe('WrapperProofService security boundaries', () => {
       enabledForm.id,
     )
     await new Promise((resolve) => setTimeout(resolve, 40))
-    await page.locator('#enabled-control').evaluate((control) => control.setAttribute('aria-disabled', 'true'))
+    await page.locator('#enabled-form').evaluate((form) => form.setAttribute('aria-disabled', 'true'))
 
     await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('fails closed on an over-budget ARIA-disabled ancestor chain while retaining safe controls', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/aria-disabled-depth`)
+
+    expect(analysis.domEvidence.find(({ label }) => label === 'Too deep value')).toBeUndefined()
+    const safeEvidence = analysis.domEvidence.find(({ label }) => label === 'Safe depth value')!
+    const safeForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(safeEvidence.id))!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      safeForm.name,
+      safeForm.sampleInput,
+      undefined,
+      safeForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
   it('publishes only finite Chromium-native date-like value sets and validates them before mutation', async () => {
