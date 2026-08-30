@@ -588,6 +588,42 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/aria-reference-attribute-safety') {
+      response.end(`<!doctype html><title>ARIA reference attribute safety</title>
+        <span id="sensitive-aria-label-reference" aria-label="Credit card number"></span>
+        <svg><g id="sensitive-title-reference" title="User password"></g></svg>
+        <span id="late-attribute-reference" aria-label="Reference note" title="Reference title"></span>
+        <span id="neutral-attribute-reference" aria-label="Helpful context" title="Overview"></span>
+        <form id="sensitive-aria-label-form">
+          <input type="text" name="reference" aria-labelledby="sensitive-aria-label-reference">
+          <input type="text" aria-label="Sensitive ARIA label detail">
+        </form>
+        <form id="sensitive-title-form">
+          <input type="text" name="reference" aria-describedby="sensitive-title-reference">
+          <input type="text" aria-label="Sensitive title detail">
+        </form>
+        <form id="late-attribute-form">
+          <input id="late-attribute-input" type="text" name="reference" aria-describedby="late-attribute-reference">
+          <input id="late-attribute-detail" type="text" aria-label="Late attribute detail">
+        </form>
+        <form id="neutral-attribute-form">
+          <input type="text" name="reference" aria-labelledby="neutral-attribute-reference">
+          <input type="text" aria-label="Neutral attribute detail">
+        </form>
+        <form id="overflow-attribute-form">
+          <input type="text" name="reference" aria-labelledby="overflow-reference-0 overflow-reference-1 overflow-reference-2 overflow-reference-3 overflow-reference-4 overflow-reference-5 overflow-reference-6">
+          <input type="text" aria-label="Overflow attribute detail">
+        </form>
+        <script>
+          for (let index = 0; index < 7; index += 1) {
+            const reference = document.createElement('span');
+            reference.id = 'overflow-reference-' + index;
+            reference.setAttribute('aria-label', 'x'.repeat(4000));
+            document.body.prepend(reference);
+          }
+        </script>`)
+      return
+    }
     if (requestUrl === '/unicode-safety-normalization') {
       response.end(`<!doctype html><title>Unicode safety normalization</title>
         <form id="zero-width-sensitive-form">
@@ -983,6 +1019,7 @@ function createService(options: {
   sessionExpiresAtMs?: number
   maxTargetResourceBytes?: number
   maxTargetSessionBytes?: number
+  beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
 } = {}) {
   const resolveTarget = async (value: string): Promise<PublicTarget> => {
     const url = new URL(value)
@@ -1001,6 +1038,7 @@ function createService(options: {
     sessionExpiresAtMs: options.sessionExpiresAtMs,
     maxTargetResourceBytes: options.maxTargetResourceBytes,
     maxTargetSessionBytes: options.maxTargetSessionBytes,
+    beforeAnalysisScreenshot: options.beforeAnalysisScreenshot,
   })
 }
 
@@ -1629,6 +1667,135 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       neutralForm.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('classifies bounded attributes on ARIA reference targets and revalidates late mutations', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/aria-reference-attribute-safety`)
+
+    expect(analysis.domEvidence.filter(({ sensitive }) => sensitive)).toHaveLength(3)
+    expect(analysis.capabilities.filter(({ kind }) => kind === 'prepare_form')).toHaveLength(2)
+    const lateForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    const page = internalSession(service, analysis.sessionId).page
+
+    await page.locator('#late-attribute-reference').evaluate((reference) => {
+      reference.setAttribute('aria-label', 'Credit card number')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-attribute-input').inputValue()).toBe('')
+    expect(await page.locator('#late-attribute-detail').inputValue()).toBe('')
+
+    await page.locator('#late-attribute-reference').evaluate((reference) => {
+      reference.setAttribute('aria-label', 'Reference note')
+      reference.setAttribute('title', 'User password')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-attribute-input').inputValue()).toBe('')
+
+    await page.locator('#late-attribute-reference').evaluate((reference) => {
+      reference.setAttribute('title', 'Reference title')
+    })
+    const lateResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )
+    expect(lateResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = lateResult.analysis
+
+    const neutralForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('retries an analysis capture after screenshot-bound DOM drift and publishes only the stable state', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      beforeAnalysisScreenshot: async (page) => {
+        captureCalls += 1
+        if (captureCalls !== 2) return
+        await page.evaluate(() => {
+          const searchControl = document.querySelector<HTMLInputElement>('input[type="search"]')!
+          searchControl.id = 'changed-during-capture'
+          searchControl.setAttribute('aria-label', 'User password')
+          ;(document.querySelector('select') as HTMLSelectElement).hidden = true
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    const result = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )
+
+    expect(captureCalls).toBe(3)
+    expect(result.analysis.capabilities.some(({ kind }) => kind === 'prepare_search')).toBe(false)
+    expect(result.analysis.capabilities.some(({ kind }) => kind === 'filter')).toBe(false)
+    expect(result.analysis.domEvidence.find(({ label }) => label === 'User password')).toMatchObject({ sensitive: true })
+  })
+
+  it('fails closed after bounded analysis-capture retries on continuous DOM drift', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      beforeAnalysisScreenshot: async (page) => {
+        captureCalls += 1
+        if (captureCalls === 1) return
+        await page.locator('input[type="search"]').evaluate((input, call) => {
+          input.setAttribute('aria-label', `Changing reference ${call}`)
+        }, captureCalls)
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/`)
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(captureCalls).toBe(3)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('normalizes Unicode safety evidence identically and fails closed on late disguised terms', async () => {

@@ -74,10 +74,31 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
   const [actionError, setActionError] = useState('')
   const [busyTool, setBusyTool] = useState('')
   const registrationControllerRef = useRef<AbortController | null>(null)
+  const actionControllersRef = useRef(new Set<AbortController>())
+  const currentAnalysisRef = useRef<WrapperAnalysis | null>(analysis)
   const credentialsRef = useRef<WrapperSessionCredentials | null>({
     sessionId: analysis.sessionId,
     sessionToken: analysis.sessionToken,
   })
+
+  const retireCurrentSession = useCallback((message: string, expectedAnalysis?: WrapperAnalysis) => {
+    if (
+      !currentAnalysisRef.current
+      || (expectedAnalysis && currentAnalysisRef.current !== expectedAnalysis)
+    ) return
+    currentAnalysisRef.current = null
+    for (const controller of actionControllersRef.current) controller.abort()
+    actionControllersRef.current.clear()
+    retireWrapperSessionResources(
+      registrationControllerRef.current,
+      credentialsRef,
+      closeWrapperSession,
+    )
+    registrationControllerRef.current = null
+    setActionError(message)
+    setCurrentAnalysis(null)
+    setRegistration('error')
+  }, [])
 
   const runCapability = useCallback(async (
     capability: WrapperCapability,
@@ -90,47 +111,75 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
         sessionInvalidated: true,
       })
     }
+    const acceptedAnalysis = currentAnalysis
+    const acceptedDeadline = Date.parse(acceptedAnalysis.expiresAt)
+    if (
+      currentAnalysisRef.current !== acceptedAnalysis
+      || !Number.isFinite(acceptedDeadline)
+      || acceptedDeadline <= Date.now()
+    ) {
+      retireCurrentSession(
+        'Die isolierte Browser-Sitzung ist abgelaufen. Bitte analysiere die Website erneut.',
+        acceptedAnalysis,
+      )
+      throw new WrapperApiError('The isolated browser session expired.', {
+        code: 'session_expired',
+        sessionInvalidated: true,
+      })
+    }
+    const actionController = new AbortController()
+    const relayAbort = () => actionController.abort()
+    signal.addEventListener('abort', relayAbort, { once: true })
+    if (signal.aborted) actionController.abort()
+    actionControllersRef.current.add(actionController)
     setBusyTool(capability.name)
     setActionError('')
     try {
+      if (actionController.signal.aborted) {
+        throw new DOMException('The tool call was cancelled.', 'AbortError')
+      }
       const result = await executeWrapperAction(
-        currentAnalysis.sessionId,
-        currentAnalysis.sessionToken,
+        acceptedAnalysis.sessionId,
+        acceptedAnalysis.sessionToken,
         capability.id,
         capability.name,
         input,
-        signal,
+        actionController.signal,
       )
-      if (signal.aborted) throw new DOMException('The tool call was cancelled.', 'AbortError')
+      if (
+        actionController.signal.aborted
+        || currentAnalysisRef.current !== acceptedAnalysis
+      ) throw new DOMException('The tool call was cancelled.', 'AbortError')
       setRegistration('checking')
+      currentAnalysisRef.current = result.analysis
+      credentialsRef.current = {
+        sessionId: result.analysis.sessionId,
+        sessionToken: result.analysis.sessionToken,
+      }
       setCurrentAnalysis(result.analysis)
       setActivities((current) => [result.activity, ...current])
       return result
     } catch (error) {
-      const aborted = signal.aborted
+      const aborted = signal.aborted || actionController.signal.aborted
         || (error instanceof DOMException && error.name === 'AbortError')
       const message = aborted
         ? 'Der Wrapper-Tool-Aufruf wurde abgebrochen. Der Zustand der isolierten Sitzung ist nicht mehr eindeutig.'
         : error instanceof Error ? error.message : 'The isolated tool call failed.'
-      setActionError(message)
+      const acceptedAnalysisStillCurrent = currentAnalysisRef.current === acceptedAnalysis
+      if (acceptedAnalysisStillCurrent) setActionError(message)
       const shouldRetire = aborted || (error instanceof WrapperApiError
         ? error.sessionInvalidated !== false
         : true)
-      if (shouldRetire) {
-        retireWrapperSessionResources(
-          registrationControllerRef.current,
-          credentialsRef,
-          closeWrapperSession,
-        )
-        registrationControllerRef.current = null
-        setCurrentAnalysis(null)
-        setRegistration('error')
+      if (shouldRetire && acceptedAnalysisStillCurrent) {
+        retireCurrentSession(message, acceptedAnalysis)
       }
       throw error
     } finally {
+      signal.removeEventListener('abort', relayAbort)
+      actionControllersRef.current.delete(actionController)
       setBusyTool('')
     }
-  }, [currentAnalysis])
+  }, [currentAnalysis, retireCurrentSession])
 
   useLayoutEffect(() => {
     if (!currentAnalysis) {
@@ -138,9 +187,25 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
       registrationControllerRef.current = null
       return
     }
+    const expiresAt = Date.parse(currentAnalysis.expiresAt)
+    const remainingMs = expiresAt - Date.now()
+    if (!Number.isFinite(expiresAt) || remainingMs <= 0) {
+      retireCurrentSession(
+        'Die isolierte Browser-Sitzung ist abgelaufen. Bitte analysiere die Website erneut.',
+        currentAnalysis,
+      )
+      return
+    }
     const controller = new AbortController()
     registrationControllerRef.current = controller
     let active = true
+    const expiryTimer = window.setTimeout(() => {
+      if (!active) return
+      retireCurrentSession(
+        'Die isolierte Browser-Sitzung ist abgelaufen. Bitte analysiere die Website erneut.',
+        currentAnalysis,
+      )
+    }, remainingMs)
     const tools = createWrapperTools(currentAnalysis, { execute: runCapability })
     registerTools(tools, { controller })
       .then((result) => {
@@ -153,14 +218,17 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
       })
     return () => {
       active = false
+      window.clearTimeout(expiryTimer)
       controller.abort()
       if (registrationControllerRef.current === controller) {
         registrationControllerRef.current = null
       }
     }
-  }, [currentAnalysis, runCapability])
+  }, [currentAnalysis, retireCurrentSession, runCapability])
 
   useEffect(() => () => {
+    for (const controller of actionControllersRef.current) controller.abort()
+    actionControllersRef.current.clear()
     const credentials = credentialsRef.current
     credentialsRef.current = null
     if (credentials) closeWrapperSession(credentials.sessionId, credentials.sessionToken)

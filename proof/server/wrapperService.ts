@@ -39,6 +39,7 @@ const CAPTURE_VIEWPORT_WIDTH = 1365
 const CAPTURE_VIEWPORT_HEIGHT = 900
 const MAX_SAFETY_EVIDENCE_LENGTH = 4_096
 const MAX_TOTAL_SAFETY_EVIDENCE_LENGTH = 24 * 1_024
+const MAX_ANALYSIS_CAPTURE_ATTEMPTS = 2
 const UNSAFE_FIELD_HINT = /\b(address|book|buy|card|checkout|comment|contact|credential|delete|email|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|order|ordering|purchase|purchasing|reservation|reserve|subscribe|termin|bestellen|bestellung|buchen|buchung|kaufen|kasse|reservieren|reservierung|warenkorb)\b/i
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
@@ -135,6 +136,8 @@ export interface WrapperProofServiceOptions {
   sessionExpiresAtMs?: number
   maxTargetResourceBytes?: number
   maxTargetSessionBytes?: number
+  /** Test-only hook for deterministic DOM drift at the capture boundary. */
+  beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
 }
 
 interface PendingActionEvidence {
@@ -444,8 +447,8 @@ function captureIsolatedSafetyEvidence(
   overflow: boolean
   optionEntries: Array<{ optionIndex: number, labelAttribute: string, text: string, value: string }>
   labelEntries: Array<{ text: string, imageAlts: string[] }>
-  ariaLabelledEntries: Array<{ text: string, imageAlts: string[] }>
-  ariaDescribedEntries: Array<{ text: string, imageAlts: string[] }>
+  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string }>
+  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string }>
 } {
   const getAttribute = Element.prototype.getAttribute
   const matches = Element.prototype.matches
@@ -530,6 +533,8 @@ function captureIsolatedSafetyEvidence(
     const entries: Array<{
       text: { value: string, overflow: boolean }
       imageAlts: string[]
+      ariaLabel: { value: string, overflow: boolean }
+      title: { value: string, overflow: boolean }
       overflow: boolean
     }> = []
     for (const id of ids) {
@@ -539,10 +544,14 @@ function captureIsolatedSafetyEvidence(
       const imageAlts = node instanceof Element
         ? boundedDescendantImageAlts(node)
         : { values: [] as string[], overflow: false }
+      const ariaLabel = bounded(node instanceof Element ? getAttribute.call(node, 'aria-label') ?? '' : '')
+      const title = bounded(node instanceof Element ? getAttribute.call(node, 'title') ?? '' : '')
       entries.push({
         text,
         imageAlts: imageAlts.values,
-        overflow: text.overflow || imageAlts.overflow,
+        ariaLabel,
+        title,
+        overflow: text.overflow || imageAlts.overflow || ariaLabel.overflow || title.overflow,
       })
     }
     return {
@@ -699,9 +708,19 @@ function captureIsolatedSafetyEvidence(
   }
   const labelEntries = labels.map(({ text, imageAlts }) => ({ text: text.value, imageAlts }))
   const ariaLabelledEntries = ariaLabelled.entries
-    .map(({ text, imageAlts }) => ({ text: text.value, imageAlts }))
+    .map(({ text, imageAlts, ariaLabel, title }) => ({
+      text: text.value,
+      imageAlts,
+      ariaLabel: ariaLabel.value,
+      title: title.value,
+    }))
   const ariaDescribedEntries = ariaDescribed.entries
-    .map(({ text, imageAlts }) => ({ text: text.value, imageAlts }))
+    .map(({ text, imageAlts, ariaLabel, title }) => ({
+      text: text.value,
+      imageAlts,
+      ariaLabel: ariaLabel.value,
+      title: title.value,
+    }))
   const snapshot = JSON.stringify({
       attributes: attributes.map(({ name, value }) => [name, value]),
       ariaLabelled,
@@ -1213,11 +1232,19 @@ function classifyDomInIsolatedWorld({
         ariaLabelled.raw,
         ...ariaLabelled.ids,
         ...ariaLabelled.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts }) => imageAlts),
+        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, title }) => [
+          ...imageAlts,
+          ariaLabel,
+          title,
+        ]),
         ariaDescribed.raw,
         ...ariaDescribed.ids,
         ...ariaDescribed.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts }) => imageAlts),
+        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, title }) => [
+          ...imageAlts,
+          ariaLabel,
+          title,
+        ]),
         ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts }) => [labelText, ...imageAlts]),
         element.getAttribute('placeholder') ?? '',
         'name' in element ? element.name : '',
@@ -1459,6 +1486,185 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
     }
     await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
     await cdp.detach()
+  }
+}
+
+interface AnalysisCaptureGuardSnapshot {
+  mutationCount: number
+  navigationCount: number
+  url: string
+  title: string
+  overflow: boolean
+}
+
+async function createAnalysisCaptureGuard(
+  context: BrowserContext,
+  page: Page,
+): Promise<{
+  snapshot: () => Promise<AnalysisCaptureGuardSnapshot>
+  arm: (backendNodeIds: number[]) => Promise<void>
+  screenshot: () => Promise<Buffer>
+  stop: () => Promise<void>
+}> {
+  const cdp = await context.newCDPSession(page)
+  const storageKey = `__webmcp_capture_guard_${randomUUID().replaceAll('-', '')}`
+  const objectGroup = `webmcp-capture-watch-${randomUUID()}`
+  const frameTree = await cdp.send('Page.getFrameTree') as { frameTree?: { frame?: { id?: string } } }
+  const mainFrameId = frameTree.frameTree?.frame?.id
+  if (!mainFrameId) {
+    await cdp.detach().catch(() => undefined)
+    throw new Error('The isolated browser main frame is unavailable.')
+  }
+  const executionContextId = await createIsolatedWorld(cdp)
+  let navigationCount = 0
+  const recordNavigation = (rawEvent: unknown) => {
+    const event = rawEvent as { frame?: { id?: string }, frameId?: string }
+    if ((event.frame?.id ?? event.frameId) === mainFrameId) navigationCount += 1
+  }
+  cdp.on('Page.frameNavigated', recordNavigation)
+  cdp.on('Page.navigatedWithinDocument', recordNavigation)
+  const initialized = await cdp.send('Runtime.evaluate', {
+    expression: `(() => {
+      const state = { mutationCount: 0, observer: null, watched: [] };
+      const Observer = globalThis.MutationObserver;
+      if (typeof Observer !== 'function' || !document.documentElement) return false;
+      state.observer = new Observer((records) => {
+        const contains = Node.prototype.contains;
+        for (const record of records) {
+          const target = record.target;
+          if (state.watched.some((node) =>
+            target === node
+            || contains.call(node, target)
+            || contains.call(target, node))) {
+            state.mutationCount = 1;
+            state.observer.disconnect();
+            break;
+          }
+        }
+      });
+      globalThis[${JSON.stringify(storageKey)}] = state;
+      return true;
+    })()`,
+    contextId: executionContextId,
+    returnByValue: true,
+  }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
+  if (initialized.exceptionDetails || initialized.result?.value !== true) {
+    await cdp.detach().catch(() => undefined)
+    throw new Error('The isolated analysis mutation guard could not be created.')
+  }
+
+  return {
+    snapshot: async () => {
+      const captured = await cdp.send('Runtime.evaluate', {
+        expression: `new Promise((resolve) => queueMicrotask(() => {
+          const state = globalThis[${JSON.stringify(storageKey)}];
+          const rawUrl = String(location.href ?? '');
+          const rawTitle = String(document.title ?? '');
+          resolve({
+            mutationCount: Number(state?.mutationCount ?? -1),
+            url: rawUrl.slice(0, 4097),
+            title: rawTitle.slice(0, 4097),
+            overflow: rawUrl.length > 4096 || rawTitle.length > 4096,
+          });
+        }))`,
+        contextId: executionContextId,
+        awaitPromise: true,
+        returnByValue: true,
+      }) as {
+        result?: { value?: Omit<AnalysisCaptureGuardSnapshot, 'navigationCount'> }
+        exceptionDetails?: unknown
+      }
+      if (captured.exceptionDetails || !captured.result?.value) {
+        throw new Error('The isolated analysis mutation guard became unavailable.')
+      }
+      return { ...captured.result.value, navigationCount }
+    },
+    arm: async (backendNodeIds) => {
+      for (const backendNodeId of backendNodeIds) {
+        const resolved = await cdp.send('DOM.resolveNode', {
+          backendNodeId,
+          executionContextId,
+          objectGroup,
+        }) as { object?: { objectId?: string } }
+        const objectId = resolved.object?.objectId
+        if (!objectId) throw new Error('The isolated analysis identity expired before capture.')
+        const retained = await cdp.send('Runtime.callFunctionOn', {
+          functionDeclaration: `function() {
+            const state = globalThis[${JSON.stringify(storageKey)}];
+            if (!state || !(this instanceof Element)) return false;
+            state.watched.push(this);
+            return true;
+          }`,
+          objectId,
+          objectGroup,
+          returnByValue: true,
+        }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
+        if (retained.exceptionDetails || retained.result?.value !== true) {
+          throw new Error('The isolated analysis identity could not be retained.')
+        }
+      }
+      const armed = await cdp.send('Runtime.evaluate', {
+        expression: `(() => {
+          const state = globalThis[${JSON.stringify(storageKey)}];
+          if (!state?.observer) return false;
+          const getAttribute = Element.prototype.getAttribute;
+          const getElementById = Document.prototype.getElementById;
+          const pushUnique = (node) => {
+            if (node instanceof Node && !state.watched.includes(node)) state.watched.push(node);
+          };
+          pushUnique(document.querySelector('title'));
+          for (const control of state.watched.slice(0, ${WRAPPER_MAX_DOM_EVIDENCE})) {
+            if (!(control instanceof Element)) continue;
+            for (const attribute of ['aria-labelledby', 'aria-describedby']) {
+              const raw = String(getAttribute.call(control, attribute) ?? '').slice(0, ${MAX_SAFETY_EVIDENCE_LENGTH + 1});
+              const ids = raw.trim().split(/\\s+/).slice(0, 16);
+              for (const id of ids) pushUnique(getElementById.call(document, id));
+            }
+            if ('labels' in control && control.labels) {
+              for (let index = 0; index < control.labels.length && index < 16; index += 1) {
+                pushUnique(control.labels.item(index));
+              }
+            }
+          }
+          state.mutationCount = 0;
+          state.observer.observe(document.documentElement, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true,
+          });
+          return true;
+        })()`,
+        contextId: executionContextId,
+        returnByValue: true,
+      }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
+      if (armed.exceptionDetails || armed.result?.value !== true) {
+        throw new Error('The isolated analysis mutation guard could not be armed.')
+      }
+    },
+    screenshot: async () => {
+      const captured = await cdp.send('Page.captureScreenshot', {
+        format: 'jpeg',
+        quality: 72,
+        fromSurface: true,
+        captureBeyondViewport: false,
+      }) as { data?: string }
+      if (!captured.data) throw new Error('The isolated screenshot capture failed.')
+      return Buffer.from(captured.data, 'base64')
+    },
+    stop: async () => {
+      await cdp.send('Runtime.evaluate', {
+        expression: `(() => {
+          const state = globalThis[${JSON.stringify(storageKey)}];
+          state?.observer?.disconnect();
+          delete globalThis[${JSON.stringify(storageKey)}];
+        })()`,
+        contextId: executionContextId,
+        returnByValue: true,
+      }).catch(() => undefined)
+      await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
+      await cdp.detach().catch(() => undefined)
+    },
   }
 }
 
@@ -1883,6 +2089,39 @@ function readLinkTarget(
       WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
     ],
   )
+}
+
+async function revalidateDomEvidence(
+  context: BrowserContext,
+  page: Page,
+  evidence: DetectedControl[],
+): Promise<void> {
+  await Promise.all(evidence
+    .filter(({ sensitive }) => !sensitive)
+    .map(async (control) => {
+      if (control.tag === 'a') {
+        const expectedUrl = control.optionValues?.[0]
+        if (!expectedUrl) throw new Error('The isolated link identity is incomplete.')
+        await readLinkTarget(
+          context,
+          page,
+          control.backendNodeId,
+          expectedUrl,
+          control.safetySnapshot,
+        )
+        return
+      }
+      await readControlState(
+        context,
+        page,
+        control.backendNodeId,
+        control.type,
+        true,
+        control.safetySnapshot,
+        -1,
+        control.type === 'radio' ? control.radioGroupSize ?? -1 : -1,
+      )
+    }))
 }
 
 async function collectAxEvidence(
@@ -2455,6 +2694,7 @@ export class WrapperProofService {
   private readonly sessionExpiresAtMs: number
   private readonly maxTargetResourceBytes: number
   private readonly maxTargetSessionBytes: number
+  private readonly beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
 
   constructor(options: WrapperProofServiceOptions = {}) {
     this.resolveTarget = options.resolveTarget ?? resolvePublicTarget
@@ -2463,6 +2703,7 @@ export class WrapperProofService {
     this.sessionExpiresAtMs = options.sessionExpiresAtMs ?? Number.POSITIVE_INFINITY
     this.maxTargetResourceBytes = options.maxTargetResourceBytes ?? WRAPPER_MAX_TARGET_RESOURCE_BYTES
     this.maxTargetSessionBytes = options.maxTargetSessionBytes ?? WRAPPER_MAX_TARGET_SESSION_BYTES
+    this.beforeAnalysisScreenshot = options.beforeAnalysisScreenshot
   }
 
   private reserveAnalysisSlot(): void {
@@ -2619,16 +2860,58 @@ export class WrapperProofService {
     if (!isSameOriginHttpUrl(session.page.url(), session.targetOrigin)) {
       throw new Error('The page left its validated origin.')
     }
-    const [domEvidence, title, screenshot] = await Promise.all([
-      collectDomEvidence(session.context, session.page),
-      session.page.title(),
-      session.page.screenshot({ type: 'jpeg', quality: 72, fullPage: false }),
-    ])
-    const axEvidence = await collectAxEvidence(
-      session.context,
-      session.page,
-      domEvidence.map(({ backendNodeId }) => backendNodeId),
-    )
+    let domEvidence: DetectedControl[] | undefined
+    let axEvidence: WrapperAxEvidence[] | undefined
+    let title: string | undefined
+    let finalUrl: string | undefined
+    let screenshot: Buffer | undefined
+    let lastCaptureError: unknown
+    for (let attempt = 0; attempt < MAX_ANALYSIS_CAPTURE_ATTEMPTS; attempt += 1) {
+      const guard = await createAnalysisCaptureGuard(session.context, session.page)
+      try {
+        const before = await guard.snapshot()
+        if (
+          before.overflow
+          || !isSameOriginHttpUrl(before.url, session.targetOrigin)
+        ) throw new Error('The isolated analysis capture started from an unsafe page state.')
+
+        const candidateDomEvidence = await collectDomEvidence(session.context, session.page)
+        await guard.arm(candidateDomEvidence.map(({ backendNodeId }) => backendNodeId))
+        await this.beforeAnalysisScreenshot?.(session.page, attempt)
+        const candidateScreenshot = await guard.screenshot()
+        await revalidateDomEvidence(session.context, session.page, candidateDomEvidence)
+        const candidateAxEvidence = await collectAxEvidence(
+          session.context,
+          session.page,
+          candidateDomEvidence.map(({ backendNodeId }) => backendNodeId),
+        )
+        const after = await guard.snapshot()
+        if (
+          after.overflow
+          || after.mutationCount !== 0
+          || after.navigationCount !== 0
+          || after.url !== before.url
+          || after.title !== before.title
+          || !isSameOriginHttpUrl(after.url, session.targetOrigin)
+        ) throw new Error('The isolated page changed while analysis evidence was captured.')
+
+        domEvidence = candidateDomEvidence
+        axEvidence = candidateAxEvidence
+        title = after.title
+        finalUrl = after.url
+        screenshot = candidateScreenshot
+        break
+      } catch (error) {
+        lastCaptureError = error
+      } finally {
+        await guard.stop()
+      }
+    }
+    if (!domEvidence || !axEvidence || title === undefined || !finalUrl || !screenshot) {
+      throw new Error('The isolated page did not remain stable while analysis evidence was captured.', {
+        cause: lastCaptureError,
+      })
+    }
     const inferred = inferSafeCapabilities(domEvidence)
       .filter((capability) => !session.networkLocked || capability.kind !== 'navigation')
       .map((capability) => ({
@@ -2651,8 +2934,8 @@ export class WrapperProofService {
       sessionId: session.id,
       sessionToken: session.token,
       requestedUrl: session.requestedUrl,
-      finalUrl: session.page.url(),
-      title: cleanPageText(title, 180) || new URL(session.page.url()).hostname,
+      finalUrl,
+      title: cleanPageText(title, 180) || new URL(finalUrl).hostname,
       screenshotDataUrl: screenshotDataUrl(screenshot),
       domEvidence: domEvidence.map(({
         backendNodeId: _backendNodeId,
