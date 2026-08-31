@@ -1386,6 +1386,7 @@ async function startFixture(): Promise<Fixture> {
     if (requestUrl === '/analysis-owner-watchset') {
       response.end(`<!doctype html><title>Analysis owner watchset</title>
         <style>fieldset{border:0;margin:0;padding:0}</style>
+        <span id="watch-id-retarget-decoy">Credit card number</span>
         <span id="watch-form-reference">Neutral form reference</span>
         <span id="watch-fieldset-reference">Neutral fieldset reference</span>
         <span id="watch-legend-reference">Neutral legend reference</span>
@@ -1401,8 +1402,51 @@ async function startFixture(): Promise<Fixture> {
           <input type="text" aria-label="Missing owner value">
           <input type="text" aria-label="Missing owner detail">
         </form>
+        <form id="watch-external-owner-decoy" aria-label="Payment"></form>
+        <form id="watch-external-owner" aria-label="Neutral external owner"></form>
+        <input type="text" form="watch-external-owner" aria-label="External owner value">
+        <input type="text" form="watch-external-owner" aria-label="External owner detail">
         <input type="text" form="late-external-form" aria-label="Missing external owner value">
         <input type="text" form="late-external-form" aria-label="Missing external owner detail">`)
+      return
+    }
+    if (requestUrl === '/analysis-watch-budget' || requestUrl === '/analysis-watch-budget-overflow') {
+      const overflow = requestUrl.endsWith('-overflow')
+      const controls = Array.from({ length: 64 }, (_, controlIndex) => {
+        const labelledIds = Array.from(
+          { length: 16 },
+          (_, referenceIndex) => `watch-label-${controlIndex}-${referenceIndex}`,
+        )
+        const describedIds = Array.from(
+          { length: 15 + (overflow && controlIndex === 0 ? 1 : 0) },
+          (_, referenceIndex) => `watch-description-${controlIndex}-${referenceIndex}`,
+        )
+        const references = [
+          ...labelledIds.map((id) => `<span id="${id}" hidden>Neutral reference</span>`),
+          ...describedIds.map((id) => `<span id="${id}" hidden>Neutral context</span>`),
+        ].join('')
+        return `${references}<input type="search" aria-labelledby="${labelledIds.join(' ')}" aria-describedby="${describedIds.join(' ')}">`
+      }).join('')
+      response.end(`<!doctype html><title>Analysis watch budget</title>
+        <style>
+          body{margin:0;display:grid;grid-template-columns:repeat(8,150px);gap:2px}
+          input{box-sizing:border-box;width:140px;height:28px}
+        </style>${controls}`)
+      return
+    }
+    if (requestUrl === '/analysis-id-reference-explicit-form') {
+      response.end(`<!doctype html><title>Explicit form id reference</title>
+        <form data-id-retarget-decoy="explicit-form" id="explicit-form-decoy" aria-label="Payment"></form>
+        <form id="explicit-form-owner" aria-label="Neutral external owner"></form>
+        <input type="text" form="explicit-form-owner" aria-label="External value">
+        <input type="text" form="explicit-form-owner" aria-label="External detail">`)
+      return
+    }
+    if (requestUrl === '/analysis-id-reference-label-for') {
+      response.end(`<!doctype html><title>Label for id reference</title>
+        <input data-id-retarget-decoy="label-for" id="label-for-decoy" type="search" aria-label="Credit card number" hidden>
+        <label for="label-for-control">Neutral linked label</label>
+        <input id="label-for-control" type="search">`)
       return
     }
     if (requestUrl === '/unicode-safety-normalization') {
@@ -1815,7 +1859,9 @@ async function startFixture(): Promise<Fixture> {
             color:transparent;-webkit-text-fill-color:transparent;
             text-shadow:none;background:transparent;
           }
+          .painted-placeholder::placeholder { color:rgb(20,80,160); }
         </style>
+        <span id="unreferenced-id-decoy">Unreferenced identity</span>
         <select id="empty-selected-filter" class="paintless-text-state painted-text-state" aria-label="Empty selected filter">
           <option value="" selected></option>
           <option value="decoy">Nonselected decoy text</option>
@@ -1832,13 +1878,28 @@ async function startFixture(): Promise<Fixture> {
           <option value="one" label="" selected>Selected visible text</option>
           <option value="two">Second visible text</option>
         </select>
+        <input id="hidden-input-placeholder" class="paintless-text-state painted-placeholder" type="text"
+          aria-label="Hidden input placeholder" placeholder="Painted placeholder">
+        <textarea id="hidden-textarea-placeholder" class="paintless-text-state painted-placeholder"
+          aria-label="Hidden textarea placeholder" placeholder="Painted placeholder"></textarea>
+        <input id="visible-input-placeholder" class="paintless-text-state painted-placeholder" type="text"
+          aria-label="Visible input placeholder" placeholder="Painted placeholder" value="Stale default value">
+        <textarea id="visible-textarea-placeholder" class="paintless-text-state painted-placeholder"
+          aria-label="Visible textarea placeholder" placeholder="Painted placeholder">Stale default text</textarea>
+        <input id="unsupported-date-placeholder" class="paintless-text-state painted-placeholder" type="date"
+          aria-label="Unsupported date placeholder" placeholder="Painted placeholder">
         <textarea id="empty-current-textarea" class="paintless-text-state painted-text-state" aria-label="Empty current textarea">Stale default text</textarea>
         <form id="painted-current-form">
           <textarea id="painted-current-textarea" class="paintless-text-state painted-text-state" aria-label="Painted current textarea">Stale default text</textarea>
           <input class="paintless-text-state painted-text-state" type="text" aria-label="Painted supporting field" value="Supporting visible text">
         </form>
         <script>
+          const inputValueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
           const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          inputValueSetter.call(document.getElementById('hidden-input-placeholder'), 'Invisible current value');
+          inputValueSetter.call(document.getElementById('visible-input-placeholder'), '');
+          valueSetter.call(document.getElementById('hidden-textarea-placeholder'), 'Invisible current value');
+          valueSetter.call(document.getElementById('visible-textarea-placeholder'), '');
           valueSetter.call(document.getElementById('empty-current-textarea'), '');
           valueSetter.call(document.getElementById('painted-current-textarea'), 'Current visible text');
         </script>`)
@@ -7169,6 +7230,8 @@ describe('WrapperProofService security boundaries', () => {
     expect(analysis.domEvidence.map(({ label }) => label)).toEqual([
       'Painted listbox filter',
       'Painted selected filter',
+      'Visible input placeholder',
+      'Visible textarea placeholder',
       'Painted current textarea',
       'Painted supporting field',
     ])
@@ -7194,6 +7257,156 @@ describe('WrapperProofService security boundaries', () => {
       form.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
+
+  it('bounds the deduplicated control and private-source analysis watch union', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/analysis-watch-budget`)
+    expect(analysis.domEvidence).toHaveLength(64)
+    const search = analysis.capabilities.find(({ kind }) => kind === 'prepare_search')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const overflowService = createService()
+    services.push(overflowService)
+    await expect(overflowService.analyze(
+      `${fixture.origin}/analysis-watch-budget-overflow`,
+    )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+    expect(internalServiceState(overflowService)).toEqual({ sessions: 0, reservations: 0 })
+  }, 90_000)
+
+  it('retries document id retargeting only when captured evidence uses id references', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let referencedCaptureCalls = 0
+    const referenced = createService({
+      beforeAnalysisScreenshot: async (page, attempt) => {
+        referencedCaptureCalls += 1
+        if (attempt !== 0) return
+        await page.locator('#watch-id-retarget-decoy').evaluate((node) => {
+          node.id = 'watch-form-reference'
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.locator('span').filter({ hasText: 'Credit card number' }).evaluate((node) => {
+          node.id = 'watch-id-retarget-decoy'
+        })
+      },
+    })
+    services.push(referenced)
+    const referencedAnalysis = await referenced.analyze(
+      `${fixture.origin}/analysis-owner-watchset`,
+    )
+    expect(referencedCaptureCalls).toBe(2)
+    expect(JSON.stringify(referencedAnalysis)).not.toContain('Credit card number')
+    const form = referencedAnalysis.capabilities.find(({ kind }) => kind === 'prepare_form')!
+    await expect(referenced.execute(
+      referencedAnalysis.sessionId,
+      referencedAnalysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    let continuousCaptureCalls = 0
+    const continuous = createService({
+      beforeAnalysisScreenshot: async (page) => {
+        continuousCaptureCalls += 1
+        await page.locator('#watch-id-retarget-decoy').evaluate((node) => {
+          node.id = 'watch-form-reference'
+        })
+      },
+      afterAnalysisScreenshot: async (page) => {
+        await page.locator('span').filter({ hasText: 'Credit card number' }).evaluate((node) => {
+          node.id = 'watch-id-retarget-decoy'
+        })
+      },
+    })
+    services.push(continuous)
+    await expect(continuous.analyze(
+      `${fixture.origin}/analysis-owner-watchset`,
+    )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+    expect(continuousCaptureCalls).toBe(2)
+    expect(internalServiceState(continuous)).toEqual({ sessions: 0, reservations: 0 })
+
+    let unreferencedCaptureCalls = 0
+    const unreferenced = createService({
+      beforeAnalysisScreenshot: async (page) => {
+        unreferencedCaptureCalls += 1
+        await page.locator('#unreferenced-id-decoy').evaluate((node) => {
+          node.id = 'temporary-unreferenced-id'
+        })
+      },
+      afterAnalysisScreenshot: async (page) => {
+        await page.locator('#temporary-unreferenced-id').evaluate((node) => {
+          node.id = 'unreferenced-id-decoy'
+        })
+      },
+    })
+    services.push(unreferenced)
+    const unreferencedAnalysis = await unreferenced.analyze(
+      `${fixture.origin}/paint-text-state-contract`,
+    )
+    expect(unreferencedCaptureCalls).toBe(1)
+    expect(unreferencedAnalysis.capabilities.length).toBeGreaterThan(0)
+  }, 90_000)
+
+  it('isolates explicit form and label-for id retarget capture guards', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const cases = [
+      {
+        route: '/analysis-id-reference-explicit-form',
+        decoy: 'explicit-form',
+        targetId: 'explicit-form-owner',
+        capabilityKind: 'prepare_form',
+      },
+      {
+        route: '/analysis-id-reference-label-for',
+        decoy: 'label-for',
+        targetId: 'label-for-control',
+        capabilityKind: 'prepare_search',
+      },
+    ] as const
+
+    for (const testCase of cases) {
+      let captureCalls = 0
+      const service = createService({
+        beforeAnalysisScreenshot: async (page, attempt) => {
+          captureCalls += 1
+          if (attempt !== 0) return
+          await page.locator(`[data-id-retarget-decoy="${testCase.decoy}"]`).evaluate(
+            (node, targetId) => { node.id = targetId },
+            testCase.targetId,
+          )
+        },
+        afterAnalysisScreenshot: async (page, attempt) => {
+          if (attempt !== 0) return
+          await page.locator(`[data-id-retarget-decoy="${testCase.decoy}"]`).evaluate(
+            (node, decoy) => { node.id = `${decoy}-decoy` },
+            testCase.decoy,
+          )
+        },
+      })
+      services.push(service)
+      const analysis = await service.analyze(`${fixture.origin}${testCase.route}`)
+      expect(captureCalls).toBe(2)
+      expect(analysis.capabilities.some(({ kind }) => kind === testCase.capabilityKind)).toBe(true)
+      expect(JSON.stringify(analysis)).not.toMatch(/Credit card number|Payment/)
+      expect(await service.closeSession(analysis.sessionId, analysis.sessionToken)).toBe(true)
+    }
+  }, 90_000)
 
   it('excludes transparent and zero-geometry controls from visible evidence and capabilities', async () => {
     const fixture = await startFixture()

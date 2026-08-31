@@ -661,7 +661,20 @@ function isElementScreenshotVisible(
   }
   const hasPaintedPlaceholder = (target: HTMLElement): boolean => {
     if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) return false
-    const placeholder = String(target.getAttribute('placeholder') ?? '').slice(0, 4_097)
+    const matches = Object.getOwnPropertyDescriptor(Element.prototype, 'matches')?.value
+    const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value
+    const valueGetter = target instanceof HTMLInputElement
+      ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+      : Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
+    if (!matches || !getAttribute || !valueGetter) return false
+    const currentValue = String(valueGetter.call(target) ?? '').slice(0, 4_097)
+    if (currentValue.length > 0) return false
+    try {
+      if (!matches.call(target, ':placeholder-shown')) return false
+    } catch {
+      return false
+    }
+    const placeholder = String(getAttribute.call(target, 'placeholder') ?? '').slice(0, 4_097)
     return /\S/.test(placeholder) && hasTextPaint(computedStyle(target, '::placeholder'))
   }
   const hasBoundedReplacedPaint = (target: HTMLElement): boolean => {
@@ -867,7 +880,12 @@ function captureIsolatedSafetyEvidence(
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
   modalState: { elements: Element[], overflow: boolean, limit: number },
-  captureSourceState?: { elements: Element[], overflow: boolean, limit: number },
+  captureSourceState?: {
+    elements: Element[]
+    overflow: boolean
+    limit: number
+    usesDocumentIdReferences: boolean
+  },
 ): {
   snapshot: string
   overflow: boolean
@@ -1220,6 +1238,9 @@ function captureIsolatedSafetyEvidence(
     }
     const overflow = raw.overflow || ids.length > 16
     if (ids.length > 16) ids.length = 16
+    if (ids.length > 0 && captureSourceState) {
+      captureSourceState.usesDocumentIdReferences = true
+    }
     const entries: Array<{
       text: { value: string, overflow: boolean }
       imageAlts: string[]
@@ -1385,6 +1406,9 @@ function captureIsolatedSafetyEvidence(
     const formReference = bounded(getAttribute.call(element, 'form') ?? '')
     explicitFormReference = formReference.value.trim()
     ownerContextOverflow ||= formReference.overflow
+    if (explicitFormReference && captureSourceState) {
+      captureSourceState.usesDocumentIdReferences = true
+    }
   }
   if (explicitFormReference && !ownerForm) ownerContextOverflow = true
   if (ownerForm) captureOwnerContextNode(ownerForm, 'form', false)
@@ -1531,6 +1555,11 @@ function captureIsolatedSafetyEvidence(
       const label = labelCollection.item(index)
       if (label) {
         retainCaptureSource(label)
+        const rawLabelFor = getAttribute.call(label, 'for') ?? ''
+        if (rawLabelFor.length > maxSafetyEvidenceLength) labelsOverflow = true
+        else if (rawLabelFor.trim() && captureSourceState) {
+          captureSourceState.usesDocumentIdReferences = true
+        }
         const text = boundedNodeText(label)
         const imageAlts = boundedDescendantImageAlts(label)
         const ariaLabel = bounded(getAttribute.call(label, 'aria-label') ?? '')
@@ -1990,6 +2019,7 @@ function classifyDomInIsolatedWorld({
   elements: Element[]
   captureSources: Element[]
   captureSourcesOverflow: boolean
+  usesDocumentIdReferences: boolean
 } {
     const unsafePattern = new RegExp(unsafePatternSource, 'i')
     const unsafeNavigationPattern = new RegExp(unsafeNavigationPatternSource, 'i')
@@ -1998,6 +2028,7 @@ function classifyDomInIsolatedWorld({
       elements: [] as Element[],
       overflow: false,
       limit: maxCaptureWatchNodes,
+      usesDocumentIdReferences: false,
     }
     const boundedRaw = (value: unknown) => String(value ?? '').slice(0, maxSafetyEvidenceLength + 1)
     const normalize = (value: unknown, limit = 140) => boundedRaw(value)
@@ -2124,6 +2155,14 @@ function classifyDomInIsolatedWorld({
       ) controls.push(node)
     }
     if (!traversalComplete) traversalComplete = !nextNode.call(walker)
+
+    for (const control of controls) {
+      if (captureSourceState.elements.length >= captureSourceState.limit) {
+        captureSourceState.overflow = true
+        break
+      }
+      captureSourceState.elements.push(control)
+    }
 
     const forms = new Map<HTMLFormElement, string>()
     const elements = controls
@@ -2656,6 +2695,7 @@ function classifyDomInIsolatedWorld({
       elements,
       captureSources: captureSourceState.elements,
       captureSourcesOverflow: captureSourceState.overflow,
+      usesDocumentIdReferences: captureSourceState.usesDocumentIdReferences,
     }
 }
 
@@ -2804,6 +2844,7 @@ async function isCdpPaintVisible(
 interface CollectedDomEvidence {
   evidence: DetectedControl[]
   watchBackendNodeIds: number[]
+  usesDocumentIdReferences: boolean
 }
 
 async function collectDomEvidence(
@@ -2836,7 +2877,7 @@ async function collectDomEvidence(
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
     }
     const classification = await cdp.send('Runtime.evaluate', {
-      expression: `(() => { const WRAPPER_MAX_DOM_ELEMENTS_INSPECTED = ${WRAPPER_MAX_DOM_ELEMENTS_INSPECTED}; const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}, globalThis[${JSON.stringify(modalStorageKey)}]); globalThis[${JSON.stringify(storageKey)}] = result.elements; globalThis[${JSON.stringify(captureSourceStorageKey)}] = result.captureSources; return { descriptors: result.descriptors, captureSourcesOverflow: result.captureSourcesOverflow, captureSourceCount: result.captureSources.length }; })()`,
+      expression: `(() => { const WRAPPER_MAX_DOM_ELEMENTS_INSPECTED = ${WRAPPER_MAX_DOM_ELEMENTS_INSPECTED}; const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}, globalThis[${JSON.stringify(modalStorageKey)}]); globalThis[${JSON.stringify(storageKey)}] = result.elements; globalThis[${JSON.stringify(captureSourceStorageKey)}] = result.captureSources; return { descriptors: result.descriptors, captureSourcesOverflow: result.captureSourcesOverflow, captureSourceCount: result.captureSources.length, usesDocumentIdReferences: result.usesDocumentIdReferences }; })()`,
       contextId: executionContextId,
       objectGroup,
       returnByValue: true,
@@ -2845,6 +2886,7 @@ async function collectDomEvidence(
         descriptors?: Array<Omit<DetectedControl, 'backendNodeId'>>
         captureSourcesOverflow?: boolean
         captureSourceCount?: number
+        usesDocumentIdReferences?: boolean
       } }
       exceptionDetails?: unknown
     }
@@ -2857,6 +2899,7 @@ async function collectDomEvidence(
       || !Number.isInteger(captureSourceCount)
       || captureSourceCount! < 0
       || captureSourceCount! > MAX_ANALYSIS_WATCH_NODES
+      || typeof classification.result?.value?.usesDocumentIdReferences !== 'boolean'
     ) {
       throw new Error('The isolated browser classifier did not return bounded evidence.')
     }
@@ -2907,7 +2950,11 @@ async function collectDomEvidence(
       }
       watchBackendNodeIds.add(described.node.backendNodeId)
     }
-    return { evidence: detectedControls, watchBackendNodeIds: [...watchBackendNodeIds] }
+    return {
+      evidence: detectedControls,
+      watchBackendNodeIds: [...watchBackendNodeIds],
+      usesDocumentIdReferences: classification.result?.value?.usesDocumentIdReferences === true,
+    }
   } finally {
     if (executionContextId) {
       await cdp.send('Runtime.evaluate', {
@@ -2922,6 +2969,7 @@ async function collectDomEvidence(
 }
 
 interface AnalysisCaptureGuardSnapshot {
+  documentIdMutationCount: number
   mutationCount: number
   navigationCount: number
   scrollChanged: boolean
@@ -2976,6 +3024,7 @@ async function createAnalysisCaptureGuard(
   const initialized = await cdp.send('Runtime.evaluate', {
     expression: `(() => {
       const state = {
+        documentIdMutationCount: 0,
         mutationCount: 0,
         observer: null,
         watched: [],
@@ -3017,6 +3066,12 @@ async function createAnalysisCaptureGuard(
       state.observer = new Observer((records) => {
         const contains = Node.prototype.contains;
         for (const record of records) {
+          if (record.type === 'attributes' && record.attributeName === 'id') {
+            state.documentIdMutationCount = Math.min(
+              Number.MAX_SAFE_INTEGER,
+              state.documentIdMutationCount + 1,
+            );
+          }
           const target = record.target;
           const head = document.head;
           const headChanged = head instanceof Node
@@ -3077,6 +3132,7 @@ async function createAnalysisCaptureGuard(
               }
             });
           resolve({
+            documentIdMutationCount: Number(state?.documentIdMutationCount ?? -1),
             mutationCount: Number(state?.mutationCount ?? -1),
             scrollChanged: Boolean(state?.scrollChanged),
             scrollOverflow: Boolean(state?.scrollOverflow),
@@ -3155,14 +3211,6 @@ async function createAnalysisCaptureGuard(
             state.scrollOverflow = true;
             return false;
           }
-          const pushUnique = (node) => {
-            if (!(node instanceof Node) || state.watched.includes(node)) return;
-            if (state.watched.length >= ${MAX_ANALYSIS_WATCH_NODES}) {
-              state.watchOverflow = true;
-              return;
-            }
-            state.watched.push(node);
-          };
           const pushScrollNode = (node) => {
             if (!(node instanceof Element) || state.scrollNodes.includes(node)) return;
             if (state.scrollNodes.length >= ${MAX_ANALYSIS_SCROLL_NODES}) {
@@ -3201,7 +3249,6 @@ async function createAnalysisCaptureGuard(
           )) state.scrollChanged = true;
           state.pendingScrollTargets = [];
           state.scrollArmed = true;
-          pushUnique(document.querySelector('title'));
           if (state.watchOverflow) return false;
           if (state.mutationCount === 0) {
             state.observer.observe(document.documentElement, {
@@ -4873,6 +4920,10 @@ export class WrapperProofService {
           || after.topLayerChangeCount !== before.topLayerChangeCount
           || after.topLayerSignature !== before.topLayerSignature
           || after.mutationCount !== 0
+          || (
+            collectedDomEvidence.usesDocumentIdReferences
+            && after.documentIdMutationCount !== before.documentIdMutationCount
+          )
           || after.navigationCount !== 0
           || after.scrollChanged
           || after.scrollOverflow
