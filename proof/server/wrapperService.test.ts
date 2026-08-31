@@ -756,6 +756,46 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/aria-required-contracts') {
+      response.end(`<!doctype html><title>ARIA required contracts</title>
+        <form id="aria-required-text-form">
+          <input id="aria-required-text" type="text" aria-required="true" aria-label="ARIA required text">
+          <textarea id="aria-required-textarea" aria-required="true" aria-label="ARIA required textarea"></textarea>
+        </form>
+        <form id="aria-required-select-form">
+          <select id="aria-required-select" aria-required="true" aria-label="ARIA required choice">
+            <option value="" selected>Choose an option</option>
+            <option value="one">One</option>
+            <option value="two">Two</option>
+          </select>
+          <input id="aria-required-select-detail" type="text" aria-label="ARIA required select detail">
+        </form>
+        <form id="aria-required-only-empty-form">
+          <select id="aria-required-only-empty" aria-required="true" aria-label="ARIA required only empty">
+            <option value="" selected>Choose only option</option>
+          </select>
+          <input type="text" aria-label="ARIA required only-empty detail">
+        </form>
+        <form id="aria-required-false-form">
+          <select id="aria-required-false-select" aria-required="false" aria-label="ARIA optional choice">
+            <option value="" selected>No selection</option>
+            <option value="one">One</option>
+          </select>
+          <input type="text" aria-required="false" aria-label="ARIA optional detail">
+        </form>
+        <form id="late-aria-required-text-form">
+          <input id="late-aria-required-text" type="text" aria-label="Late ARIA required text">
+          <input id="late-aria-required-text-detail" type="text" aria-label="Late ARIA required text detail">
+        </form>
+        <form id="late-aria-required-select-form">
+          <select id="late-aria-required-select" aria-label="Late ARIA required choice">
+            <option value="" selected>No selection</option>
+            <option value="one">One</option>
+          </select>
+          <input id="late-aria-required-select-detail" type="text" aria-label="Late ARIA required select detail">
+        </form>`)
+      return
+    }
     if (requestUrl === '/date-like-single-state') {
       response.end(`<!doctype html><title>Date-like single state</title>
         <form id="fixed-date-form">
@@ -1647,8 +1687,45 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/credential-key-safety') {
+      response.end(`<!doctype html><title>Project workspace</title>
+        <form id="sensitive-credential-form">
+          <label>api&#x200B;key<input id="credential-label" type="text" name="reference_one" value="opaque-label-secret"></label>
+          <input id="credential-name" type="text" name="apikey" aria-label="Project reference" value="opaque-name-secret">
+          <input id="accesskey" type="text" name="reference_three" aria-label="Project code" value="opaque-id-secret">
+          <input id="credential-aria" type="text" name="reference_four" aria-label="privatekey" value="opaque-aria-secret">
+          <input id="credential-title" type="text" name="reference_five" aria-label="Project identifier" title="API-key" value="opaque-title-secret">
+        </form>
+        <form id="neutral-key-boundary-form">
+          <input id="keynote-topic" type="text" name="keynote_topic" aria-label="Keynote topic">
+          <input id="private-parking" type="text" name="private_parking" aria-label="Private parking note">
+          <input id="accessibility-setting" type="text" name="accessibility_setting" aria-label="Accessibility setting">
+        </form>
+        <form id="late-project-form">
+          <input id="late-project-one" type="text" name="project_reference" aria-label="Project reference">
+          <input id="late-project-two" type="text" name="project_note" aria-label="Project note">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/document-title-payment') {
+      response.end(`<!doctype html><title>Payment details</title>
+        <form id="payment-title-form">
+          <input type="text" aria-label="Project reference">
+          <input type="text" aria-label="Project note">
+        </form>
+        <a href="/about">Project overview</a>`)
+      return
+    }
+    if (requestUrl === '/document-title-neutral') {
+      response.end(`<!doctype html><title>Project workspace</title>
+        <form id="neutral-title-form">
+          <input id="neutral-title-one" type="text" aria-label="Project reference">
+          <input id="neutral-title-two" type="text" aria-label="Project note">
+        </form>`)
+      return
+    }
     if (requestUrl === '/card-verification-field-safety') {
-      response.end(`<!doctype html><title>Card verification field safety</title>
+      response.end(`<!doctype html><title>Verification field safety</title>
         <form id="sensitive-card-verification-form">
           <input type="text" name="reference_one" aria-label="C&#x200B;VV">
           <input type="text" name="reference_two" aria-label="ＣＶＣ">
@@ -6059,6 +6136,140 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
+  it('binds the private document title into field safety classification and action-time evidence', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+
+    const paymentService = createService()
+    services.push(paymentService)
+    const paymentAnalysis = await paymentService.analyze(`${fixture.origin}/document-title-payment`)
+    expect(paymentAnalysis.domEvidence.filter(({ tag }) => tag === 'input')).toEqual([
+      expect.objectContaining({ label: 'Project reference', sensitive: true }),
+      expect.objectContaining({ label: 'Project note', sensitive: true }),
+    ])
+    expect(paymentAnalysis.capabilities.some(({ kind }) => kind === 'prepare_form')).toBe(false)
+    const safeNavigation = paymentAnalysis.capabilities.find(({ kind }) => kind === 'navigation')!
+    expect(safeNavigation).toBeDefined()
+    expect(JSON.stringify({
+      capabilities: paymentAnalysis.capabilities,
+      domEvidence: paymentAnalysis.domEvidence,
+    })).not.toContain('Payment details')
+    await expect(paymentService.execute(
+      paymentAnalysis.sessionId,
+      paymentAnalysis.sessionToken,
+      safeNavigation.name,
+      safeNavigation.sampleInput,
+      undefined,
+      safeNavigation.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const neutralService = createService()
+    services.push(neutralService)
+    const analysis = await neutralService.analyze(`${fixture.origin}/document-title-neutral`)
+    const page = internalSession(neutralService, analysis.sessionId).page
+    const form = analysis.capabilities.find(({ kind }) => kind === 'prepare_form')!
+    expect(form).toBeDefined()
+    expect(JSON.stringify(form)).not.toContain('Project workspace')
+
+    await page.evaluate(() => { document.title = 'Payment details' })
+    await expect(neutralService.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#neutral-title-one').inputValue()).toBe('')
+    expect(await page.locator('#neutral-title-two').inputValue()).toBe('')
+
+    await page.evaluate(() => { document.title = 'Project workspace' })
+    await expect(neutralService.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('blocks normalized credential-key phrases without matching neutral word boundaries', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/credential-key-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    for (const label of [
+      'api\u200bkey',
+      'Project reference',
+      'Project code',
+      'privatekey',
+      'Project identifier',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
+    }
+    for (const label of ['Keynote topic', 'Private parking note', 'Accessibility setting']) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: false })
+    }
+    const publicPayload = JSON.stringify({
+      capabilities: analysis.capabilities,
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+    })
+    expect(publicPayload).not.toMatch(/opaque-(?:label|name|id|aria|title)-secret/)
+
+    const neutralEvidence = analysis.domEvidence.find(({ label }) => label === 'Keynote topic')!
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidence.id))!
+    const neutralResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )
+    expect(neutralResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = neutralResult.analysis
+
+    const lateForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
+    await page.locator('#late-project-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'api\u200bkey')
+      input.setAttribute('title', 'accesskey')
+    })
+    await page.locator('#late-project-two').evaluate((input) => {
+      input.setAttribute('name', 'privateKey')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-project-one').inputValue()).toBe('')
+    expect(await page.locator('#late-project-two').inputValue()).toBe('')
+
+    await page.locator('#late-project-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'Project reference')
+      input.removeAttribute('title')
+    })
+    await page.locator('#late-project-two').evaluate((input) => {
+      input.setAttribute('name', 'project_note')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
   it('classifies normalized card-verification tokens without matching neutral word substrings', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -6332,6 +6543,125 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       lateForm.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('keeps direct ARIA required text and single-select contracts aligned end to end', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/aria-required-contracts`)
+    const page = internalSession(service, analysis.sessionId).page
+    const capabilityFor = (label: string) => {
+      const evidenceId = analysis.domEvidence.find((evidence) => evidence.label === label)!.id
+      return analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidenceId))
+    }
+
+    const textForm = capabilityFor('ARIA required text')!
+    expect(textForm.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'string', minLength: 1 },
+        field_2: { type: 'string', minLength: 1 },
+      },
+    })
+    expect(textForm.sampleInput).toEqual({ field_1: 'A', field_2: 'A' })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      textForm.name,
+      { ...textForm.sampleInput, field_1: '' },
+      undefined,
+      textForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
+    expect(await page.locator('#aria-required-text').inputValue()).toBe('')
+
+    const textResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      textForm.name,
+      textForm.sampleInput,
+      undefined,
+      textForm.id,
+    )
+    expect(textResult.structuredContent).toMatchObject({ isolatedStateChanged: true, targetStateVerified: true })
+    analysis = textResult.analysis
+
+    const selectForm = capabilityFor('ARIA required choice')!
+    expect(selectForm.inputSchema).toMatchObject({
+      properties: {
+        field_1: { type: 'integer', minimum: 0, maximum: 1 },
+        field_2: { type: 'string' },
+      },
+    })
+    expect(selectForm.sampleInput.field_1).toBe(0)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      selectForm.name,
+      { ...selectForm.sampleInput, field_1: 2 },
+      undefined,
+      selectForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
+    expect(await page.locator('#aria-required-select').inputValue()).toBe('')
+    const selectResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      selectForm.name,
+      selectForm.sampleInput,
+      undefined,
+      selectForm.id,
+    )
+    expect(selectResult.structuredContent.targetStateVerified).toBe(true)
+    expect(await page.locator('#aria-required-select').inputValue()).toBe('one')
+    analysis = selectResult.analysis
+
+    expect(capabilityFor('ARIA required only empty')).toBeUndefined()
+    const optionalForm = capabilityFor('ARIA optional choice')!
+    expect(optionalForm.inputSchema).toMatchObject({
+      properties: { field_1: { type: 'integer', minimum: 0, maximum: 1 } },
+    })
+    expect((optionalForm.inputSchema.properties as Record<string, Record<string, unknown>>).field_2)
+      .not.toHaveProperty('minLength')
+
+    const lateTextForm = capabilityFor('Late ARIA required text')!
+    await page.locator('#late-aria-required-text').evaluate((input) =>
+      input.setAttribute('aria-required', 'true'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateTextForm.name,
+      lateTextForm.sampleInput,
+      undefined,
+      lateTextForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-aria-required-text').inputValue()).toBe('')
+    expect(await page.locator('#late-aria-required-text-detail').inputValue()).toBe('')
+    await page.locator('#late-aria-required-text').evaluate((input) =>
+      input.removeAttribute('aria-required'))
+    const restored = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateTextForm.name,
+      lateTextForm.sampleInput,
+      undefined,
+      lateTextForm.id,
+    )
+    expect(restored.structuredContent.targetStateVerified).toBe(true)
+    analysis = restored.analysis
+
+    const lateSelectForm = capabilityFor('Late ARIA required choice')!
+    await page.locator('#late-aria-required-select').evaluate((select) =>
+      select.setAttribute('aria-required', 'true'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateSelectForm.name,
+      lateSelectForm.sampleInput,
+      undefined,
+      lateSelectForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-aria-required-select').inputValue()).toBe('')
+    expect(await page.locator('#late-aria-required-select-detail').inputValue()).toBe('')
   })
 
   it('excludes native-pattern fields and rejects a pattern added after analysis before mutation', async () => {
