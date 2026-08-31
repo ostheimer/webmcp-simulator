@@ -325,9 +325,13 @@ describe('SandboxWrapperService session boundaries', () => {
       loadWorkerAssets: async () => ({ worker: Buffer.from('worker'), client: Buffer.from('client') }),
     })
     const creating = createService.analyze('https://public.example.at')
-    await expect(creating).rejects.toMatchObject({ code: 'analysis_timeout', status: 504 })
+    let creatingSettled = false
+    void creating.finally(() => { creatingSettled = true }).catch(() => undefined)
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(creatingSettled).toBe(false)
     lateCreate.resolve(lateSandbox)
-    await vi.waitFor(() => expect(lateSandbox.deleted).toBe(1))
+    await expect(creating).rejects.toMatchObject({ code: 'analysis_timeout', status: 504 })
+    expect(lateSandbox.deleted).toBe(1)
 
     const setupSandbox = new FakeSandbox()
     setupSandbox.runCommand = async (params) => {
@@ -1061,6 +1065,33 @@ describe('SandboxWrapperService session boundaries', () => {
     authenticationGate.resolve()
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(harness.sandbox.deleted).toBe(0)
+  })
+
+  it('deletes a late reconnect after the delayed health result authenticates the valid token', async () => {
+    const harness = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      { actionTimeoutMs: 25 },
+    )
+    const analysis = await harness.service.analyze('https://public.example.at')
+    const commandsBefore = harness.sandbox.commandCalls
+    const authenticationGate = deferred<void>()
+    harness.sandbox.healthCommandGate = authenticationGate.promise
+
+    await expect(harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'late authenticated cleanup' },
+    )).rejects.toMatchObject({
+      code: 'action_timeout',
+      status: 504,
+      sessionInvalidated: true,
+    })
+    expect(harness.sandbox.commandCalls).toBe(commandsBefore + 1)
+    expect(harness.sandbox.deleted).toBe(0)
+
+    authenticationGate.resolve()
+    await vi.waitFor(() => expect(harness.sandbox.deleted).toBe(1))
   })
 
   it('propagates abort to the command and deletes the partially mutable sandbox', async () => {

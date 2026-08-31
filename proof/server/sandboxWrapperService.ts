@@ -473,7 +473,7 @@ export class SandboxWrapperService {
         sandbox = await raceSandboxOperation(createPromise, operationController.signal)
       } catch (error) {
         if (operationController.signal.aborted) {
-          void createPromise.then(deleteSandboxOnce).catch(() => undefined)
+          await createPromise.then(deleteSandboxOnce).catch(() => undefined)
         }
         throw error
       }
@@ -592,15 +592,37 @@ export class SandboxWrapperService {
         }
         throw error
       }
+      const healthPromise = this.callWorker(
+        sandbox,
+        sessionToken,
+        'health',
+        {},
+        operationController.signal,
+      )
       try {
         await raceSandboxOperation(
-          this.callWorker(sandbox, sessionToken, 'health', {}, operationController.signal),
+          healthPromise,
           operationController.signal,
         )
         workerAuthenticated = true
       } catch (error) {
         if (error instanceof WrapperServiceError && error.code !== 'invalid_capability') {
           workerAuthenticated = true
+        }
+        if (operationController.signal.aborted) {
+          void healthPromise.then(
+            () => deleteClosedSandboxWithin(
+              sandbox!,
+              WRAPPER_CLOSE_PROVIDER_CLEANUP_TIMEOUT_MS,
+            ),
+            (lateError: unknown) => lateError instanceof WrapperServiceError
+              && lateError.code !== 'invalid_capability'
+              ? deleteClosedSandboxWithin(
+                  sandbox!,
+                  WRAPPER_CLOSE_PROVIDER_CLEANUP_TIMEOUT_MS,
+                )
+              : undefined,
+          ).catch(() => undefined)
         }
         throw error
       }

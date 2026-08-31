@@ -2367,6 +2367,7 @@ async function startFixture(): Promise<Fixture> {
       response.end(`<!doctype html><title>Dynamic media contract</title>
         <video id="moving-video" autoplay muted playsinline style="position:absolute;left:20px;top:20px;width:220px;height:36px"></video>
         <select id="semantic-media-filter" aria-label="Semantic media filter" style="appearance:none;background:transparent;border:0;color:#111;position:absolute;left:20px;top:20px;width:220px;height:36px"><option selected>Same label</option><option>Same label</option></select>
+        <input id="visible-media-search" type="search" aria-label="Visible media search" style="position:absolute;left:20px;top:90px;width:220px;height:36px">
         <script>
           const mediaCanvas = document.createElement('canvas');
           mediaCanvas.width = 220; mediaCanvas.height = 36;
@@ -2387,11 +2388,13 @@ async function startFixture(): Promise<Fixture> {
       response.end(`<!doctype html><title>Dynamic shadow contract</title>
         <div id="closed-paint-host" style="position:absolute;left:20px;top:20px;width:220px;height:36px"></div>
         <select id="semantic-shadow-filter" aria-label="Semantic shadow filter" style="appearance:none;background:transparent;border:0;color:#111;position:absolute;left:20px;top:20px;width:220px;height:36px"><option selected>Same label</option><option>Same label</option></select>
+        <input id="visible-shadow-search" type="search" aria-label="Visible shadow search" style="position:absolute;left:20px;top:90px;width:220px;height:36px">
         <script>
           const root = document.getElementById('closed-paint-host').attachShadow({ mode: 'closed' });
           const canvas = document.createElement('canvas');
           canvas.width = 220; canvas.height = 36;
           root.append(canvas);
+          globalThis.__closedPaintCanvasForTest = canvas;
           const context = canvas.getContext('2d');
           const draw = () => {
             context.fillStyle = Math.random() > .5 ? '#dc2626' : '#2563eb';
@@ -2523,6 +2526,61 @@ async function startFixture(): Promise<Fixture> {
             frame.contentWindow.HTMLInputElement.prototype,
             'checked',
           ).set;
+          frame.remove();
+        </script>`)
+      return
+    }
+    if (requestUrl.startsWith('/selection-paint-contract')) {
+      const kind = new URL(requestUrl, 'http://fixture.invalid').searchParams.get('kind') ?? 'input'
+      const selectionTarget = kind === 'textarea'
+        ? '<textarea id="selection-paint-target" aria-label="Selection paint notes" autofocus>selection paint baseline</textarea>'
+        : '<input id="selection-paint-target" type="search" aria-label="Selection paint search" value="selection paint baseline" autofocus>'
+      response.end(`<!doctype html><title>Selection paint contract</title>
+        <style>::selection { background: rgb(220, 38, 38); color: white; }</style>
+        ${selectionTarget}
+        <p id="document-selection-source">Document selection paint source</p>
+        <script>
+          const target = document.getElementById('selection-paint-target');
+          target.focus({ preventScroll: true });
+          target.setSelectionRange(0, 0, 'none');
+        </script>`)
+      return
+    }
+    if (requestUrl === '/element-internals-validity-contract') {
+      response.end(`<!doctype html><title>ElementInternals validity contract</title>
+        <style>main:has(validity-probe:invalid) #internals-search { border:20px solid red }</style>
+        <main>
+          <validity-probe></validity-probe>
+          <input id="internals-search" type="search" aria-label="Internals validity search">
+        </main>
+        <script>
+          class ValidityProbe extends HTMLElement {
+            static formAssociated = true;
+            constructor() {
+              super();
+              this.internals = this.attachInternals();
+            }
+            setInvalid() {
+              this.internals.setValidity({ customError: true }, 'transient invalid state');
+            }
+            clearInvalid() {
+              this.internals.setValidity({});
+            }
+            setInvalidForeign() {
+              globalThis.__foreignSetValidity.call(
+                this.internals,
+                { customError: true },
+                'transient foreign invalid state',
+              );
+            }
+            clearInvalidForeign() {
+              globalThis.__foreignSetValidity.call(this.internals, {});
+            }
+          }
+          customElements.define('validity-probe', ValidityProbe);
+          const frame = document.createElement('iframe');
+          document.body.append(frame);
+          globalThis.__foreignSetValidity = frame.contentWindow.ElementInternals.prototype.setValidity;
           frame.remove();
         </script>`)
       return
@@ -6258,6 +6316,196 @@ describe('WrapperProofService security boundaries', () => {
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
+  it.each([
+    ['input method', 'input', 'method'],
+    ['textarea properties', 'textarea', 'properties'],
+    ['document selection', 'input', 'document'],
+  ] as const)('retries analysis after transient %s paint', async (_label, kind, transition) => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate((mode) => {
+          const target = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+            '#selection-paint-target',
+          )!
+          if (mode === 'method') target.setSelectionRange(0, target.value.length, 'forward')
+          if (mode === 'properties') {
+            target.selectionStart = 0
+            target.selectionEnd = target.value.length
+            target.selectionDirection = 'backward'
+          }
+          if (mode === 'document') {
+            document.getSelection()?.selectAllChildren(
+              document.querySelector('#document-selection-source')!,
+            )
+          }
+        }, transition)
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate((mode) => {
+          if (mode === 'document') {
+            document.getSelection()?.removeAllRanges()
+            return
+          }
+          document.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+            '#selection-paint-target',
+          )!.setSelectionRange(0, 0, 'none')
+        }, transition)
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/selection-paint-contract?kind=${kind}`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(kind === 'input')
+    expect(analysis.domEvidence.some(({ label }) => label === (
+      kind === 'textarea' ? 'Selection paint notes' : 'Selection paint search'
+    ))).toBe(true)
+  })
+
+  it('invalidates an action when selection paint changes transiently during its screenshot', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringActionScreenshot: async (page) => {
+        await page.locator('#selection-paint-target').evaluate((control) => {
+          const target = control as HTMLInputElement
+          target.setSelectionRange(0, target.value.length, 'forward')
+        })
+      },
+      afterActionScreenshot: async (page) => {
+        await page.locator('#selection-paint-target').evaluate((control) => {
+          ;(control as HTMLInputElement).setSelectionRange(0, 0, 'none')
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/selection-paint-contract?kind=input`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('fails closed when the bounded selection-transition counter overflows', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.locator('#selection-paint-target').evaluate((control) => {
+          const target = control as HTMLInputElement
+          for (let index = 0; index < 4_100; index += 1) {
+            target.setSelectionRange(index % 2, index % 2, 'none')
+          }
+        })
+      },
+    })
+    services.push(service)
+
+    await expect(service.analyze(
+      `${fixture.origin}/selection-paint-contract?kind=input`,
+    )).rejects.toMatchObject({ code: 'unsupported_page' })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it.each(['main', 'foreign'] as const)(
+    'retries analysis after transient %s-realm custom-element validity paint',
+    async (realm) => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.locator('validity-probe').evaluate((element, selectedRealm) => {
+          ;(element as HTMLElement & {
+            setInvalid(): void
+            setInvalidForeign(): void
+          })[selectedRealm === 'foreign' ? 'setInvalidForeign' : 'setInvalid']()
+        }, realm)
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.locator('validity-probe').evaluate((element, selectedRealm) => {
+          ;(element as HTMLElement & {
+            clearInvalid(): void
+            clearInvalidForeign(): void
+          })[selectedRealm === 'foreign' ? 'clearInvalidForeign' : 'clearInvalid']()
+        }, realm)
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/element-internals-validity-contract`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+    },
+  )
+
+  it.each(['main', 'foreign'] as const)(
+    'invalidates an action after transient %s-realm custom-element validity paint',
+    async (realm) => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let duringCalls = 0
+    let afterCalls = 0
+    const service = createService({
+      duringActionScreenshot: async (page) => {
+        duringCalls += 1
+        await page.locator('validity-probe').evaluate((element, selectedRealm) => {
+          ;(element as HTMLElement & {
+            setInvalid(): void
+            setInvalidForeign(): void
+          })[selectedRealm === 'foreign' ? 'setInvalidForeign' : 'setInvalid']()
+        }, realm)
+      },
+      afterActionScreenshot: async (page) => {
+        afterCalls += 1
+        await page.locator('validity-probe').evaluate((element, selectedRealm) => {
+          ;(element as HTMLElement & {
+            clearInvalid(): void
+            clearInvalidForeign(): void
+          })[selectedRealm === 'foreign' ? 'clearInvalidForeign' : 'clearInvalid']()
+        }, realm)
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/element-internals-validity-contract`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    const failure = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    ).catch((error: unknown) => error)
+    expect({ failure, duringCalls, afterCalls }).toMatchObject({
+      failure: { code: 'action_failed', sessionInvalidated: true },
+      duringCalls: 1,
+      afterCalls: 1,
+    })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+    },
+  )
+
   it('records temporary descriptor and Array.every tampering without trusting endpoint integrity', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -9232,7 +9480,7 @@ describe('WrapperProofService security boundaries', () => {
     expect(captureAttempts).toBe(2)
   })
 
-  it('rejects intersecting dynamic paint while preserving unrelated visible actions', async () => {
+  it('excludes intersecting dynamic paint from analysis while preserving unrelated visible actions', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const capabilityFor = (
@@ -9250,36 +9498,9 @@ describe('WrapperProofService security boundaries', () => {
       (globalThis as typeof globalThis & { __renderFrame?: number }).__renderFrame ?? -1,
     ))
     expect(movingFrame).toBeGreaterThan(0)
-    const semanticCanvas = capabilityFor(canvasAnalysis, 'Semantic canvas filter')
-    await expect(canvasService.execute(
-      canvasAnalysis.sessionId,
-      canvasAnalysis.sessionToken,
-      semanticCanvas.name,
-      semanticCanvas.sampleInput,
-      undefined,
-      semanticCanvas.id,
-    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
-    expect(await canvasPage.locator('#semantic-canvas-filter').evaluate(
-      (select) => (select as HTMLSelectElement).selectedIndex,
-    )).toBe(0)
+    expect(canvasAnalysis.domEvidence.some(({ label }) => label === 'Semantic canvas filter')).toBe(false)
+    expect(canvasAnalysis.domEvidence.some(({ label }) => label === 'Semantic animated image filter')).toBe(false)
     expect(internalServiceState(canvasService)).toEqual({ sessions: 1, reservations: 0 })
-
-    const imageService = createService()
-    services.push(imageService)
-    const imageAnalysis = await imageService.analyze(`${fixture.origin}/dynamic-render-contract`)
-    const imagePage = internalSession(imageService, imageAnalysis.sessionId).page
-    const semanticImage = capabilityFor(imageAnalysis, 'Semantic animated image filter')
-    await expect(imageService.execute(
-      imageAnalysis.sessionId,
-      imageAnalysis.sessionToken,
-      semanticImage.name,
-      semanticImage.sampleInput,
-      undefined,
-      semanticImage.id,
-    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
-    expect(await imagePage.locator('#semantic-image-filter').evaluate(
-      (select) => (select as HTMLSelectElement).selectedIndex,
-    )).toBe(0)
 
     const mediaService = createService()
     services.push(mediaService)
@@ -9289,35 +9510,13 @@ describe('WrapperProofService security boundaries', () => {
       paused: (video as HTMLVideoElement).paused,
       hasStream: Boolean((video as HTMLVideoElement).srcObject),
     }))).toEqual({ paused: false, hasStream: true })
-    const semanticMedia = capabilityFor(mediaAnalysis, 'Semantic media filter')
-    await expect(mediaService.execute(
-      mediaAnalysis.sessionId,
-      mediaAnalysis.sessionToken,
-      semanticMedia.name,
-      semanticMedia.sampleInput,
-      undefined,
-      semanticMedia.id,
-    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
-    expect(await mediaPage.locator('#semantic-media-filter').evaluate(
-      (select) => (select as HTMLSelectElement).selectedIndex,
-    )).toBe(0)
+    expect(mediaAnalysis.domEvidence.some(({ label }) => label === 'Semantic media filter')).toBe(false)
+    expect(mediaAnalysis.domEvidence.some(({ label }) => label === 'Visible media search')).toBe(true)
 
     const shadowService = createService()
     services.push(shadowService)
     const shadowAnalysis = await shadowService.analyze(`${fixture.origin}/dynamic-shadow-contract`)
-    const shadowPage = internalSession(shadowService, shadowAnalysis.sessionId).page
-    const semanticShadow = capabilityFor(shadowAnalysis, 'Semantic shadow filter')
-    await expect(shadowService.execute(
-      shadowAnalysis.sessionId,
-      shadowAnalysis.sessionToken,
-      semanticShadow.name,
-      semanticShadow.sampleInput,
-      undefined,
-      semanticShadow.id,
-    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
-    expect(await shadowPage.locator('#semantic-shadow-filter').evaluate(
-      (select) => (select as HTMLSelectElement).selectedIndex,
-    )).toBe(0)
+    expect(shadowAnalysis.domEvidence.some(({ label }) => label === 'Semantic shadow filter')).toBe(false)
 
     const visibleService = createService()
     services.push(visibleService)
@@ -9336,6 +9535,73 @@ describe('WrapperProofService security boundaries', () => {
       String(visible.sampleInput.query),
     )
   }, 40_000)
+
+  it('retries when a watched dynamic paint source crosses a retained target during capture', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.locator('#moving-canvas').evaluate((canvas) => {
+          canvas.setAttribute(
+            'style',
+            'position:fixed;left:20px;top:140px;width:220px;height:36px;z-index:4',
+          )
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.locator('#moving-canvas').evaluate((canvas) => {
+          canvas.setAttribute('style', 'position:absolute;inset:0')
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/dynamic-render-contract`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.domEvidence.some(({ label }) => label === 'Semantic canvas filter')).toBe(false)
+    expect(analysis.domEvidence.some(({ label }) => label === 'Visible render search')).toBe(true)
+  })
+
+  it('retries when a closed-shadow dynamic source crosses a retained target during capture', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          const canvas = (globalThis as typeof globalThis & {
+            __closedPaintCanvasForTest: HTMLCanvasElement
+          }).__closedPaintCanvasForTest
+          canvas.setAttribute(
+            'style',
+            'position:fixed;left:20px;top:90px;width:220px;height:36px;z-index:4',
+          )
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          ;(globalThis as typeof globalThis & {
+            __closedPaintCanvasForTest: HTMLCanvasElement
+          }).__closedPaintCanvasForTest.removeAttribute('style')
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/dynamic-shadow-contract`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.domEvidence.some(({ label }) => label === 'Semantic shadow filter')).toBe(false)
+    expect(analysis.domEvidence.some(({ label }) => label === 'Visible shadow search')).toBe(true)
+  })
 
   it('fails closed on an over-budget ARIA-disabled ancestor chain while retaining safe controls', async () => {
     const fixture = await startFixture()

@@ -253,18 +253,23 @@ function paintRectsIntersect(left: PaintRect, right: PaintRect): boolean {
     && left.bottom > right.top
 }
 
-async function assertNoDynamicPaintIntersectsTargets(
+interface DynamicPaintInspection {
+  intersectingTargetBackendNodeIds: Set<number>
+  sourceBackendNodeIds: number[]
+}
+
+async function inspectDynamicPaintIntersections(
   cdp: CDPSession,
   targetBackendNodeIds: number[],
-): Promise<void> {
-  const targetRects: PaintRect[] = []
+): Promise<DynamicPaintInspection> {
+  const targetRects = new Map<number, PaintRect>()
   for (const backendNodeId of targetBackendNodeIds) {
     const box = await cdp.send('DOM.getBoxModel', { backendNodeId }) as {
       model?: { border?: number[] }
     }
     const rect = box.model?.border ? paintRect(box.model.border) : undefined
     if (!rect) throw new Error('The isolated action target has no painted bounds.')
-    targetRects.push(rect)
+    targetRects.set(backendNodeId, rect)
   }
 
   await cdp.send('DOM.enable')
@@ -279,7 +284,9 @@ async function assertNoDynamicPaintIntersectsTargets(
     throw new Error('The isolated dynamic paint search exceeded its safety bound.')
   }
   try {
-    if (resultCount === 0) return
+    if (resultCount === 0) {
+      return { intersectingTargetBackendNodeIds: new Set(), sourceBackendNodeIds: [] }
+    }
     const results = await cdp.send('DOM.getSearchResults', {
       searchId,
       fromIndex: 0,
@@ -288,7 +295,17 @@ async function assertNoDynamicPaintIntersectsTargets(
     if (!Array.isArray(results.nodeIds) || results.nodeIds.length !== resultCount) {
       throw new Error('The isolated dynamic paint search was incomplete.')
     }
+    const intersectingTargetBackendNodeIds = new Set<number>()
+    const sourceBackendNodeIds: number[] = []
     for (const nodeId of results.nodeIds) {
+      const described = await cdp.send('DOM.describeNode', { nodeId }) as {
+        node?: { backendNodeId?: number }
+      }
+      const sourceBackendNodeId = Number(described.node?.backendNodeId)
+      if (!Number.isSafeInteger(sourceBackendNodeId) || sourceBackendNodeId <= 0) {
+        throw new Error('The isolated dynamic paint source could not be bound safely.')
+      }
+      sourceBackendNodeIds.push(sourceBackendNodeId)
       let box: { model?: { border?: number[] } }
       try {
         box = await cdp.send('DOM.getBoxModel', { nodeId }) as typeof box
@@ -296,12 +313,27 @@ async function assertNoDynamicPaintIntersectsTargets(
         continue
       }
       const rect = box.model?.border ? paintRect(box.model.border) : undefined
-      if (rect && targetRects.some((targetRect) => paintRectsIntersect(targetRect, rect))) {
-        throw new Error('The isolated action target overlaps an unfreezable paint source.')
+      if (rect) {
+        for (const [targetBackendNodeId, targetRect] of targetRects) {
+          if (paintRectsIntersect(targetRect, rect)) {
+            intersectingTargetBackendNodeIds.add(targetBackendNodeId)
+          }
+        }
       }
     }
+    return { intersectingTargetBackendNodeIds, sourceBackendNodeIds }
   } finally {
     await cdp.send('DOM.discardSearchResults', { searchId }).catch(() => undefined)
+  }
+}
+
+async function assertNoDynamicPaintIntersectsTargets(
+  cdp: CDPSession,
+  targetBackendNodeIds: number[],
+): Promise<void> {
+  const inspected = await inspectDynamicPaintIntersections(cdp, targetBackendNodeIds)
+  if (inspected.intersectingTargetBackendNodeIds.size > 0) {
+    throw new Error('The isolated action target overlaps an unfreezable paint source.')
   }
 }
 
@@ -3277,11 +3309,13 @@ async function installEarlyFocusChangeCounter(cdp: CDPSession): Promise<void> {
 async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promise<string> {
   const stateKey = `__webmcp_native_transitions_${randomUUID().replaceAll('-', '')}`
   const recordKey = `__webmcp_native_record_${randomUUID().replaceAll('-', '')}`
+  const internalsHostKey = `__webmcp_internals_host_${randomUUID().replaceAll('-', '')}`
   const installed = await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
     runImmediately: true,
     source: `(() => {
       const stateKey = ${JSON.stringify(stateKey)};
       const recordKey = ${JSON.stringify(recordKey)};
+      const internalsHostKey = ${JSON.stringify(internalsHostKey)};
       if (Object.prototype.hasOwnProperty.call(globalThis, stateKey)) return;
       const getDescriptor = Object.getOwnPropertyDescriptor;
       const defineProperty = Object.defineProperty;
@@ -3292,6 +3326,8 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
       const maxTransitions = ${MAX_CAPTURE_NATIVE_TRANSITIONS};
       let count = 0;
       let overflow = false;
+      let selectionCount = 0;
+      let selectionOverflow = false;
       const bindings = [];
       const record = () => {
         if (count >= maxTransitions) {
@@ -3300,13 +3336,25 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
         }
         count += 1;
       };
-      const recordLocalConnected = (target) => {
+      const recordSelection = () => {
+        if (selectionCount >= maxTransitions) {
+          selectionOverflow = true;
+          overflow = true;
+          return;
+        }
+        selectionCount += 1;
+        record();
+      };
+      const recordLocalConnected = (target, selection = false) => {
         if (!isConnectedGetter) {
           overflow = true;
           return;
         }
         try {
-          if (apply(isConnectedGetter, target, [])) record();
+          if (apply(isConnectedGetter, target, [])) {
+            if (selection) recordSelection();
+            else record();
+          }
         } catch {
           overflow = true;
         }
@@ -3321,7 +3369,7 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
       } catch {
         overflow = true;
       }
-      const recordConnected = (target) => {
+      const recordConnected = (target, selection = false) => {
         if (!ownerDocumentGetter || !defaultViewGetter) {
           overflow = true;
           return;
@@ -3334,7 +3382,7 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
             overflow = true;
             return;
           }
-          apply(targetRecorder, targetWindow, [target]);
+          apply(targetRecorder, targetWindow, [target, selection]);
         } catch {
           overflow = true;
         }
@@ -3375,6 +3423,48 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
           overflow = true;
         }
       };
+      const wrapSelectionSetter = (prototype, property) => {
+        const descriptor = getDescriptor(prototype, property);
+        if (!descriptor || typeof descriptor.set !== 'function') {
+          overflow = true;
+          return;
+        }
+        const original = descriptor.set;
+        const wrapped = function(value) {
+          recordConnected(this, true);
+          return apply(original, this, [value]);
+        };
+        try {
+          defineProperty(prototype, property, { ...descriptor, configurable: false, set: wrapped });
+          bindings.push([prototype, property, 'set', wrapped]);
+        } catch {
+          overflow = true;
+        }
+      };
+      const wrapSelectionMethod = (
+        prototype,
+        property,
+        optional = false,
+        connectedTarget = false,
+      ) => {
+        const descriptor = getDescriptor(prototype, property);
+        if (!descriptor || typeof descriptor.value !== 'function') {
+          if (!optional) overflow = true;
+          return;
+        }
+        const original = descriptor.value;
+        const wrapped = function(...args) {
+          if (connectedTarget) recordConnected(this, true);
+          else recordSelection();
+          return apply(original, this, args);
+        };
+        try {
+          defineProperty(prototype, property, { ...descriptor, configurable: false, value: wrapped });
+          bindings.push([prototype, property, 'value', wrapped]);
+        } catch {
+          overflow = true;
+        }
+      };
       wrapSetter(HTMLInputElement.prototype, 'value');
       wrapSetter(HTMLInputElement.prototype, 'checked');
       wrapSetter(HTMLInputElement.prototype, 'indeterminate');
@@ -3394,8 +3484,121 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
       wrapMethod(HTMLFieldSetElement.prototype, 'setCustomValidity');
       wrapMethod(HTMLButtonElement.prototype, 'setCustomValidity');
       wrapMethod(HTMLOutputElement.prototype, 'setCustomValidity');
+      const elementInternalsPrototype = globalThis.ElementInternals?.prototype;
+      if (!elementInternalsPrototype) {
+        overflow = true;
+      } else {
+        const attachDescriptor = getDescriptor(HTMLElement.prototype, 'attachInternals');
+        const descriptor = getDescriptor(elementInternalsPrototype, 'setValidity');
+        if (
+          !attachDescriptor
+          || typeof attachDescriptor.value !== 'function'
+          || !descriptor
+          || typeof descriptor.value !== 'function'
+        ) {
+          overflow = true;
+        } else {
+          const originalAttach = attachDescriptor.value;
+          const wrappedAttach = function(...args) {
+            const internals = apply(originalAttach, this, args);
+            try {
+              defineProperty(internals, internalsHostKey, {
+                configurable: false,
+                enumerable: false,
+                writable: false,
+                value: this,
+              });
+            } catch {
+              overflow = true;
+            }
+            return internals;
+          };
+          const original = descriptor.value;
+          const wrapped = function(...args) {
+            const host = this?.[internalsHostKey];
+            if (host) recordConnected(host);
+            else overflow = true;
+            return apply(original, this, args);
+          };
+          try {
+            defineProperty(HTMLElement.prototype, 'attachInternals', {
+              ...attachDescriptor,
+              configurable: false,
+              value: wrappedAttach,
+            });
+            defineProperty(elementInternalsPrototype, 'setValidity', {
+              ...descriptor,
+              configurable: false,
+              value: wrapped,
+            });
+            bindings.push([HTMLElement.prototype, 'attachInternals', 'value', wrappedAttach]);
+            bindings.push([elementInternalsPrototype, 'setValidity', 'value', wrapped]);
+          } catch {
+            overflow = true;
+          }
+        }
+      }
       wrapMethod(HTMLFormElement.prototype, 'reset');
       wrapMethod(HTMLElement.prototype, 'click');
+      wrapSelectionSetter(HTMLInputElement.prototype, 'selectionStart');
+      wrapSelectionSetter(HTMLInputElement.prototype, 'selectionEnd');
+      wrapSelectionSetter(HTMLInputElement.prototype, 'selectionDirection');
+      wrapSelectionSetter(HTMLTextAreaElement.prototype, 'selectionStart');
+      wrapSelectionSetter(HTMLTextAreaElement.prototype, 'selectionEnd');
+      wrapSelectionSetter(HTMLTextAreaElement.prototype, 'selectionDirection');
+      wrapSelectionMethod(HTMLInputElement.prototype, 'select', false, true);
+      wrapSelectionMethod(HTMLInputElement.prototype, 'setSelectionRange', false, true);
+      wrapSelectionMethod(HTMLTextAreaElement.prototype, 'select', false, true);
+      wrapSelectionMethod(HTMLTextAreaElement.prototype, 'setSelectionRange', false, true);
+      const selectionPrototype = globalThis.Selection?.prototype;
+      if (!selectionPrototype) {
+        overflow = true;
+      } else {
+        for (const property of [
+          'addRange',
+          'collapse',
+          'collapseToEnd',
+          'collapseToStart',
+          'empty',
+          'extend',
+          'modify',
+          'removeAllRanges',
+          'removeRange',
+          'selectAllChildren',
+          'setBaseAndExtent',
+          'setPosition',
+        ]) wrapSelectionMethod(selectionPrototype, property, true);
+      }
+      const rangePrototype = globalThis.Range?.prototype;
+      if (!rangePrototype) {
+        overflow = true;
+      } else {
+        for (const property of [
+          'collapse',
+          'deleteContents',
+          'extractContents',
+          'insertNode',
+          'selectNode',
+          'selectNodeContents',
+          'setEnd',
+          'setEndAfter',
+          'setEndBefore',
+          'setStart',
+          'setStartAfter',
+          'setStartBefore',
+          'surroundContents',
+        ]) wrapSelectionMethod(rangePrototype, property, true);
+      }
+      const addEventListener = EventTarget.prototype.addEventListener;
+      if (typeof addEventListener !== 'function') {
+        overflow = true;
+      } else {
+        try {
+          apply(addEventListener, document, ['selectionchange', recordSelection, true]);
+        } catch {
+          overflow = true;
+        }
+      }
       const dispatchDescriptor = getDescriptor(EventTarget.prototype, 'dispatchEvent');
       const eventTypeGetter = getDescriptor(Event.prototype, 'type')?.get;
       if (!dispatchDescriptor || typeof dispatchDescriptor.value !== 'function' || !eventTypeGetter) {
@@ -3435,7 +3638,14 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
         configurable: false,
         enumerable: false,
         get() {
-          return { version: 1, count, overflow, integrity: intact() };
+          return {
+            version: 1,
+            count,
+            overflow,
+            integrity: intact(),
+            selectionCount,
+            selectionOverflow,
+          };
         },
       });
       const requestFrame = globalThis.requestAnimationFrame;
@@ -3968,6 +4178,8 @@ interface AnalysisCaptureGuardSnapshot {
   nativeControlStateSignature: string
   nativeStateTransitionCount: number
   nativeStateTransitionOverflow: boolean
+  selectionChangeCount: number
+  selectionChangeOverflow: boolean
   navigationCount: number
   scrollChanged: boolean
   scrollOverflow: boolean
@@ -3998,6 +4210,8 @@ function actionCaptureStayedStable(
     && after.nativeControlStateSignature === before.nativeControlStateSignature
     && !after.nativeStateTransitionOverflow
     && after.nativeStateTransitionCount === before.nativeStateTransitionCount
+    && !after.selectionChangeOverflow
+    && after.selectionChangeCount === before.selectionChangeCount
     && after.navigationCount === before.navigationCount
     && !after.scrollChanged
     && !after.scrollOverflow
@@ -4018,6 +4232,8 @@ function actionCaptureStartedClean(snapshot: AnalysisCaptureGuardSnapshot): bool
     && !snapshot.nativeControlStateOverflow
     && snapshot.nativeStateTransitionCount === 0
     && !snapshot.nativeStateTransitionOverflow
+    && snapshot.selectionChangeCount === 0
+    && !snapshot.selectionChangeOverflow
     && snapshot.navigationCount === 0
     && !snapshot.scrollChanged
     && !snapshot.scrollOverflow
@@ -4037,6 +4253,8 @@ async function createAnalysisCaptureGuard(
     watchBackendNodeIds: number[],
     watchWholeDocument?: boolean,
     duringArm?: () => Promise<void>,
+    dynamicSourceBackendNodeIds?: number[],
+    dynamicTargetBackendNodeIds?: number[],
   ) => Promise<void>
   maskBoundControlStates: (expectedFullSignature: string) => Promise<string>
   rebaseBoundControlStates: (expectedMaskedSignature: string) => Promise<string>
@@ -4060,13 +4278,22 @@ async function createAnalysisCaptureGuard(
     count: number
     integrity: boolean
     overflow: boolean
+    selectionCount: number
+    selectionOverflow: boolean
     version: number
   } | undefined> => {
     const result = await cdp.send('Runtime.evaluate', {
       expression: `globalThis[${JSON.stringify(nativeStateTransitionKey)}]`,
       returnByValue: true,
     }) as {
-      result?: { value?: { count?: unknown, integrity?: unknown, overflow?: unknown, version?: unknown } }
+      result?: { value?: {
+        count?: unknown
+        integrity?: unknown
+        overflow?: unknown
+        selectionCount?: unknown
+        selectionOverflow?: unknown
+        version?: unknown
+      } }
       exceptionDetails?: unknown
     }
     const value = result.result?.value
@@ -4077,11 +4304,16 @@ async function createAnalysisCaptureGuard(
       || Number(value.count) < 0
       || typeof value.integrity !== 'boolean'
       || typeof value.overflow !== 'boolean'
+      || !Number.isSafeInteger(value.selectionCount)
+      || Number(value.selectionCount) < 0
+      || typeof value.selectionOverflow !== 'boolean'
     ) return undefined
     return {
       count: Number(value.count),
       integrity: value.integrity,
       overflow: value.overflow,
+      selectionCount: Number(value.selectionCount),
+      selectionOverflow: value.selectionOverflow,
       version: 1,
     }
   }
@@ -4117,6 +4349,9 @@ async function createAnalysisCaptureGuard(
         mutationCount: 0,
         observer: null,
         watched: [],
+        dynamicSources: [],
+        dynamicTargets: [],
+        dynamicMutationChecks: 0,
         watchOverflow: false,
         controls: [],
         ignoredNativeStateControls: [],
@@ -4133,10 +4368,12 @@ async function createAnalysisCaptureGuard(
       };
       const Observer = globalThis.MutationObserver;
       const addEventListener = EventTarget.prototype.addEventListener;
+      const getBoundingClientRect = Element.prototype.getBoundingClientRect;
       const focusState = globalThis[${JSON.stringify(FOCUS_CHANGE_STATE_KEY)}];
       if (
         typeof Observer !== 'function'
         || typeof addEventListener !== 'function'
+        || typeof getBoundingClientRect !== 'function'
         || !document.documentElement
         || focusState?.version !== 1
         || !Number.isSafeInteger(focusState.count)
@@ -4167,18 +4404,68 @@ async function createAnalysisCaptureGuard(
       addEventListener.call(globalThis, 'scroll', state.windowScrollListener, true);
       state.observer = new Observer((records) => {
         const contains = Node.prototype.contains;
+        const clippedRect = (element) => {
+          const rect = getBoundingClientRect.call(element);
+          const left = Math.max(0, Number(rect.left));
+          const top = Math.max(0, Number(rect.top));
+          const right = Math.min(${CAPTURE_VIEWPORT_WIDTH}, Number(rect.right));
+          const bottom = Math.min(${CAPTURE_VIEWPORT_HEIGHT}, Number(rect.bottom));
+          if (
+            !Number.isFinite(left)
+            || !Number.isFinite(top)
+            || !Number.isFinite(right)
+            || !Number.isFinite(bottom)
+            || right <= left
+            || bottom <= top
+          ) return null;
+          return { left, top, right, bottom };
+        };
+        const intersectsDynamicTarget = (source) => {
+          const sourceRect = clippedRect(source);
+          if (!sourceRect) return false;
+          return state.dynamicTargets.some((target) => {
+            const targetRect = clippedRect(target);
+            return targetRect
+              && sourceRect.left < targetRect.right
+              && sourceRect.right > targetRect.left
+              && sourceRect.top < targetRect.bottom
+              && sourceRect.bottom > targetRect.top;
+          });
+        };
         for (const record of records) {
           if (record.type === 'attributes' && record.attributeName === 'id') {
             state.documentIdMutationCount = Math.min(
               Number.MAX_SAFE_INTEGER,
               state.documentIdMutationCount + 1,
             );
-            continue;
           }
           const target = record.target;
           const head = document.head;
           const headChanged = head instanceof Node
             && (target === head || contains.call(head, target));
+          const affectedDynamicSources = state.dynamicSources.filter((source) =>
+            target === source
+            || contains.call(source, target)
+            || contains.call(target, source));
+          if (affectedDynamicSources.length > 0) {
+            state.dynamicMutationChecks += affectedDynamicSources.length;
+            if (state.dynamicMutationChecks > ${MAX_CAPTURE_NATIVE_TRANSITIONS}) {
+              state.watchOverflow = true;
+              state.observer.disconnect();
+              break;
+            }
+            try {
+              if (affectedDynamicSources.some(intersectsDynamicTarget)) {
+                state.mutationCount = 1;
+                state.observer.disconnect();
+                break;
+              }
+            } catch {
+              state.watchOverflow = true;
+              state.observer.disconnect();
+              break;
+            }
+          }
           if (state.watched.some((node) =>
             target === node
             || contains.call(node, target)
@@ -4382,6 +4669,10 @@ async function createAnalysisCaptureGuard(
       const nativeStateTransitionInvalid = !nativeStateTransitions
         || nativeStateTransitions.count < nativeStateTransitionBaseline.count
         || nativeStateTransitions.count - nativeStateTransitionBaseline.count > MAX_CAPTURE_NATIVE_TRANSITIONS
+      const selectionChangeInvalid = !nativeStateTransitions
+        || nativeStateTransitions.selectionCount < nativeStateTransitionBaseline.selectionCount
+        || nativeStateTransitions.selectionCount - nativeStateTransitionBaseline.selectionCount
+          > MAX_CAPTURE_NATIVE_TRANSITIONS
       return {
         ...captured.result.value,
         nativeStateTransitionCount: nativeStateTransitionInvalid
@@ -4389,6 +4680,12 @@ async function createAnalysisCaptureGuard(
           : nativeStateTransitions.count - nativeStateTransitionBaseline.count,
         nativeStateTransitionOverflow: nativeStateTransitionInvalid
           || nativeStateTransitions.overflow
+          || !nativeStateTransitions.integrity,
+        selectionChangeCount: selectionChangeInvalid
+          ? -1
+          : nativeStateTransitions.selectionCount - nativeStateTransitionBaseline.selectionCount,
+        selectionChangeOverflow: selectionChangeInvalid
+          || nativeStateTransitions.selectionOverflow
           || !nativeStateTransitions.integrity,
         navigationCount,
         styleSheetChangeCount,
@@ -4402,6 +4699,8 @@ async function createAnalysisCaptureGuard(
       watchBackendNodeIds,
       watchWholeDocument = false,
       duringArm,
+      dynamicSourceBackendNodeIds = [],
+      dynamicTargetBackendNodeIds = [],
     ) => {
       if (watchWholeDocument) {
         const documentWatched = await cdp.send('Runtime.evaluate', {
@@ -4423,7 +4722,12 @@ async function createAnalysisCaptureGuard(
           throw new Error('The isolated analysis document could not be retained.')
         }
       }
-      const retainBackendNode = async (backendNodeId: number, isControl: boolean) => {
+      const retainBackendNode = async (
+        backendNodeId: number,
+        isControl: boolean,
+        isDynamicSource = false,
+        isDynamicTarget = false,
+      ) => {
         const resolved = await cdp.send('DOM.resolveNode', {
           backendNodeId,
           executionContextId,
@@ -4432,21 +4736,34 @@ async function createAnalysisCaptureGuard(
         const objectId = resolved.object?.objectId
         if (!objectId) throw new Error('The isolated analysis identity expired before capture.')
         const retained = await cdp.send('Runtime.callFunctionOn', {
-          functionDeclaration: `function(isControl, maxWatchNodes) {
+          functionDeclaration: `function(isControl, isDynamicSource, isDynamicTarget, maxWatchNodes) {
             const state = globalThis[${JSON.stringify(storageKey)}];
             if (!state || !(this instanceof Element)) return false;
-            if (!state.watched.includes(this)) {
-              if (state.watched.length >= maxWatchNodes) {
+            const alreadyRetained = state.watched.includes(this) || state.dynamicSources.includes(this);
+            if (!alreadyRetained && state.watched.length + state.dynamicSources.length >= maxWatchNodes) {
+              state.watchOverflow = true;
+              return false;
+            }
+            if (isDynamicSource) {
+              if (!state.dynamicSources.includes(this)) state.dynamicSources.push(this);
+            } else if (!state.watched.includes(this)) {
+              if (!alreadyRetained && state.watched.length + state.dynamicSources.length >= maxWatchNodes) {
                 state.watchOverflow = true;
                 return false;
               }
               state.watched.push(this);
             }
             if (isControl && !state.controls.includes(this)) state.controls.push(this);
+            if (isDynamicTarget && !state.dynamicTargets.includes(this)) state.dynamicTargets.push(this);
             return true;
           }`,
           objectId,
-          arguments: [{ value: isControl }, { value: MAX_ANALYSIS_WATCH_NODES }],
+          arguments: [
+            { value: isControl },
+            { value: isDynamicSource },
+            { value: isDynamicTarget },
+            { value: MAX_ANALYSIS_WATCH_NODES },
+          ],
           objectGroup,
           returnByValue: true,
         }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
@@ -4459,6 +4776,12 @@ async function createAnalysisCaptureGuard(
       }
       for (const backendNodeId of watchBackendNodeIds) {
         await retainBackendNode(backendNodeId, false)
+      }
+      for (const backendNodeId of dynamicSourceBackendNodeIds) {
+        await retainBackendNode(backendNodeId, false, true)
+      }
+      for (const backendNodeId of dynamicTargetBackendNodeIds) {
+        await retainBackendNode(backendNodeId, true, false, true)
       }
       await duringArm?.()
       const armed = await cdp.send('Runtime.evaluate', {
@@ -4514,12 +4837,26 @@ async function createAnalysisCaptureGuard(
           state.ignoredNativeStateControls = [];
           if (state.watchOverflow) return false;
           if (state.mutationCount === 0) {
-            state.observer.observe(document.documentElement, {
+            const observerOptions = {
               subtree: true,
               childList: true,
               characterData: true,
               attributes: true,
-            });
+            };
+            state.observer.observe(document.documentElement, observerOptions);
+            const getRootNode = Node.prototype.getRootNode;
+            const observedRoots = [];
+            if (typeof getRootNode !== 'function') return false;
+            for (const watched of state.dynamicSources) {
+              const root = getRootNode.call(watched);
+              if (!root || root === document || observedRoots.includes(root)) continue;
+              if (observedRoots.length >= ${MAX_ANALYSIS_WATCH_NODES}) {
+                state.watchOverflow = true;
+                return false;
+              }
+              observedRoots.push(root);
+              state.observer.observe(root, observerOptions);
+            }
           }
           return true;
         })()`,
@@ -6504,6 +6841,8 @@ export class WrapperProofService {
           || before.focusChangeCount !== 0
           || before.nativeStateTransitionCount !== 0
           || before.nativeStateTransitionOverflow
+          || before.selectionChangeCount !== 0
+          || before.selectionChangeOverflow
           || before.scrollChanged
           || before.scrollOverflow
           || before.scrollStateMismatch
@@ -6517,10 +6856,30 @@ export class WrapperProofService {
           session.page,
           session.cdp,
         )
-        const candidateDomEvidence = collectedDomEvidence.evidence
+        const dynamicPaintTargetBackendNodeIds = collectedDomEvidence.evidence
+          .filter(({ tag }) => tag !== 'a')
+          .map(({ backendNodeId }) => backendNodeId)
+        const dynamicPaint = await inspectDynamicPaintIntersections(
+          session.cdp,
+          dynamicPaintTargetBackendNodeIds,
+        )
+        const candidateDomEvidence = collectedDomEvidence.evidence.filter(({ backendNodeId }) =>
+          !dynamicPaint.intersectingTargetBackendNodeIds.has(backendNodeId))
         await guard.arm(
           candidateDomEvidence.map(({ backendNodeId }) => backendNodeId),
           collectedDomEvidence.watchBackendNodeIds,
+          false,
+          undefined,
+          dynamicPaint.sourceBackendNodeIds,
+          candidateDomEvidence
+            .filter(({ tag }) => tag !== 'a')
+            .map(({ backendNodeId }) => backendNodeId),
+        )
+        await assertNoDynamicPaintIntersectsTargets(
+          session.cdp,
+          candidateDomEvidence
+            .filter(({ tag }) => tag !== 'a')
+            .map(({ backendNodeId }) => backendNodeId),
         )
         await this.beforeAnalysisScreenshot?.(session.page, attempt)
         const beforeScreenshot = await guard.snapshot()
@@ -6535,6 +6894,12 @@ export class WrapperProofService {
         const candidateScreenshot = await guard.screenshot()
         await this.afterAnalysisScreenshot?.(session.page, attempt)
         const afterScreenshot = await guard.snapshot()
+        await assertNoDynamicPaintIntersectsTargets(
+          session.cdp,
+          candidateDomEvidence
+            .filter(({ tag }) => tag !== 'a')
+            .map(({ backendNodeId }) => backendNodeId),
+        )
         if (
           !captureStableBeforeScreenshot
           || !actionCaptureStayedStable(
@@ -6573,6 +6938,8 @@ export class WrapperProofService {
           || after.nativeControlStateSignature !== before.nativeControlStateSignature
           || after.nativeStateTransitionOverflow
           || after.nativeStateTransitionCount !== before.nativeStateTransitionCount
+          || after.selectionChangeOverflow
+          || after.selectionChangeCount !== before.selectionChangeCount
           || (
             collectedDomEvidence.usesDocumentIdReferences
             && after.documentIdMutationCount !== before.documentIdMutationCount
