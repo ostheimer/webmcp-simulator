@@ -161,6 +161,35 @@ async function startFixture(): Promise<Fixture> {
           style="position:absolute;left:20px;top:30px;width:180px;height:36px">`)
       return
     }
+    if (requestUrl === '/anchor-text-paint') {
+      response.end(`<!doctype html><title>Anchor text paint fixture</title>
+        <style>
+          a { display:block;position:relative;width:220px;height:34px;margin:8px;color:#123; }
+          .clipped-text { position:absolute;left:400px;top:0; }
+          .overflow-shell { display:block;width:1px;height:1px;overflow:hidden; }
+          .overflow-text { position:absolute;left:50px;top:50px; }
+          #offscreen-pseudo::before { content:"Offscreen pseudo identity";position:absolute;left:2000px;top:0; }
+        </style>
+        <a href="/about#painted-text"><span>Painted text destination</span></a>
+        <a href="/about#display-hidden"><span style="display:none">Display hidden destination</span></a>
+        <a href="/about#visibility-hidden"><span style="visibility:hidden">Visibility hidden destination</span></a>
+        <a href="/about#opacity-hidden"><span style="opacity:0">Opacity hidden destination</span></a>
+        <a href="/about#zero-font"><span style="font-size:0">Zero font destination</span></a>
+        <a href="/about#clip-hidden"><span style="clip-path:inset(100%)">Clip hidden destination</span></a>
+        <a href="/about#outside-clip" style="overflow:hidden"><span class="clipped-text">Outside clipped destination</span></a>
+        <a href="/about#overflow-hidden"><span class="overflow-shell"><span class="overflow-text">Overflow hidden destination</span></span></a>
+        <a href="/about#ambiguous-image"><span style="opacity:0">Hidden mixed identity</span><img alt="Visible mixed image" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Crect width='20' height='20' fill='%23088'/%3E%3C/svg%3E"></a>
+        <a href="/about#painted-image"><img alt="Painted image destination" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Crect width='20' height='20' fill='%23088'/%3E%3C/svg%3E"></a>
+        <a id="covered-anchor" href="/about#covered" style="position:absolute;left:300px;top:20px;width:300px;height:60px">Covered destination identity</a>
+        <div style="position:absolute;left:300px;top:20px;width:230px;height:24px;background:#111;z-index:10;pointer-events:none"></div>
+        <a id="offscreen-pseudo" href="/about#offscreen-pseudo" aria-label="Offscreen pseudo destination"></a>`)
+      return
+    }
+    if (requestUrl === '/anchor-text-paint-late') {
+      response.end(`<!doctype html><title>Late anchor text paint fixture</title>
+        <a href="/about#late-painted" style="display:block;width:220px;height:34px;color:#123"><span id="late-painted-anchor-text">Late painted destination</span></a>`)
+      return
+    }
     if (requestUrl === '/fragment-links') {
       response.end(`<!doctype html><title>Fragment links fixture</title>
         <a href="/about#/checkout">Unsafe fragment route</a>
@@ -192,6 +221,29 @@ async function startFixture(): Promise<Fixture> {
         <a href="/about#overview">Neutral overview</a>
         <a href="/destructive-redirect">Neutral redirect label</a>
         <a href="/late-destructive-route">Late destructive route</a>`)
+      return
+    }
+    if (requestUrl === '/navigation-term-source') {
+      response.end(`<!doctype html><title>Navigation term source</title>
+        <a href="/cancel">Cancel path</a>
+        <a href="/about?intent=cancelled">Cancelled query</a>
+        <a href="/about#/cancellation">Cancellation hash</a>
+        <a href="/cancellationPolicy">Cancellation policy</a>
+        <a href="/neutral-policy-redirect">Neutral redirect</a>`)
+      return
+    }
+    if (requestUrl === '/neutral-policy-redirect') {
+      response.statusCode = 302
+      response.setHeader('Location', '/cancelations')
+      response.end()
+      return
+    }
+    if (requestUrl === '/cancellationPolicy') {
+      response.end('<!doctype html><title>Cancellation policy</title><input type="search" aria-label="Policy search">')
+      return
+    }
+    if (requestUrl === '/cancel' || requestUrl === '/cancelations') {
+      response.end('<!doctype html><title>Cancellation destination must not load</title>')
       return
     }
     if (requestUrl === '/destructive-redirect') {
@@ -3043,6 +3095,48 @@ async function startFixture(): Promise<Fixture> {
           <input type="text" id="userCredential" aria-label="Neutral field L">
           <input type="text" id="apiToken" aria-label="Neutral field M">
           <input type="text" name="reference_title" aria-label="Neutral field N" title="Credit card number">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/identity-document-safety') {
+      response.end(`<!doctype html><title>Reference field safety</title>
+        <form id="identity-sensitive-form">
+          <input type="text" aria-label="Safe identity reference one">
+          <input type="text" aria-label="Safe identity reference two">
+          <input type="text" aria-label="Neutral identity field A" title="Passport number">
+          <input type="text" aria-label="Neutral identity field B" aria-description="Government ID">
+          <input type="text" aria-label="Neutral identity field C" placeholder="National ID">
+          <input type="text" aria-label="Neutral identity field D" name="identityCard">
+          <input type="text" aria-label="Neutral identity field E" id="driverLicense">
+          <input type="text" aria-label="Neutral identity field F" title="Tax ID">
+          <input type="text" aria-label="Neutral identity field G" title="Reise&#x200b;pass">
+          <input type="text" aria-label="Neutral identity field H" title="Passnummer">
+          <input type="text" aria-label="Neutral identity field I" title="Personalausweis">
+          <input type="text" aria-label="Neutral identity field J" title="Ausweisnummer">
+          <input type="text" aria-label="Neutral identity field K" title="Führerschein">
+          <input type="text" aria-label="Neutral identity field L" title="Steuer-ID">
+          <input type="text" aria-label="Neutral identity field M" title="Sozialversicherungsnummer">
+          <input type="text" aria-label="Neutral identity field N" title="Personalausweisnummer">
+          <input type="text" aria-label="Neutral identity field O" title="Führerscheinnummer">
+          <input type="text" aria-label="Neutral identity field P" title="Identity document number">
+        </form>
+        `)
+      return
+    }
+    if (requestUrl === '/identity-document-false-positives') {
+      response.end(`<!doctype html><title>Neutral field wording</title>
+        <form id="identity-false-positive-form">
+          <input type="text" aria-label="Passporting workflow" title="Passporting workflow">
+          <input type="text" aria-label="Identity cardigan" title="Identity cardigan">
+          <input type="text" aria-label="Taxidermy reference" title="Taxidermy reference">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/identity-document-late') {
+      response.end(`<!doctype html><title>Late field mutation</title>
+        <form id="identity-late-form">
+          <input id="identity-late-value" type="text" aria-label="Late identity value" title="Project reference">
+          <input id="identity-late-detail" type="text" aria-label="Late identity detail">
         </form>`)
       return
     }
@@ -11107,6 +11201,42 @@ describe('WrapperProofService security boundaries', () => {
     expect(analysis.capabilities.map(({ name }) => name)).toEqual(['prepare_page_search', 'open_page_link'])
   })
 
+  it('requires anchor identity text to have painted range geometry while preserving image links', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/anchor-text-paint`)
+
+    const labels = analysis.domEvidence
+      .filter(({ type }) => type === 'link')
+      .map(({ label }) => label)
+    expect(labels).toEqual(['Painted text destination', 'Painted image destination'])
+    expect(labels).not.toContain('Hidden mixed identity Visible mixed image')
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    expect(navigation.evidenceIds).toHaveLength(2)
+
+    const lateService = createService()
+    services.push(lateService)
+    const lateAnalysis = await lateService.analyze(`${fixture.origin}/anchor-text-paint-late`)
+    const lateNavigation = lateAnalysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    await internalSession(lateService, lateAnalysis.sessionId).page
+      .locator('#late-painted-anchor-text')
+      .evaluate((node) => { ;(node as HTMLElement).style.opacity = '0' })
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      lateNavigation.name,
+      lateNavigation.sampleInput,
+      undefined,
+      lateNavigation.id,
+    )).rejects.toMatchObject({
+      code: 'invalid_action',
+      sessionInvalidated: false,
+    })
+    expect(fixture.requests).not.toContain('/about#late-painted')
+  }, 30_000)
+
   it('bounds DOM traversal, disabled-option inspection, labels, references, and text while keeping the session usable', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -11183,6 +11313,56 @@ describe('WrapperProofService security boundaries', () => {
     expect(safeLink?.label).toBe('History')
     expect(linkAnalysis.domEvidence.filter(({ type, sensitive }) => type === 'link' && sensitive)).toHaveLength(6)
   })
+
+  it('keeps normalized identity-document evidence private and rejects late identity mutations', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/identity-document-safety`)
+
+    const sensitiveLabels = analysis.domEvidence
+      .filter(({ sensitive }) => sensitive)
+      .map(({ label }) => label)
+    expect(sensitiveLabels).toEqual(Array.from(
+      { length: 16 },
+      (_value, index) => `Neutral identity field ${String.fromCharCode(65 + index)}`,
+    ))
+    expect(JSON.stringify(analysis)).not.toMatch(
+      /passport number|government id|national id|identity card|identity document number|driver license|tax id|reisepass|passnummer|personalausweis|ausweisnummer|führerschein|steuer-id|sozialversicherungsnummer/i,
+    )
+
+    const neutralService = createService()
+    services.push(neutralService)
+    const neutralAnalysis = await neutralService.analyze(`${fixture.origin}/identity-document-false-positives`)
+    expect(neutralAnalysis.domEvidence.map(({ label, sensitive }) => ({ label, sensitive }))).toEqual([
+      { label: 'Passporting workflow', sensitive: false },
+      { label: 'Identity cardigan', sensitive: false },
+      { label: 'Taxidermy reference', sensitive: false },
+    ])
+
+    const lateService = createService()
+    services.push(lateService)
+    const lateAnalysis = await lateService.analyze(`${fixture.origin}/identity-document-late`)
+    const lateEvidenceId = lateAnalysis.domEvidence.find(({ label }) => label === 'Late identity value')!.id
+    const lateCapability = lateAnalysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidenceId))!
+    await internalSession(lateService, lateAnalysis.sessionId).page
+      .locator('#identity-late-value')
+      .evaluate((node) => { node.setAttribute('title', 'Passnummer') })
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      lateCapability.name,
+      { field_1: 'must not be written' },
+      undefined,
+      lateCapability.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    await expect(
+      internalSession(lateService, lateAnalysis.sessionId).page
+        .locator('#identity-late-value')
+        .inputValue(),
+    ).resolves.toBe('')
+  }, 30_000)
 
   it('checks bounded accessible labels and descriptions, including SVG text, for sensitive evidence', async () => {
     const fixture = await startFixture()
@@ -11596,6 +11776,78 @@ describe('WrapperProofService security boundaries', () => {
     expect(fixture.requests).toContain('/about-safe')
     expect(fixture.requests).toContain('/next')
   })
+
+  it('blocks cancellation routes across path query hash and redirects without blocking policy pages', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    for (const variant of [
+      'cancel',
+      'canceled',
+      'cancelled',
+      'cancelation',
+      'cancelations',
+      'cancellation',
+      'cancellations',
+    ]) {
+      expect(isConsequentialNavigationUrl(`https://example.test/${variant}`), variant).toBe(true)
+      expect(isConsequentialNavigationUrl(`https://example.test/about?intent=${variant}`), variant).toBe(true)
+      expect(isConsequentialNavigationUrl(`https://example.test/about#/${variant}`), variant).toBe(true)
+    }
+    for (const neutral of ['cancellationPolicy', 'cancellation-policy', 'cancellationPolicies']) {
+      expect(isConsequentialNavigationUrl(`https://example.test/${neutral}`), neutral).toBe(false)
+    }
+
+    const discoveryService = createService()
+    services.push(discoveryService)
+    const discovery = await discoveryService.analyze(`${fixture.origin}/navigation-term-source`)
+    for (const label of ['Cancel path', 'Cancelled query', 'Cancellation hash']) {
+      expect(discovery.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
+    }
+    expect(discovery.domEvidence.find(({ label }) => label === 'Cancellation policy'))
+      .toMatchObject({ sensitive: false })
+
+    const policyEvidence = discovery.domEvidence.find(({ label }) => label === 'Cancellation policy')!
+    const navigation = discovery.capabilities.find(({ evidenceIds }) => evidenceIds.includes(policyEvidence.id))!
+    const policyIndex = navigation.evidenceIds.indexOf(policyEvidence.id)
+    await expect(discoveryService.execute(
+      discovery.sessionId,
+      discovery.sessionToken,
+      navigation.name,
+      { linkIndex: policyIndex },
+      undefined,
+      navigation.id,
+    )).resolves.toMatchObject({
+      finalUrl: `${fixture.origin}/cancellationPolicy`,
+      structuredContent: { targetStateVerified: true },
+    })
+
+    const redirectService = createService()
+    services.push(redirectService)
+    const redirectAnalysis = await redirectService.analyze(`${fixture.origin}/navigation-term-source`)
+    const redirectEvidence = redirectAnalysis.domEvidence.find(({ label }) => label === 'Neutral redirect')!
+    const redirectNavigation = redirectAnalysis.capabilities
+      .find(({ evidenceIds }) => evidenceIds.includes(redirectEvidence.id))!
+    await expect(redirectService.execute(
+      redirectAnalysis.sessionId,
+      redirectAnalysis.sessionToken,
+      redirectNavigation.name,
+      { linkIndex: redirectNavigation.evidenceIds.indexOf(redirectEvidence.id) },
+      undefined,
+      redirectNavigation.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(fixture.requests).toContain('/neutral-policy-redirect')
+    expect(fixture.requests).not.toContain('/cancelations')
+
+    for (const path of ['/cancel', '/about?intent=cancelation', '/about#/canceled']) {
+      const directService = createService()
+      services.push(directService)
+      const before = fixture.requests.length
+      await expect(directService.analyze(`${fixture.origin}${path}`)).rejects.toMatchObject({
+        code: 'unsupported_page',
+      })
+      expect(fixture.requests.slice(before)).toHaveLength(0)
+    }
+  }, 60_000)
 
   it('blocks consequential same-origin static resources during analysis and navigation', async () => {
     const fixture = await startFixture()

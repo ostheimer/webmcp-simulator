@@ -3,6 +3,7 @@ import { isIP } from 'node:net'
 import { SandboxWrapperService } from './sandboxWrapperService.ts'
 import { WrapperServiceError } from './wrapperErrors.ts'
 import {
+  WRAPPER_ACTION_CLEANUP_TIMEOUT_MS,
   WRAPPER_ACTION_TIMEOUT_MS,
   WRAPPER_ANALYSIS_TIMEOUT_MS,
   WRAPPER_CLOSE_CLEANUP_TIMEOUT_MS,
@@ -85,6 +86,8 @@ export interface ProductionRequestOptions {
   analysisTimeoutMs?: number
   /** Test-only override; production uses the fixed absolute action deadline. */
   actionTimeoutMs?: number
+  /** Test-only override for bounded invalidation cleanup before 499/504. */
+  actionCleanupTimeoutMs?: number
   /** Test-only override; production uses the fixed absolute close deadline. */
   closeTimeoutMs?: number
   /** Test-only override for the post-deadline provider-cleanup settlement reserve. */
@@ -295,6 +298,7 @@ function publicError(error: unknown): HttpError {
 async function handle(
   operation: () => Promise<unknown>,
   assertSuccessResponseAllowed?: () => void,
+  settleBeforeErrorResponse?: (error: HttpError) => Promise<void>,
 ): Promise<Response> {
   try {
     const value = await operation()
@@ -310,6 +314,7 @@ async function handle(
     return response
   } catch (error) {
     const safe = publicError(error)
+    await settleBeforeErrorResponse?.(safe)
     return jsonResponse(safe.status, {
       error: safe.message,
       code: safe.code,
@@ -430,6 +435,7 @@ export function handleActionRequest(
   options: ProductionRequestOptions = {},
 ): Promise<Response> {
   const timeoutMs = options.actionTimeoutMs ?? WRAPPER_ACTION_TIMEOUT_MS
+  const cleanupTimeoutMs = options.actionCleanupTimeoutMs ?? WRAPPER_ACTION_CLEANUP_TIMEOUT_MS
   const deadlineAtMs = Date.now() + Math.max(0, timeoutMs)
   let deadlineExpired = false
   let backendStarted = false
@@ -456,11 +462,13 @@ export function handleActionRequest(
     'cancelled',
     { sessionInvalidated: backendStarted },
   )
-  let cleanupStarted = false
-  const cleanupActionSession = (sessionId: string, sessionToken: string) => {
-    if (cleanupStarted) return
-    cleanupStarted = true
-    void backend.closeSession(sessionId, sessionToken).catch(() => undefined)
+  let cleanupPromise: Promise<void> | undefined
+  const cleanupActionSession = (sessionId: string, sessionToken: string): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise
+    cleanupPromise = Promise.resolve()
+      .then(() => backend.closeSession(sessionId, sessionToken))
+      .then(() => undefined, () => undefined)
+    return cleanupPromise
   }
   const cleanupLateAction = (value: unknown) => {
     if (acceptedSession) {
@@ -533,7 +541,17 @@ export function handleActionRequest(
       }
       throw error
     }
-  }, assertActionResponseAllowed).finally(() => {
+  }, assertActionResponseAllowed, async (error) => {
+    if (
+      error.sessionInvalidated === true
+      && (error.status === 499 || error.status === 504)
+    ) {
+      const settlement = cleanupPromise ?? (acceptedSession
+        ? cleanupActionSession(acceptedSession.sessionId, acceptedSession.sessionToken)
+        : undefined)
+      if (settlement) await waitForBoundedSettlement(settlement, cleanupTimeoutMs)
+    }
+  }).finally(() => {
     clearTimeout(deadlineTimer)
     request.signal.removeEventListener('abort', onRequestAbort)
   })

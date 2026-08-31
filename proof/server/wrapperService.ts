@@ -54,6 +54,8 @@ const SUBFRAME_REMOVAL_ATTEMPTS = 6
 const SUBFRAME_REMOVAL_RETRY_DELAY_MS = 15
 const UNSAFE_FIELD_HINT = /(?:^|\s)(?:(?:api|access|private)\s*keys?|cvc|cvv|otp|pin|pass\s*codes?|one\s*time\s*codes?|verification\s+codes?|date\s+of\s+birth|birth\s+date|birth\s*days?|dob|geburts\s*(?:datum|tag))(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|pay|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /(?<![\p{L}\p{N}_])(appointment|appointments|book|booking|bookings|buy|cart|carts|checkout|checkouts|delete|deletion|deletions|logoff|logout|order|orders|ordering|pay|payment|payments|purchase|purchases|purchasing|removal|removals|remove|reservation|reservations|reserve|signout|subscribe|subscriptions|tokens?|unsubscribe|unsubscription|unsubscriptions|termin|termine|abmelden|abmeldung|abmeldungen|austragen|bestellen|bestellung|bestellungen|buchen|buchung|buchungen|entfernen|entfernung|kaufen|käufe|kasse|kündigen|kündigung|kündigungen|löschen|löschung|löschungen|reservieren|reservierung|reservierungen|warenkorb|warenkörbe|zahlung|zahlungen)(?![\p{L}\p{N}_])/iu
+const IDENTITY_DOCUMENT_FIELD_HINT = /(?<![\p{L}\p{N}_])(?:passport(?:\s+number)?|government(?:\s+issued)?\s+(?:id|identification(?:\s+number)?)|national\s+(?:id|identification(?:\s+number)?)|identity\s+(?:card|document(?:\s+number)?)|driver(?:\s+s)?\s+licen[cs]e|driving\s+licen[cs]e|tax(?:\s+payer)?\s+(?:id|identification(?:\s+number)?)|social\s+(?:security|insurance)\s+(?:number|id)|reise\s*pass|pass\s*nummer|personalausweis(?:nummer)?|ausweis\s*nummer|führerschein(?:nummer)?|steuer\s*(?:id|identifikationsnummer)|sozialversicherungs\s*nummer)(?![\p{L}\p{N}_])/iu
+const CANCELLATION_NAVIGATION_HINT = /(?<![\p{L}\p{N}_])cancel(?:ed|led|ations?|lations?)?(?!\s+polic(?:y|ies)(?![\p{L}\p{N}_]))(?![\p{L}\p{N}_])/iu
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
   'additional-name',
   'address-level1',
@@ -654,6 +656,7 @@ export function isConsequentialNavigationUrl(value: string): boolean {
     return evidence.length > MAX_SAFETY_EVIDENCE_LENGTH
       || tokenized === undefined
       || UNSAFE_NAVIGATION_HINT.test(tokenized)
+      || CANCELLATION_NAVIGATION_HINT.test(tokenized)
   } catch {
     return true
   }
@@ -737,6 +740,121 @@ function isElementScreenshotVisible(
   const hasTextPaint = (style: CSSStyleDeclaration): boolean => {
     const textFill = style.getPropertyValue('-webkit-text-fill-color')
     return colorHasPaint(textFill || style.color) || hasPaintedColorToken(style.textShadow)
+  }
+  const anchorTextPaintState = (
+    target: HTMLAnchorElement,
+  ): { present: boolean, painted: boolean, overflow: boolean } => {
+    const createTreeWalker = Object.getOwnPropertyDescriptor(
+      Document.prototype,
+      'createTreeWalker',
+    )?.value
+    const nextNode = Object.getOwnPropertyDescriptor(TreeWalker.prototype, 'nextNode')?.value
+    const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get
+    const nodeValueGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'nodeValue')?.get
+    const hiddenGetter = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'hidden')?.get
+    const createRange = Object.getOwnPropertyDescriptor(Document.prototype, 'createRange')?.value
+    const rangePrototype = globalThis.Range?.prototype
+    const selectNodeContents = rangePrototype
+      ? Object.getOwnPropertyDescriptor(rangePrototype, 'selectNodeContents')?.value
+      : undefined
+    const getRangeClientRects = rangePrototype
+      ? Object.getOwnPropertyDescriptor(rangePrototype, 'getClientRects')?.value
+      : undefined
+    const getBoundingClientRect = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      'getBoundingClientRect',
+    )?.value
+    if (
+      !createTreeWalker
+      || !nextNode
+      || !parentElementGetter
+      || !nodeValueGetter
+      || !hiddenGetter
+      || !createRange
+      || !selectNodeContents
+      || !getRangeClientRects
+      || !getBoundingClientRect
+    ) return { present: true, painted: false, overflow: true }
+
+    const walker = createTreeWalker.call(document, target, NodeFilter.SHOW_TEXT) as TreeWalker
+    let inspected = 0
+    let retainedCharacters = 0
+    let present = false
+    let painted = false
+    while (inspected < 256) {
+      const node = nextNode.call(walker) as Node | null
+      if (!node) return { present, painted, overflow: false }
+      inspected += 1
+      const raw = String(nodeValueGetter.call(node) ?? '')
+      retainedCharacters += raw.length
+      if (retainedCharacters > 4_096) return { present: true, painted: false, overflow: true }
+      if (!/\S/.test(raw)) continue
+      present = true
+      const parent = parentElementGetter.call(node) as HTMLElement | null
+      if (!parent) continue
+      const range = createRange.call(document) as Range
+      selectNodeContents.call(range, node)
+      const rangeRects = getRangeClientRects.call(range) as DOMRectList
+      if (rangeRects.length > 256) return { present: true, painted: false, overflow: true }
+      for (let rectIndex = 0; rectIndex < rangeRects.length; rectIndex += 1) {
+        const rect = rangeRects.item(rectIndex)
+        if (!rect) continue
+        let left = Math.max(0, rect.left)
+        let top = Math.max(0, rect.top)
+        let right = Math.min(viewportWidth, rect.right)
+        let bottom = Math.min(viewportHeight, rect.bottom)
+        if (right <= left || bottom <= top) continue
+        let current: HTMLElement | null = parent
+        let reachedTarget = false
+        let clippedOut = false
+        while (current) {
+          const style = computedStyle(current)
+          const hasFilter = style.filter.trim() !== '' && style.filter !== 'none'
+          const hasMask = [
+            style.getPropertyValue('mask-image'),
+            style.getPropertyValue('-webkit-mask-image'),
+          ].some((value) => value.trim() !== '' && value.trim() !== 'none')
+          if (
+            hiddenGetter.call(current)
+            || style.display === 'none'
+            || style.visibility === 'hidden'
+            || style.visibility === 'collapse'
+            || Number.parseFloat(style.opacity || '1') <= 0
+            || Number.parseFloat(style.fontSize || '0') <= 0
+            || hasFilter
+            || hasMask
+            || style.clip !== 'auto'
+            || style.clipPath !== 'none'
+          ) {
+            clippedOut = true
+            break
+          }
+          const currentRect = getBoundingClientRect.call(current) as DOMRect
+          if (style.overflowX !== 'visible') {
+            left = Math.max(left, currentRect.left)
+            right = Math.min(right, currentRect.right)
+          }
+          if (style.overflowY !== 'visible') {
+            top = Math.max(top, currentRect.top)
+            bottom = Math.min(bottom, currentRect.bottom)
+          }
+          if (right <= left || bottom <= top) {
+            clippedOut = true
+            break
+          }
+          if (current === target) {
+            reachedTarget = true
+            break
+          }
+          current = parentElementGetter.call(current) as HTMLElement | null
+        }
+        if (!clippedOut && reachedTarget && hasTextPaint(computedStyle(parent))) painted = true
+      }
+    }
+    const extra = nextNode.call(walker) as Node | null
+    return extra
+      ? { present: true, painted: false, overflow: true }
+      : { present, painted, overflow: false }
   }
   const hasBoundedRenderedText = (target: HTMLElement): boolean => {
     if (target instanceof HTMLInputElement) {
@@ -918,6 +1036,13 @@ function isElementScreenshotVisible(
     return false
   }
   const hasProvableOwnPaint = (target: HTMLElement, style: CSSStyleDeclaration): boolean => {
+    if (target instanceof HTMLAnchorElement) {
+      const textPaint = anchorTextPaintState(target)
+      if (textPaint.overflow) return false
+      if (textPaint.present) return textPaint.painted
+      if (hasBoundedReplacedPaint(target)) return true
+      return false
+    }
     const appearance = String(
       style.getPropertyValue('appearance') || style.getPropertyValue('-webkit-appearance'),
     ).trim()
@@ -2571,7 +2696,7 @@ function classifyDomInIsolatedWorld({
   captureSourcesOverflow: boolean
   usesDocumentIdReferences: boolean
 } {
-    const unsafePattern = new RegExp(unsafePatternSource, 'i')
+    const unsafePattern = new RegExp(unsafePatternSource, 'iu')
     const unsafeNavigationPattern = new RegExp(unsafeNavigationPatternSource, 'iu')
     const sensitiveAutocomplete = new Set<string>(sensitiveAutocompleteTokens)
     const captureSourceState = {
@@ -3934,9 +4059,9 @@ async function isCdpPaintVisible(
   backendNodeId: number,
   objectGroup: string,
 ): Promise<boolean> {
-  let quads: number[][]
   let viewportPageX = 0
   let viewportPageY = 0
+  const samplePoints: Array<[number, number]> = []
   try {
     const metrics = await cdp.send('Page.getLayoutMetrics') as {
       cssVisualViewport?: { pageX?: number, pageY?: number }
@@ -3944,54 +4069,159 @@ async function isCdpPaintVisible(
     viewportPageX = Number(metrics.cssVisualViewport?.pageX ?? 0)
     viewportPageY = Number(metrics.cssVisualViewport?.pageY ?? 0)
     if (!Number.isFinite(viewportPageX) || !Number.isFinite(viewportPageY)) return false
-    const result = await cdp.send('DOM.getContentQuads', { backendNodeId }) as { quads?: number[][] }
-    quads = result.quads ?? []
+
+    const anchorText = await cdp.send('Runtime.callFunctionOn', {
+      functionDeclaration: `function() {
+        const descriptor = Object.getOwnPropertyDescriptor;
+        const tagNameGetter = descriptor(Element.prototype, 'tagName')?.get;
+        if (!tagNameGetter || tagNameGetter.call(this) !== 'A') {
+          return { isAnchor: false, present: false, overflow: false, points: [] };
+        }
+        const createTreeWalker = descriptor(Document.prototype, 'createTreeWalker')?.value;
+        const nextNode = descriptor(TreeWalker.prototype, 'nextNode')?.value;
+        const nodeValueGetter = descriptor(Node.prototype, 'nodeValue')?.get;
+        const createRange = descriptor(Document.prototype, 'createRange')?.value;
+        const rangePrototype = globalThis.Range?.prototype;
+        const selectNodeContents = rangePrototype
+          ? descriptor(rangePrototype, 'selectNodeContents')?.value
+          : undefined;
+        const getClientRects = rangePrototype
+          ? descriptor(rangePrototype, 'getClientRects')?.value
+          : undefined;
+        if (!createTreeWalker || !nextNode || !nodeValueGetter || !createRange || !selectNodeContents || !getClientRects) {
+          return { isAnchor: true, present: true, overflow: true, points: [] };
+        }
+        const walker = createTreeWalker.call(document, this, NodeFilter.SHOW_TEXT);
+        const points = [];
+        let inspectedNodes = 0;
+        let retainedCharacters = 0;
+        let inspectedRects = 0;
+        let present = false;
+        while (inspectedNodes < 256) {
+          const node = nextNode.call(walker);
+          if (!node) return { isAnchor: true, present, overflow: false, points };
+          inspectedNodes += 1;
+          const raw = String(nodeValueGetter.call(node) ?? '');
+          retainedCharacters += raw.length;
+          if (retainedCharacters > 4096) {
+            return { isAnchor: true, present: true, overflow: true, points: [] };
+          }
+          if (!/\\S/u.test(raw)) continue;
+          present = true;
+          const range = createRange.call(document);
+          selectNodeContents.call(range, node);
+          const rects = getClientRects.call(range);
+          for (let index = 0; index < rects.length; index += 1) {
+            inspectedRects += 1;
+            if (inspectedRects > 256) {
+              return { isAnchor: true, present: true, overflow: true, points: [] };
+            }
+            const rect = rects.item(index);
+            if (!rect) continue;
+            const left = Math.max(0, rect.left);
+            const top = Math.max(0, rect.top);
+            const right = Math.min(globalThis.innerWidth, rect.right);
+            const bottom = Math.min(globalThis.innerHeight, rect.bottom);
+            if (right <= left || bottom <= top) continue;
+            for (const fraction of [0.15, 0.5, 0.85]) {
+              points.push([
+                Math.floor(left + (right - left) * fraction),
+                Math.floor(top + (bottom - top) * 0.5),
+              ]);
+              if (points.length > 192) {
+                return { isAnchor: true, present: true, overflow: true, points: [] };
+              }
+            }
+          }
+        }
+        return nextNode.call(walker)
+          ? { isAnchor: true, present: true, overflow: true, points: [] }
+          : { isAnchor: true, present, overflow: false, points };
+      }`,
+      objectId: targetObjectId,
+      objectGroup,
+      returnByValue: true,
+    }) as {
+      result?: {
+        value?: {
+          isAnchor?: unknown
+          present?: unknown
+          overflow?: unknown
+          points?: unknown
+        }
+      }
+      exceptionDetails?: unknown
+    }
+    if (anchorText.exceptionDetails) return false
+    const anchorValue = anchorText.result?.value
+    if (anchorValue?.isAnchor === true && anchorValue.present === true) {
+      if (anchorValue.overflow === true || !Array.isArray(anchorValue.points)) return false
+      for (const point of anchorValue.points.slice(0, 192)) {
+        if (
+          !Array.isArray(point)
+          || point.length !== 2
+          || !Number.isFinite(point[0])
+          || !Number.isFinite(point[1])
+        ) return false
+        samplePoints.push([
+          Math.max(0, Math.min(CAPTURE_VIEWPORT_WIDTH - 1, Math.floor(Number(point[0])))),
+          Math.max(0, Math.min(CAPTURE_VIEWPORT_HEIGHT - 1, Math.floor(Number(point[1])))),
+        ])
+      }
+      if (samplePoints.length === 0) return false
+    } else {
+      const result = await cdp.send('DOM.getContentQuads', { backendNodeId }) as { quads?: number[][] }
+      for (const quad of (result.quads ?? []).slice(0, 4)) {
+        if (quad.length !== 8) continue
+        const xs = [quad[0], quad[2], quad[4], quad[6]]
+        const ys = [quad[1], quad[3], quad[5], quad[7]]
+        const left = Math.max(0, Math.min(...xs))
+        const top = Math.max(0, Math.min(...ys))
+        const right = Math.min(CAPTURE_VIEWPORT_WIDTH, Math.max(...xs))
+        const bottom = Math.min(CAPTURE_VIEWPORT_HEIGHT, Math.max(...ys))
+        if (right <= left || bottom <= top) continue
+        for (const xFraction of [0.1, 0.5, 0.9]) {
+          for (const yFraction of [0.1, 0.5, 0.9]) {
+            samplePoints.push([
+              Math.max(0, Math.min(CAPTURE_VIEWPORT_WIDTH - 1, Math.floor(left + (right - left) * xFraction))),
+              Math.max(0, Math.min(CAPTURE_VIEWPORT_HEIGHT - 1, Math.floor(top + (bottom - top) * yFraction))),
+            ])
+          }
+        }
+      }
+    }
   } catch {
     return false
   }
-  for (const quad of quads.slice(0, 4)) {
-    if (quad.length !== 8) continue
-    const xs = [quad[0], quad[2], quad[4], quad[6]]
-    const ys = [quad[1], quad[3], quad[5], quad[7]]
-    const left = Math.max(0, Math.min(...xs))
-    const top = Math.max(0, Math.min(...ys))
-    const right = Math.min(CAPTURE_VIEWPORT_WIDTH, Math.max(...xs))
-    const bottom = Math.min(CAPTURE_VIEWPORT_HEIGHT, Math.max(...ys))
-    if (right <= left || bottom <= top) continue
-    for (const xFraction of [0.1, 0.5, 0.9]) {
-      for (const yFraction of [0.1, 0.5, 0.9]) {
-        const x = Math.max(0, Math.min(CAPTURE_VIEWPORT_WIDTH - 1, Math.floor(left + (right - left) * xFraction)))
-        const y = Math.max(0, Math.min(CAPTURE_VIEWPORT_HEIGHT - 1, Math.floor(top + (bottom - top) * yFraction)))
-        let hitBackendNodeId: number | undefined
-        try {
-          const hit = await cdp.send('DOM.getNodeForLocation', {
-            x: x + viewportPageX,
-            y: y + viewportPageY,
-            ignorePointerEventsNone: true,
-          }) as { backendNodeId?: number }
-          hitBackendNodeId = hit.backendNodeId
-        } catch {
-          return false
-        }
-        if (!hitBackendNodeId) continue
-        if (hitBackendNodeId === backendNodeId) return true
-        const resolvedHit = await cdp.send('DOM.resolveNode', {
-          backendNodeId: hitBackendNodeId,
-          executionContextId,
-          objectGroup,
-        }) as { object?: { objectId?: string } }
-        const hitObjectId = resolvedHit.object?.objectId
-        if (!hitObjectId) continue
-        const contained = await cdp.send('Runtime.callFunctionOn', {
-          functionDeclaration: 'function(candidate) { return candidate instanceof Node && (candidate === this || this.contains(candidate)); }',
-          objectId: targetObjectId,
-          arguments: [{ objectId: hitObjectId }],
-          objectGroup,
-          returnByValue: true,
-        }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
-        if (!contained.exceptionDetails && contained.result?.value === true) return true
-      }
+  for (const [x, y] of samplePoints) {
+    let hitBackendNodeId: number | undefined
+    try {
+      const hit = await cdp.send('DOM.getNodeForLocation', {
+        x: x + viewportPageX,
+        y: y + viewportPageY,
+        ignorePointerEventsNone: true,
+      }) as { backendNodeId?: number }
+      hitBackendNodeId = hit.backendNodeId
+    } catch {
+      return false
     }
+    if (!hitBackendNodeId) continue
+    if (hitBackendNodeId === backendNodeId) return true
+    const resolvedHit = await cdp.send('DOM.resolveNode', {
+      backendNodeId: hitBackendNodeId,
+      executionContextId,
+      objectGroup,
+    }) as { object?: { objectId?: string } }
+    const hitObjectId = resolvedHit.object?.objectId
+    if (!hitObjectId) continue
+    const contained = await cdp.send('Runtime.callFunctionOn', {
+      functionDeclaration: 'function(candidate) { return candidate instanceof Node && (candidate === this || this.contains(candidate)); }',
+      objectId: targetObjectId,
+      arguments: [{ objectId: hitObjectId }],
+      objectGroup,
+      returnByValue: true,
+    }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
+    if (!contained.exceptionDetails && contained.result?.value === true) return true
   }
   return false
 }
@@ -4018,8 +4248,8 @@ async function collectDomEvidence(
     executionContextId = await createIsolatedWorld(cdp)
     await createIsolatedModalState(cdp, executionContextId, objectGroup, modalStorageKey)
     const classifierInput = {
-      unsafePatternSource: UNSAFE_FIELD_HINT.source,
-      unsafeNavigationPatternSource: UNSAFE_NAVIGATION_HINT.source,
+      unsafePatternSource: `(?:${UNSAFE_FIELD_HINT.source})|(?:${IDENTITY_DOCUMENT_FIELD_HINT.source})`,
+      unsafeNavigationPatternSource: `(?:${UNSAFE_NAVIGATION_HINT.source})|(?:${CANCELLATION_NAVIGATION_HINT.source})`,
       sensitiveAutocompleteTokens: [...SENSITIVE_AUTOCOMPLETE_TOKENS],
       maxControls: WRAPPER_MAX_DOM_EVIDENCE,
       maxElementsInspected: WRAPPER_MAX_DOM_ELEMENTS_INSPECTED,

@@ -1085,12 +1085,18 @@ describe('production wrapper API boundaries', () => {
 
   it('invalidates and closes a late action result when the handler deadline expires after backend start', async () => {
     let resolveLate!: (value: unknown) => void
+    let releaseCleanup!: () => void
     const execute = vi.fn(async () => new Promise<unknown>((resolve) => {
       resolveLate = resolve
     }))
-    const closeSession = vi.fn(async () => true)
+    const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve })
+    const closeSession = vi.fn(async () => {
+      await cleanupGate
+      return true
+    })
     const target = backend({ execute, closeSession })
-    const response = await handleActionRequest(request('/api/wrapper/action', {
+    let responseSettled = false
+    const responsePromise = handleActionRequest(request('/api/wrapper/action', {
       sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
       sessionToken: 'A'.repeat(43),
       capabilityId: 'capability-late-action',
@@ -1099,7 +1105,17 @@ describe('production wrapper API boundaries', () => {
     }, {
       clientId: 'action_late_result_0001',
       sourceIp: '198.51.100.247',
-    }), target, { actionTimeoutMs: 20 })
+    }), target, { actionTimeoutMs: 20, actionCleanupTimeoutMs: 200 })
+      .then((response) => {
+        responseSettled = true
+        return response
+      })
+
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(responseSettled).toBe(false)
+    releaseCleanup()
+    const response = await responsePromise
 
     expect(response.status).toBe(504)
     expect(await response.json()).toEqual({
@@ -1108,7 +1124,6 @@ describe('production wrapper API boundaries', () => {
       sessionInvalidated: true,
     })
     expect(execute).toHaveBeenCalledOnce()
-    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
     expect(closeSession).toHaveBeenCalledWith(
       'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
       'A'.repeat(43),
@@ -1125,8 +1140,56 @@ describe('production wrapper API boundaries', () => {
     expect(closeSession).toHaveBeenCalledOnce()
   })
 
+  it('waits for exactly-once invalidation cleanup before returning a post-start client abort', async () => {
+    const controller = new AbortController()
+    let releaseCleanup!: () => void
+    const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve })
+    const execute = vi.fn(async () => new Promise<never>(() => undefined))
+    const closeSession = vi.fn(async () => {
+      await cleanupGate
+      return true
+    })
+    const target = backend({ execute, closeSession })
+    let responseSettled = false
+    const responsePromise = handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-aborted-action',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, {
+      clientId: 'action_abort_cleanup_001',
+      sourceIp: '198.51.100.250',
+      signal: controller.signal,
+    }), target, { actionTimeoutMs: 1_000, actionCleanupTimeoutMs: 200 })
+      .then((response) => {
+        responseSettled = true
+        return response
+      })
+
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce())
+    controller.abort()
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(responseSettled).toBe(false)
+    releaseCleanup()
+    const response = await responsePromise
+    expect(response.status).toBe(499)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser operation was cancelled.',
+      code: 'cancelled',
+      sessionInvalidated: true,
+    })
+    expect(closeSession).toHaveBeenCalledOnce()
+  })
+
   it('does not return success when the absolute action deadline expires during response serialization', async () => {
-    const closeSession = vi.fn(async () => true)
+    let releaseCleanup!: () => void
+    const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve })
+    const closeSession = vi.fn(async () => {
+      await cleanupGate
+      return true
+    })
     const target = backend({
       closeSession,
       execute: vi.fn(async () => ({
@@ -1141,7 +1204,8 @@ describe('production wrapper API boundaries', () => {
         },
       })),
     })
-    const response = await handleActionRequest(request('/api/wrapper/action', {
+    let responseSettled = false
+    const responsePromise = handleActionRequest(request('/api/wrapper/action', {
       sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
       sessionToken: 'A'.repeat(43),
       capabilityId: 'capability-response-deadline',
@@ -1150,7 +1214,17 @@ describe('production wrapper API boundaries', () => {
     }, {
       clientId: 'action_response_deadline_1',
       sourceIp: '198.51.100.248',
-    }), target, { actionTimeoutMs: 5 })
+    }), target, { actionTimeoutMs: 5, actionCleanupTimeoutMs: 200 })
+      .then((response) => {
+        responseSettled = true
+        return response
+      })
+
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(responseSettled).toBe(false)
+    releaseCleanup()
+    const response = await responsePromise
 
     expect(response.status).toBe(504)
     expect(await response.json()).toEqual({
@@ -1158,7 +1232,95 @@ describe('production wrapper API boundaries', () => {
       code: 'action_timeout',
       sessionInvalidated: true,
     })
-    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+    expect(closeSession).toHaveBeenCalledOnce()
+  })
+
+  it('bounds action cleanup settlement without changing the timeout contract', async () => {
+    const closeSession = vi.fn(async () => new Promise<boolean>(() => undefined))
+    const target = backend({
+      closeSession,
+      execute: vi.fn(async () => new Promise<never>(() => undefined)),
+    })
+    const startedAt = Date.now()
+    const response = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-bounded-cleanup',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, {
+      clientId: 'action_bounded_cleanup_1',
+      sourceIp: '198.51.100.251',
+    }), target, { actionTimeoutMs: 20, actionCleanupTimeoutMs: 30 })
+
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(40)
+    expect(Date.now() - startedAt).toBeLessThan(500)
+    expect(response.status).toBe(504)
+    expect(await response.json()).toMatchObject({ code: 'action_timeout', sessionInvalidated: true })
+    expect(closeSession).toHaveBeenCalledOnce()
+  })
+
+  it('sanitizes a synchronous cleanup failure while preserving exactly-once invalidation', async () => {
+    const closeSession = vi.fn(() => {
+      throw new Error('provider path and token detail')
+    })
+    const target = backend({
+      closeSession,
+      execute: vi.fn(async () => new Promise<never>(() => undefined)),
+    })
+    const response = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-sync-cleanup-failure',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, {
+      clientId: 'action_sync_cleanup_001',
+      sourceIp: '198.51.100.252',
+    }), target, { actionTimeoutMs: 20, actionCleanupTimeoutMs: 30 })
+
+    expect(response.status).toBe(504)
+    const body = await response.json()
+    expect(body).toEqual({
+      error: 'The isolated browser action exceeded its fixed time limit.',
+      code: 'action_timeout',
+      sessionInvalidated: true,
+    })
+    expect(closeSession).toHaveBeenCalledOnce()
+    expect(JSON.stringify(body)).not.toContain('provider path')
+  })
+
+  it('cleans up and bounded-awaits a backend-originated invalidating action timeout', async () => {
+    const closeSession = vi.fn(async () => true)
+    const target = backend({
+      closeSession,
+      execute: vi.fn(async () => {
+        throw new WrapperServiceError(
+          'action_timeout',
+          'The isolated browser action exceeded its fixed time limit.',
+          504,
+          { sessionInvalidated: true },
+        )
+      }),
+    })
+    const response = await handleActionRequest(request('/api/wrapper/action', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'A'.repeat(43),
+      capabilityId: 'capability-backend-timeout',
+      toolName: 'prepare_page_search',
+      input: { query: 'safe' },
+    }, {
+      clientId: 'action_backend_timeout_001',
+      sourceIp: '198.51.100.253',
+    }), target, { actionTimeoutMs: 1_000, actionCleanupTimeoutMs: 100 })
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser action exceeded its fixed time limit.',
+      code: 'action_timeout',
+      sessionInvalidated: true,
+    })
+    expect(closeSession).toHaveBeenCalledOnce()
   })
 
   it('keeps timeout and cleanup semantics when response serialization throws after the action deadline', async () => {

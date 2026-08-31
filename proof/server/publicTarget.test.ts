@@ -28,6 +28,11 @@ describe('resolvePublicTarget', () => {
     '64:ff9b::a9fe:a9fe',
     '64:ff9b::0808:0808',
     '64:ff9b::5db8:d822',
+    '64:ff9b:1::1',
+    '64:ff9b:1:ffff:ffff:ffff:ffff:ffff',
+    '64:ff9b:1::7f00:1',
+    '64:ff9b:1::a00:1',
+    '64:ff9b:1::c0a8:101',
     '2001:1::1',
     '2001:3::1',
     '2001:4:112::1',
@@ -47,6 +52,10 @@ describe('resolvePublicTarget', () => {
 
   it.each([
     'https://[64:ff9b::5db8:d822]/',
+    'https://[64:ff9b:1::7f00:1]/',
+    'https://[64:ff9b:1::a00:1]/',
+    'https://[64:ff9b:1::c0a8:101]/',
+    'https://[64:ff9b:1:ffff:ffff:ffff:ffff:ffff]/',
     'https://[2001:1::1]/',
     'https://[2001:30::1]/',
   ])('rejects the direct literal %s when the Sandbox firewall denies its range', async (value) => {

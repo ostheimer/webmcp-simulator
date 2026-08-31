@@ -118,9 +118,13 @@ function isNonPublicIpv6(value: string): boolean {
   const address = parseIpv6(value)
   if (address === null) return true
 
-  // The Sandbox firewall denies this entire translator range. Reject it here
-  // as well so every accepted target is reachable under the generated policy.
+  // The Sandbox firewall denies the well-known and local-use translator
+  // ranges. Reject both explicitly here so source validation cannot drift if
+  // the broader global-unicast policy changes later.
   if (isInIpv6Cidr(address, '64:ff9b::', 96)) {
+    return true
+  }
+  if (isInIpv6Cidr(address, '64:ff9b:1::', 48)) {
     return true
   }
 
