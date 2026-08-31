@@ -95,6 +95,7 @@ class FakeSandbox {
   successfulDeletes = 0
   legacyActionScreenshot = false
   afterAnalyzeResult?: () => void
+  beforeCloseResult?: () => void
   commandError?: Error
   totalDurationMs: number | undefined = 1_000
   workerRuntimeMs = 20
@@ -161,6 +162,7 @@ class FakeSandbox {
         ? { error: 'The isolated browser session expired.', code: 'session_expired' }
         : { error: 'Invalid session capability.', code: 'invalid_capability', sessionInvalidated: false }
     if (status === 200 && operation === 'analyze') this.afterAnalyzeResult?.()
+    if (operation === 'close') this.beforeCloseResult?.()
     const output = JSON.stringify({ status, body: JSON.stringify(body) })
     return commandResult(0, operation === 'action' && this.actionOutputGate
       ? async () => { await this.actionOutputGate; return output }
@@ -458,6 +460,46 @@ describe('SandboxWrapperService session boundaries', () => {
     const validAnalysis = await valid.service.analyze('https://public.example.at')
     expect(await valid.service.closeSession(validAnalysis.sessionId, validAnalysis.sessionToken)).toBe(true)
     expect(valid.sandbox.deleted).toBe(1)
+  })
+
+  it('deletes an acquired provider sandbox when the worker already expired during close', async () => {
+    const harness = createHarness()
+    const analysis = await harness.service.analyze('https://public.example.at')
+    harness.sandbox.forceStatus = 410
+
+    await expect(harness.service.closeSession(
+      analysis.sessionId,
+      analysis.sessionToken,
+    )).resolves.toBe(true)
+    expect(harness.sandbox.deleted).toBe(1)
+    expect(harness.sandbox.successfulDeletes).toBe(1)
+    expect(harness.counts()).toEqual({ createCalls: 1, getCalls: 1 })
+
+    const unknownLocator = createSandboxLocator()
+    await expect(harness.service.closeSession(
+      unknownLocator,
+      createSessionCapability(),
+    )).resolves.toBe(false)
+    expect(harness.sandbox.deleted).toBe(1)
+    expect(harness.counts()).toEqual({ createCalls: 1, getCalls: 2 })
+  })
+
+  it('uses one independent provider delete when cancellation races a worker-expired close', async () => {
+    const harness = createHarness()
+    const analysis = await harness.service.analyze('https://public.example.at')
+    const controller = new AbortController()
+    harness.sandbox.forceStatus = 410
+    harness.sandbox.beforeCloseResult = () => controller.abort()
+
+    await expect(harness.service.closeSession(
+      analysis.sessionId,
+      analysis.sessionToken,
+      controller.signal,
+    )).rejects.toMatchObject({ name: 'AbortError' })
+    expect(harness.sandbox.deleted).toBe(1)
+    expect(harness.sandbox.successfulDeletes).toBe(1)
+    expect(harness.sandbox.deleteSignals[0]).not.toBe(controller.signal)
+    expect(harness.sandbox.deleteSignals[0]?.aborted).toBe(false)
   })
 
   it('retries provider deletion before reporting a sandbox session as closed', async () => {

@@ -1768,6 +1768,31 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/birth-date-safety') {
+      response.end(`<!doctype html><title>Profile field safety</title>
+        <form id="sensitive-birth-form">
+          <input id="sensitive-birth-date" type="text" name="reference_one" aria-label="Date of birth" value="opaque-birth-alpha">
+          <input id="sensitive-dob" type="text" name="DOB" aria-label="Project reference" value="opaque-birth-beta">
+          <input id="sensitive-birthday" type="text" name="reference_three" aria-label="Birth&#x200B;day" value="opaque-birth-gamma">
+          <input id="sensitive-geburtsdatum" type="text" name="reference_four" aria-label="Geburtsdatum" value="opaque-birth-delta">
+          <input id="sensitive-geburtstag" type="text" name="reference_five" aria-label="Geburtstag" value="opaque-birth-epsilon">
+          <input id="sensitive-birth-day-name" type="text" name="birthDay" aria-label="Project date" value="opaque-birth-zeta">
+          <input id="sensitive-birth-day-underscore" type="text" name="birth_day" aria-label="Project schedule" value="opaque-birth-eta">
+          <input id="sensitive-geburts-datum-name" type="text" name="geburtsDatum" aria-label="Project profile" value="opaque-birth-theta">
+          <input id="sensitive-geburts-datum-underscore" type="text" name="geburts_datum" aria-label="Project calendar" value="opaque-birth-iota">
+        </form>
+        <form id="neutral-birth-boundary-form">
+          <input id="neutral-adobe" type="text" name="adobe_setting" aria-label="Adobe setting">
+          <input id="neutral-dobson" type="text" name="dobson_note" aria-label="Dobson note">
+          <input id="neutral-birthdayology" type="text" name="birthdayology_topic" aria-label="Birthdayology topic">
+          <input id="neutral-geburtstagsfeier" type="text" name="geburtstagsfeier_note" aria-label="Geburtstagsfeier note">
+        </form>
+        <form id="late-birth-form">
+          <input id="late-birth-one" type="text" name="project_reference" aria-label="Late project reference">
+          <input id="late-birth-two" type="text" name="project_note" aria-label="Late project note">
+        </form>`)
+      return
+    }
     if (requestUrl === '/composed-accessible-safety') {
       response.end(`<!doctype html><title>Composed safety evidence</title>
         <span id="composed-api">API</span><span id="composed-keys">keys</span>
@@ -7627,6 +7652,89 @@ describe('WrapperProofService security boundaries', () => {
     })
     await page.locator('#late-code-label').evaluate((label) => {
       label.firstChild!.textContent = 'Late project code'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('blocks normalized birth-date evidence without matching neutral containing words', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/birth-date-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    for (const label of [
+      'Date of birth',
+      'Project reference',
+      'Birth\u200bday',
+      'Geburtsdatum',
+      'Geburtstag',
+      'Project date',
+      'Project schedule',
+      'Project profile',
+      'Project calendar',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
+    }
+    for (const label of [
+      'Adobe setting',
+      'Dobson note',
+      'Birthdayology topic',
+      'Geburtstagsfeier note',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: false })
+    }
+    expect(JSON.stringify({
+      capabilities: analysis.capabilities,
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+    })).not.toMatch(/opaque-birth-(?:alpha|beta|gamma|delta|epsilon|zeta|eta|theta|iota)/)
+
+    const neutralEvidence = analysis.domEvidence.find(({ label }) => label === 'Adobe setting')!
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidence.id))!
+    const neutralResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )
+    expect(neutralResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = neutralResult.analysis
+
+    const lateEvidence = analysis.domEvidence.find(({ label }) => label === 'Late project reference')!
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidence.id))!
+    await page.locator('#late-birth-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'Date of birth')
+    })
+    await page.locator('#late-birth-two').evaluate((input) => {
+      input.setAttribute('name', 'Geburtsdatum')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-birth-one').inputValue()).toBe('')
+    expect(await page.locator('#late-birth-two').inputValue()).toBe('')
+
+    await page.locator('#late-birth-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'Late project reference')
+    })
+    await page.locator('#late-birth-two').evaluate((input) => {
+      input.setAttribute('name', 'project_note')
     })
     await expect(service.execute(
       analysis.sessionId,

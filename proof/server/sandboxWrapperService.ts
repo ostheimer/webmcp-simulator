@@ -699,19 +699,34 @@ export class SandboxWrapperService {
 
   async closeSession(sessionId: string, sessionToken: string, signal?: AbortSignal): Promise<boolean> {
     let sandbox: SandboxHandle | undefined
+    let workerExpired = false
     try {
       sandbox = await this.getExisting(sessionId, sessionToken, signal)
       await this.callWorker(sandbox, sessionToken, 'close', {}, signal)
     } catch (error) {
       if (error instanceof WrapperServiceError && error.code === 'invalid_capability') return false
-      if (error instanceof WrapperServiceError && error.code === 'session_expired') return false
-      if (sandbox) {
-        // Reconnect/worker-close cancellation can happen after the authorized
-        // worker has begun stopping. Provider cleanup must remain bounded and
-        // independent of the abandoned request signal on this path as well.
-        await deleteClosedSandboxWithin(sandbox, this.closeCleanupTimeoutMs).catch(() => undefined)
+      if (error instanceof WrapperServiceError && error.code === 'session_expired') {
+        if (!sandbox) return false
+        workerExpired = true
+        // The provider resource was reacquired and authorized even though its
+        // inner worker lifetime has elapsed. Continue through the normal
+        // idempotent provider deletion path instead of leaving that resource
+        // allocated for the outer Sandbox lifetime.
+      } else {
+        if (sandbox) {
+          // Reconnect/worker-close cancellation can happen after the authorized
+          // worker has begun stopping. Provider cleanup must remain bounded and
+          // independent of the abandoned request signal on this path as well.
+          await deleteClosedSandboxWithin(sandbox, this.closeCleanupTimeoutMs).catch(() => undefined)
+        }
+        throw error
       }
-      throw error
+    }
+    if (!sandbox) return false
+    if (workerExpired) {
+      await deleteClosedSandboxWithin(sandbox, this.closeCleanupTimeoutMs)
+      if (signal?.aborted) throw sandboxAnalysisAbortError()
+      return true
     }
     try {
       await deleteClosedSandbox(sandbox, signal)
