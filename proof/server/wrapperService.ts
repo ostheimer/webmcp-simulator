@@ -40,6 +40,8 @@ const CAPTURE_VIEWPORT_HEIGHT = 900
 const MAX_SAFETY_EVIDENCE_LENGTH = 4_096
 const MAX_TOTAL_SAFETY_EVIDENCE_LENGTH = 24 * 1_024
 const MAX_ANALYSIS_CAPTURE_ATTEMPTS = 2
+const ISOLATED_WORLD_NAME = 'webmcp-proof-classifier'
+const FOCUS_CHANGE_STATE_KEY = '__webmcp_proof_focus_changes__'
 const MAX_ANALYSIS_SCROLL_NODES = 512
 const MAX_ANALYSIS_WATCH_NODES = 2_048
 const MAX_ACTIVE_TOP_LAYER_ELEMENTS = 32
@@ -3215,11 +3217,45 @@ async function createIsolatedWorld(cdp: CDPSession): Promise<number> {
   if (!frameId) throw new Error('The isolated browser main frame is unavailable.')
   const world = await cdp.send('Page.createIsolatedWorld', {
     frameId,
-    worldName: 'webmcp-proof-classifier',
+    worldName: ISOLATED_WORLD_NAME,
     grantUniveralAccess: false,
   }) as { executionContextId?: number }
   if (!world.executionContextId) throw new Error('The isolated browser world could not be created.')
   return world.executionContextId
+}
+
+async function installEarlyFocusChangeCounter(cdp: CDPSession): Promise<void> {
+  const installed = await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+    worldName: ISOLATED_WORLD_NAME,
+    runImmediately: true,
+    source: `(() => {
+      const key = ${JSON.stringify(FOCUS_CHANGE_STATE_KEY)};
+      if (globalThis[key]?.version === 1) return;
+      const addEventListener = EventTarget.prototype.addEventListener;
+      if (typeof addEventListener !== 'function' || !document) return;
+      const state = { version: 1, count: 0 };
+      const recordFocusChange = () => {
+        state.count = Math.min(Number.MAX_SAFE_INTEGER, state.count + 1);
+      };
+      Object.defineProperty(globalThis, key, {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: state,
+      });
+      // Install on Window before page-authored listeners. The document listener
+      // is redundant by design: either path records the monotone transition,
+      // while a later stopPropagation or stopImmediatePropagation cannot erase
+      // the already-recorded Window capture event.
+      addEventListener.call(globalThis, 'focusin', recordFocusChange, true);
+      addEventListener.call(globalThis, 'focusout', recordFocusChange, true);
+      addEventListener.call(document, 'focusin', recordFocusChange, true);
+      addEventListener.call(document, 'focusout', recordFocusChange, true);
+    })()`,
+  }) as { identifier?: string }
+  if (!installed.identifier) {
+    throw new Error('The isolated focus-change guard could not be installed.')
+  }
 }
 
 async function createIsolatedModalState(
@@ -3480,6 +3516,7 @@ async function collectDomEvidence(
 
 interface AnalysisCaptureGuardSnapshot {
   documentIdMutationCount: number
+  focusChangeCount: number
   mutationCount: number
   navigationCount: number
   scrollChanged: boolean
@@ -3501,6 +3538,7 @@ function actionCaptureStayedStable(
   return !after.overflow
     && !after.topLayerOverflow
     && after.documentIdMutationCount === before.documentIdMutationCount
+    && after.focusChangeCount === before.focusChangeCount
     && after.mutationCount === before.mutationCount
     && after.navigationCount === before.navigationCount
     && !after.scrollChanged
@@ -3517,6 +3555,7 @@ function actionCaptureStartedClean(snapshot: AnalysisCaptureGuardSnapshot): bool
   return !snapshot.overflow
     && !snapshot.topLayerOverflow
     && snapshot.documentIdMutationCount === 0
+    && snapshot.focusChangeCount === 0
     && snapshot.mutationCount === 0
     && snapshot.navigationCount === 0
     && !snapshot.scrollChanged
@@ -3572,6 +3611,7 @@ async function createAnalysisCaptureGuard(
     expression: `(() => {
       const state = {
         documentIdMutationCount: 0,
+        focusStartCount: 0,
         mutationCount: 0,
         observer: null,
         watched: [],
@@ -3588,7 +3628,17 @@ async function createAnalysisCaptureGuard(
       };
       const Observer = globalThis.MutationObserver;
       const addEventListener = EventTarget.prototype.addEventListener;
-      if (typeof Observer !== 'function' || typeof addEventListener !== 'function' || !document.documentElement) return false;
+      const focusState = globalThis[${JSON.stringify(FOCUS_CHANGE_STATE_KEY)}];
+      if (
+        typeof Observer !== 'function'
+        || typeof addEventListener !== 'function'
+        || !document.documentElement
+        || focusState?.version !== 1
+        || !Number.isSafeInteger(focusState.count)
+        || focusState.count < 0
+        || focusState.count >= Number.MAX_SAFE_INTEGER
+      ) return false;
+      state.focusStartCount = focusState.count;
       const recordScroll = (event) => {
         const target = event?.target;
         if (state.scrollArmed) {
@@ -3660,6 +3710,7 @@ async function createAnalysisCaptureGuard(
       const captured = await cdp.send('Runtime.evaluate', {
         expression: `new Promise((resolve) => queueMicrotask(() => {
           const state = globalThis[${JSON.stringify(storageKey)}];
+          const focusState = globalThis[${JSON.stringify(FOCUS_CHANGE_STATE_KEY)}];
           const rawUrl = String(location.href ?? '');
           const rawTitle = String(document.title ?? '');
           const scrollLeftGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')?.get;
@@ -3679,15 +3730,23 @@ async function createAnalysisCaptureGuard(
                 return true;
               }
             });
+          const focusStateMismatch = focusState?.version !== 1
+            || !Number.isSafeInteger(focusState.count)
+            || !Number.isSafeInteger(state?.focusStartCount)
+            || focusState.count < state.focusStartCount
+            || focusState.count >= Number.MAX_SAFE_INTEGER;
           resolve({
             documentIdMutationCount: Number(state?.documentIdMutationCount ?? -1),
+            focusChangeCount: focusStateMismatch
+              ? -1
+              : Number(focusState.count - state.focusStartCount),
             mutationCount: Number(state?.mutationCount ?? -1),
             scrollChanged: Boolean(state?.scrollChanged),
             scrollOverflow: Boolean(state?.scrollOverflow),
             scrollStateMismatch,
             url: rawUrl.slice(0, 4097),
             title: rawTitle.slice(0, 4097),
-            overflow: rawUrl.length > 4096 || rawTitle.length > 4096,
+            overflow: rawUrl.length > 4096 || rawTitle.length > 4096 || focusStateMismatch,
           });
         }))`,
         contextId: executionContextId,
@@ -5656,6 +5715,7 @@ export class WrapperProofService {
         if (
           before.overflow
           || before.topLayerOverflow
+          || before.focusChangeCount !== 0
           || before.scrollChanged
           || before.scrollOverflow
           || before.scrollStateMismatch
@@ -5701,6 +5761,7 @@ export class WrapperProofService {
           || after.topLayerOverflow
           || after.topLayerChangeCount !== before.topLayerChangeCount
           || after.topLayerSignature !== before.topLayerSignature
+          || after.focusChangeCount !== before.focusChangeCount
           || after.mutationCount !== 0
           || (
             collectedDomEvidence.usesDocumentIdReferences
@@ -5957,6 +6018,7 @@ export class WrapperProofService {
       await raceWithSignal(cdp.send('Page.enable'), signal)
       await raceWithSignal(cdp.send('DOM.enable'), signal)
       await raceWithSignal(cdp.send('Network.enable'), signal)
+      await raceWithSignal(installEarlyFocusChangeCounter(cdp), signal)
       const frameTree = await raceWithSignal(cdp.send('Page.getFrameTree'), signal) as {
         frameTree?: { frame?: { id?: string } }
       }

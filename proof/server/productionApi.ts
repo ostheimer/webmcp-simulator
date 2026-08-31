@@ -5,6 +5,7 @@ import { WrapperServiceError } from './wrapperErrors.ts'
 import {
   WRAPPER_ACTION_TIMEOUT_MS,
   WRAPPER_ANALYSIS_TIMEOUT_MS,
+  WRAPPER_CLOSE_CLEANUP_TIMEOUT_MS,
   WRAPPER_CLOSE_TIMEOUT_MS,
   WRAPPER_MAX_REQUEST_BODY_BYTES,
   WRAPPER_MAX_RATE_IDENTITIES_PER_FUNCTION,
@@ -86,6 +87,8 @@ export interface ProductionRequestOptions {
   actionTimeoutMs?: number
   /** Test-only override; production uses the fixed absolute close deadline. */
   closeTimeoutMs?: number
+  /** Test-only override for the post-deadline provider-cleanup settlement reserve. */
+  closeCleanupTimeoutMs?: number
 }
 
 class HttpError extends Error {
@@ -199,6 +202,20 @@ async function raceRequestOperation<T>(promise: Promise<T>, signal: AbortSignal)
       },
     )
   })
+}
+
+async function waitForBoundedSettlement(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const settled = promise.then(() => undefined, () => undefined)
+  const timedOut = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, Math.max(0, timeoutMs))
+    timer.unref?.()
+  })
+  try {
+    await Promise.race([settled, timedOut])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
 }
 
 async function readJson(request: Request, signal: AbortSignal = request.signal): Promise<Record<string, unknown>> {
@@ -517,6 +534,7 @@ export function handleCloseRequest(
   options: ProductionRequestOptions = {},
 ): Promise<Response> {
   const timeoutMs = options.closeTimeoutMs ?? WRAPPER_CLOSE_TIMEOUT_MS
+  const cleanupTimeoutMs = options.closeCleanupTimeoutMs ?? WRAPPER_CLOSE_CLEANUP_TIMEOUT_MS
   const deadlineAtMs = Date.now() + Math.max(0, timeoutMs)
   let deadlineExpired = false
   const operationController = new AbortController()
@@ -545,6 +563,7 @@ export function handleCloseRequest(
     if (deadlineReached()) throw closeTimeoutError()
     throw closeCancelledError()
   }
+  let closePromise: Promise<boolean> | undefined
   return handle(async () => {
     try {
       assertRequestMethod(request, 'DELETE')
@@ -558,7 +577,7 @@ export function handleCloseRequest(
         throw new HttpError('sessionId and sessionToken are required.', 400, 'invalid_session')
       }
       if (deadlineReached()) throw closeTimeoutError()
-      const closePromise = backend.closeSession(
+      closePromise = backend.closeSession(
         body.sessionId,
         body.sessionToken,
         operationController.signal,
@@ -569,6 +588,12 @@ export function handleCloseRequest(
       // Do not expose whether a random valid-shaped locator/token pair existed.
       return { closed: true }
     } catch (error) {
+      if (operationController.signal.aborted && closePromise) {
+        // Keep the Function alive for the bounded, request-independent provider
+        // deletion retry. Returning immediately lets Vercel freeze the promise
+        // before the already-closed worker sandbox releases its capacity.
+        await waitForBoundedSettlement(closePromise, cleanupTimeoutMs)
+      }
       if (deadlineReached()) throw closeTimeoutError()
       if (request.signal.aborted) throw closeCancelledError()
       throw error

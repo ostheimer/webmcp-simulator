@@ -14,6 +14,7 @@ import {
   estimateWrapperCost,
   WRAPPER_ACTION_TIMEOUT_MS,
   WRAPPER_ANALYSIS_TIMEOUT_MS,
+  WRAPPER_CLOSE_PROVIDER_CLEANUP_TIMEOUT_MS,
   WRAPPER_MEMORY_MB,
   WRAPPER_SESSION_TTL_MS,
   WRAPPER_VCPUS,
@@ -99,6 +100,8 @@ export interface SandboxWrapperServiceOptions {
   analysisTimeoutMs?: number
   /** Test-only override; production uses the absolute configured action deadline. */
   actionTimeoutMs?: number
+  /** Test-only override for request-independent provider cleanup after close cancellation. */
+  closeCleanupTimeoutMs?: number
   /** Test-only boundary hook for the post-decoration/pre-return deadline race. */
   beforeActionReturn?: () => void | Promise<void>
 }
@@ -281,6 +284,23 @@ async function deleteClosedSandbox(
   )
 }
 
+async function deleteClosedSandboxWithin(
+  sandbox: SandboxHandle,
+  timeoutMs: number,
+): Promise<void> {
+  const cleanupController = new AbortController()
+  const cleanupTimer = setTimeout(
+    () => cleanupController.abort(),
+    Math.max(0, timeoutMs),
+  )
+  cleanupTimer.unref?.()
+  try {
+    await deleteClosedSandbox(sandbox, cleanupController.signal)
+  } finally {
+    clearTimeout(cleanupTimer)
+  }
+}
+
 function decorateAnalysis(
   analysis: WrapperAnalysis,
   sandbox: SandboxHandle,
@@ -329,6 +349,7 @@ export class SandboxWrapperService {
   private readonly now: () => number
   private readonly analysisTimeoutMs: number
   private readonly actionTimeoutMs: number
+  private readonly closeCleanupTimeoutMs: number
   private readonly beforeActionReturn?: () => void | Promise<void>
 
   constructor(options: SandboxWrapperServiceOptions = {}) {
@@ -344,6 +365,7 @@ export class SandboxWrapperService {
     this.now = options.now ?? Date.now
     this.analysisTimeoutMs = options.analysisTimeoutMs ?? WRAPPER_ANALYSIS_TIMEOUT_MS
     this.actionTimeoutMs = options.actionTimeoutMs ?? WRAPPER_ACTION_TIMEOUT_MS
+    this.closeCleanupTimeoutMs = options.closeCleanupTimeoutMs ?? WRAPPER_CLOSE_PROVIDER_CLEANUP_TIMEOUT_MS
     this.beforeActionReturn = options.beforeActionReturn
   }
 
@@ -683,10 +705,26 @@ export class SandboxWrapperService {
     } catch (error) {
       if (error instanceof WrapperServiceError && error.code === 'invalid_capability') return false
       if (error instanceof WrapperServiceError && error.code === 'session_expired') return false
-      if (sandbox) await deleteClosedSandbox(sandbox).catch(() => undefined)
+      if (sandbox) {
+        // Reconnect/worker-close cancellation can happen after the authorized
+        // worker has begun stopping. Provider cleanup must remain bounded and
+        // independent of the abandoned request signal on this path as well.
+        await deleteClosedSandboxWithin(sandbox, this.closeCleanupTimeoutMs).catch(() => undefined)
+      }
       throw error
     }
-    await deleteClosedSandbox(sandbox, signal)
-    return true
+    try {
+      await deleteClosedSandbox(sandbox, signal)
+      return true
+    } catch (error) {
+      if (!signal?.aborted) throw error
+      // The authorized worker is already closed. Provider deletion must no
+      // longer depend on the abandoned HTTP request signal, otherwise the
+      // sandbox can occupy capacity until its outer TTL. Vercel deletion is
+      // idempotent, so a bounded independent retry is safe even if the first
+      // signal-bound call completes late.
+      await deleteClosedSandboxWithin(sandbox, this.closeCleanupTimeoutMs).catch(() => undefined)
+      throw error
+    }
   }
 }

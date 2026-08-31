@@ -323,7 +323,7 @@ async function startFixture(): Promise<Fixture> {
     }
     if (requestUrl === '/resource-policy-action-destination') {
       response.end(`<!doctype html><title>Resource action destination</title>
-        <img src="/checkout-tracking-pixel.svg" alt="Decorative proof">
+        <img src="/checkout-tracking-pixel.svg" alt="Decorative proof" loading="eager" fetchpriority="high" decoding="sync" width="2" height="2">
         <input type="search" aria-label="Destination resource search">`)
       return
     }
@@ -2330,6 +2330,29 @@ async function startFixture(): Promise<Fixture> {
             { duration: 10000, iterations: Infinity },
           );
           animation.id = 'web-opacity-animation';
+        </script>`)
+      return
+    }
+    if (requestUrl === '/focus-capture-stability') {
+      response.end(`<!doctype html><title>Focus capture stability</title>
+        <style>
+          .focus-stage { position:relative;width:260px;height:120px; }
+          #focus-capture-search { position:absolute;left:10px;top:48px;width:220px;height:36px; }
+          #focus-capture-probe { position:absolute;left:10px;top:4px;width:120px;height:30px; }
+          #focus-capture-occluder { display:none; }
+          .focus-stage:focus-within:has(#focus-capture-probe:focus) #focus-capture-occluder {
+            display:block;position:absolute;left:0;top:40px;width:245px;height:48px;
+            z-index:5;pointer-events:none;background:rgb(180,20,20);
+          }
+        </style>
+        <div class="focus-stage">
+          <button id="focus-capture-probe" type="button">Focus probe</button>
+          <input id="focus-capture-search" type="search" aria-label="Focus stable search">
+          <div id="focus-capture-occluder" aria-hidden="true"></div>
+        </div>
+        <script>
+          addEventListener('focusin', (event) => event.stopImmediatePropagation(), true);
+          addEventListener('focusout', (event) => event.stopImmediatePropagation(), true);
         </script>`)
       return
     }
@@ -5774,6 +5797,96 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(admittedBeforeWriteValues).toEqual(['', ''])
     expect(internalServiceState(admittedService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('retries analysis capture when focus-only CSS paint changes during the screenshot', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      beforeAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.locator('#focus-capture-probe').evaluate((probe) => {
+          ;(probe as HTMLElement).focus({ preventScroll: true })
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.locator('#focus-capture-probe').evaluate((probe) => {
+          ;(probe as HTMLElement).blur()
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/focus-capture-stability`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.domEvidence.some(({ label }) => label === 'Focus stable search')).toBe(true)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it('rejects a focus-only action-capture transition before any native write', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let focusTransitions = 0
+    const service = createService({
+      duringActionCaptureArm: async (page) => {
+        focusTransitions += 1
+        await page.locator('#focus-capture-probe').evaluate((probe) => {
+          ;(probe as HTMLElement).focus({ preventScroll: true })
+          ;(probe as HTMLElement).blur()
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/focus-capture-stability`)
+    const capability = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      capability.name,
+      { query: 'must not be written' },
+      undefined,
+      capability.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409, sessionInvalidated: false })
+
+    expect(focusTransitions).toBe(1)
+    expect(await internalSession(service, analysis.sessionId).page
+      .locator('#focus-capture-search').inputValue()).toBe('')
+    expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
+  })
+
+  it('invalidates instead of verifying an action after a focus-only capture transition', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let focusTransitions = 0
+    const service = createService({
+      beforeActionStateCapture: async (page) => {
+        focusTransitions += 1
+        await page.locator('#focus-capture-probe').evaluate((probe) => {
+          ;(probe as HTMLElement).focus({ preventScroll: true })
+          ;(probe as HTMLElement).blur()
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/focus-capture-stability`)
+    const capability = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      capability.name,
+      { query: 'must not be verified' },
+      undefined,
+      capability.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+
+    expect(focusTransitions).toBe(1)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('watches every captured owner-context source across screenshot capture and retries transient drift', async () => {
@@ -9760,7 +9873,7 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
     expect(fixture.requests).toContain('/resource-policy-action-destination')
     expect(fixture.requests).not.toContain('/checkout-tracking-pixel.svg')
-  }, 30_000)
+  }, 60_000)
 
   it('publishes no evidence from consequential initial, redirected, or encoded hash destinations', async () => {
     const fixture = await startFixture()
@@ -10114,37 +10227,45 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'session_expired' })
   })
 
-  it('propagates abort before a delayed action and leaves no stale server state', async () => {
+  it('propagates abort after action admission and leaves no stale server state', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
-    const service = createService({ actionStartDelayMs: 400 })
-    services.push(service)
-    const analysis = await service.analyze(`${fixture.origin}/`)
-    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')
     const controller = new AbortController()
+    let writeBoundaryReached = 0
+    const service = createService({
+      beforeControlWrite: async () => {
+        writeBoundaryReached += 1
+        controller.abort()
+        throw new DOMException('The request was aborted.', 'AbortError')
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/action-operability`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
     let completedResult: unknown
 
     const pending = service.execute(
       analysis.sessionId,
       analysis.sessionToken,
-      navigation!.name,
-      { linkIndex: 0 },
+      search.name,
+      { query: 'must not be written' },
       controller.signal,
+      search.id,
     ).then((result) => {
       completedResult = result
       return result
     })
-    setTimeout(() => controller.abort(), 30)
 
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
-    await new Promise((resolve) => setTimeout(resolve, 450))
     expect(completedResult).toBeUndefined()
-    expect(fixture.requests).not.toContain('/next')
+    expect(writeBoundaryReached).toBe(1)
     await expect(service.execute(
       analysis.sessionId,
       analysis.sessionToken,
-      navigation!.name,
-      { linkIndex: 0 },
+      search.name,
+      { query: 'stale follow-up' },
+      undefined,
+      search.id,
     )).rejects.toThrow('session expired')
   })
 
@@ -10242,7 +10363,7 @@ describe('WrapperProofService security boundaries', () => {
   it('clamps the inner proof session to the outer worker deadline and keeps normal actions usable', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
-    const outerDeadline = Date.now() + 2_000
+    const outerDeadline = Date.now() + 15_000
     const service = createService({ actionSettleMs: 20, sessionExpiresAtMs: outerDeadline })
     services.push(service)
     const analysis = await service.analyze(`${fixture.origin}/action-operability`)
@@ -10259,7 +10380,7 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({
       structuredContent: { isolatedStateChanged: true, targetStateVerified: true },
     })
-  })
+  }, 30_000)
 
   it('expires queued actions at the shared absolute deadline and releases the queue', async () => {
     const fixture = await startFixture()

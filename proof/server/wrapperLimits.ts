@@ -25,6 +25,12 @@ export const WRAPPER_ACTION_TIMEOUT_MS = 15_000
 // Leave platform time for a sanitized response and cleanup inside the 15 s
 // session Function limit.
 export const WRAPPER_CLOSE_TIMEOUT_MS = 10_000
+// A request-independent provider-delete retry starts only after the close
+// request has already expired. Its internal deadline is deliberately shorter
+// than the handler settlement reserve so the Function cannot return while the
+// bounded service cleanup promise is still pending.
+export const WRAPPER_CLOSE_PROVIDER_CLEANUP_TIMEOUT_MS = 3_500
+export const WRAPPER_CLOSE_CLEANUP_TIMEOUT_MS = 4_000
 
 const ACTIVE_CPU_USD_PER_VCPU_HOUR = 0.128
 const MEMORY_USD_PER_GB_HOUR = 0.0212

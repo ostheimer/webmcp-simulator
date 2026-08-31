@@ -81,11 +81,18 @@ class FakeSandbox {
   forceStatus?: number
   forceError?: { status: number, code: string, error: string, sessionInvalidated?: boolean }
   delayAction = false
+  blockCloseCommandUntilAbort = false
+  closeCommandStarted?: () => void
   getGate?: Promise<void>
   actionCommandGate?: Promise<void>
   actionOutputGate?: Promise<void>
   deleteGate?: Promise<void>
   deleteErrors: Error[] = []
+  blockedDeleteSignal?: AbortSignal
+  blockFirstSignaledDelete = false
+  deleteSignals: Array<AbortSignal | undefined> = []
+  deleteStarted?: () => void
+  successfulDeletes = 0
   legacyActionScreenshot = false
   afterAnalyzeResult?: () => void
   commandError?: Error
@@ -113,6 +120,14 @@ class FakeSandbox {
     if (this.commandError) throw this.commandError
     const operation = params.env?.WEBMCP_WORKER_OPERATION
     const token = params.env?.WEBMCP_SESSION_CAPABILITY
+    if (operation === 'close' && this.blockCloseCommandUntilAbort) {
+      this.closeCommandStarted?.()
+      await new Promise<void>((_resolve, reject) => {
+        const rejectAbort = () => reject(new DOMException('Aborted', 'AbortError'))
+        if (params.signal?.aborted) rejectAbort()
+        else params.signal?.addEventListener('abort', rejectAbort, { once: true })
+      })
+    }
     if (operation === 'action' && this.actionCommandGate) await this.actionCommandGate
     if (operation === 'action' && this.delayAction) {
       await new Promise<void>((resolve, reject) => {
@@ -152,11 +167,25 @@ class FakeSandbox {
       : output)
   }
 
-  async delete() {
+  async delete(options?: { signal?: AbortSignal }) {
     this.deleted += 1
+    const signal = options?.signal
+    this.deleteSignals.push(signal)
+    this.deleteStarted?.()
+    if (
+      (this.blockedDeleteSignal && signal === this.blockedDeleteSignal)
+      || (this.blockFirstSignaledDelete && this.deleteSignals.length === 1 && signal)
+    ) {
+      await new Promise<void>((_resolve, reject) => {
+        const rejectAbort = () => reject(new DOMException('Aborted', 'AbortError'))
+        if (signal?.aborted) rejectAbort()
+        else signal?.addEventListener('abort', rejectAbort, { once: true })
+      })
+    }
     if (this.deleteGate) await this.deleteGate
     const error = this.deleteErrors.shift()
     if (error) throw error
+    this.successfulDeletes += 1
   }
 }
 
@@ -207,6 +236,7 @@ function createHarness(
   serviceOptions: {
     actionTimeoutMs?: number
     beforeActionReturn?: () => void | Promise<void>
+    closeCleanupTimeoutMs?: number
     now?: () => number
   } = {},
 ) {
@@ -464,6 +494,98 @@ describe('SandboxWrapperService session boundaries', () => {
     expect(failed.sandbox.deleted).toBe(2)
   })
 
+  it('finishes provider deletion independently after an authorized close is cancelled', async () => {
+    const harness = createHarness({ snapshotId: 'snap_reviewed' }, { closeCleanupTimeoutMs: 100 })
+    const analysis = await harness.service.analyze('https://public.example.at')
+    const controller = new AbortController()
+    const deleteStarted = deferred<void>()
+    harness.sandbox.blockedDeleteSignal = controller.signal
+    harness.sandbox.deleteStarted = () => deleteStarted.resolve()
+
+    const closing = harness.service.closeSession(
+      analysis.sessionId,
+      analysis.sessionToken,
+      controller.signal,
+    )
+    await deleteStarted.promise
+    controller.abort()
+
+    await expect(closing).rejects.toMatchObject({ name: 'AbortError' })
+    expect(harness.sandbox.deleted).toBe(2)
+    expect(harness.sandbox.successfulDeletes).toBe(1)
+    expect(harness.sandbox.deleteSignals[0]).toBe(controller.signal)
+    expect(harness.sandbox.deleteSignals[1]).not.toBe(controller.signal)
+    expect(harness.sandbox.deleteSignals[1]?.aborted).toBe(false)
+  })
+
+  it('bounds provider deletion when cancellation races the authorized worker close', async () => {
+    const harness = createHarness({ snapshotId: 'snap_reviewed' }, { closeCleanupTimeoutMs: 100 })
+    const analysis = await harness.service.analyze('https://public.example.at')
+    const controller = new AbortController()
+    const closeCommandStarted = deferred<void>()
+    harness.sandbox.blockCloseCommandUntilAbort = true
+    harness.sandbox.closeCommandStarted = () => closeCommandStarted.resolve()
+
+    const closing = harness.service.closeSession(
+      analysis.sessionId,
+      analysis.sessionToken,
+      controller.signal,
+    )
+    await closeCommandStarted.promise
+    controller.abort()
+
+    await expect(closing).rejects.toMatchObject({ name: 'AbortError' })
+    expect(harness.sandbox.deleted).toBe(1)
+    expect(harness.sandbox.successfulDeletes).toBe(1)
+    expect(harness.sandbox.deleteSignals[0]).not.toBe(controller.signal)
+    expect(harness.sandbox.deleteSignals[0]?.aborted).toBe(false)
+  })
+
+  it('keeps the close timeout response while independent provider deletion completes', async () => {
+    const harness = createHarness({ snapshotId: 'snap_reviewed' }, { closeCleanupTimeoutMs: 100 })
+    const analysis = await harness.service.analyze('https://public.example.at')
+    harness.sandbox.blockFirstSignaledDelete = true
+
+    const response = await handleCloseRequest(
+      closeApiRequest(analysis.sessionId, analysis.sessionToken, '198.51.100.233'),
+      harness.service,
+      { closeTimeoutMs: 20 },
+    )
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser close operation exceeded its fixed time limit.',
+      code: 'close_timeout',
+    })
+    expect(harness.sandbox.successfulDeletes).toBe(1)
+    expect(harness.sandbox.deleted).toBe(2)
+    expect(harness.sandbox.deleteSignals[0]?.aborted).toBe(true)
+    expect(harness.sandbox.deleteSignals[1]?.aborted).toBe(false)
+  })
+
+  it('bounds request-independent provider cleanup when deletion keeps stalling', async () => {
+    const harness = createHarness({ snapshotId: 'snap_reviewed' }, { closeCleanupTimeoutMs: 20 })
+    const analysis = await harness.service.analyze('https://public.example.at')
+    const controller = new AbortController()
+    const deleteStarted = deferred<void>()
+    harness.sandbox.blockedDeleteSignal = controller.signal
+    harness.sandbox.deleteStarted = () => deleteStarted.resolve()
+    harness.sandbox.deleteGate = new Promise(() => undefined)
+
+    const closing = harness.service.closeSession(
+      analysis.sessionId,
+      analysis.sessionToken,
+      controller.signal,
+    )
+    await deleteStarted.promise
+    controller.abort()
+
+    await expect(closing).rejects.toMatchObject({ name: 'AbortError' })
+    expect(harness.sandbox.deleted).toBe(2)
+    expect(harness.sandbox.successfulDeletes).toBe(0)
+    expect(harness.sandbox.deleteSignals[1]?.aborted).toBe(true)
+  })
+
   it('retries failed action cleanup without treating an unconfirmed deletion as complete', async () => {
     const transient = createHarness()
     const transientAnalysis = await transient.service.analyze('https://public.example.at')
@@ -504,14 +626,17 @@ describe('SandboxWrapperService session boundaries', () => {
   })
 
   it('does not return closed true when provider deletion stalls past the close deadline', async () => {
-    const harness = createHarness()
+    const harness = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      { closeCleanupTimeoutMs: 20 },
+    )
     const analysis = await harness.service.analyze('https://public.example.at')
     harness.sandbox.deleteGate = new Promise(() => undefined)
 
     const response = await handleCloseRequest(
       closeApiRequest(analysis.sessionId, analysis.sessionToken, '198.51.100.232'),
       harness.service,
-      { closeTimeoutMs: 20 },
+      { closeTimeoutMs: 20, closeCleanupTimeoutMs: 50 },
     )
 
     expect(response.status).toBe(504)
@@ -519,7 +644,8 @@ describe('SandboxWrapperService session boundaries', () => {
       error: 'The isolated browser close operation exceeded its fixed time limit.',
       code: 'close_timeout',
     })
-    expect(harness.sandbox.deleted).toBe(1)
+    await vi.waitFor(() => expect(harness.sandbox.deleted).toBe(2))
+    expect(harness.sandbox.deleteSignals[1]?.aborted).toBe(true)
   })
 
   it.each([

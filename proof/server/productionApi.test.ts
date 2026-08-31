@@ -870,7 +870,7 @@ describe('production wrapper API boundaries', () => {
       clientId: 'close_late_result_00001',
       sourceIp: '198.51.100.252',
       method: 'DELETE',
-    }), target, { closeTimeoutMs: 20 })
+    }), target, { closeTimeoutMs: 20, closeCleanupTimeoutMs: 20 })
 
     expect(response.status).toBe(504)
     expect(await response.json()).toEqual({
@@ -885,6 +885,42 @@ describe('production wrapper API boundaries', () => {
     )
     resolveClose(true)
     await new Promise((resolve) => setTimeout(resolve, 0))
+  })
+
+  it('keeps the handler alive until bounded backend cleanup settles after the close deadline', async () => {
+    let cleanupStarted = false
+    let cleanupSettled = false
+    const closeSession = vi.fn(async (
+      _sessionId: string,
+      _sessionToken: string,
+      signal?: AbortSignal,
+    ) => new Promise<boolean>((resolve) => {
+      signal?.addEventListener('abort', () => {
+        cleanupStarted = true
+        setTimeout(() => {
+          cleanupSettled = true
+          resolve(true)
+        }, 10)
+      }, { once: true })
+    }))
+    const target = backend({ closeSession })
+
+    const response = await handleCloseRequest(request('/api/wrapper/session', {
+      sessionId: 'webmcp-wrapper-abcdefghijklmnopqrstuvwx',
+      sessionToken: 'B'.repeat(43),
+    }, {
+      clientId: 'close_cleanup_settle_01',
+      sourceIp: '198.51.100.253',
+      method: 'DELETE',
+    }), target, { closeTimeoutMs: 20, closeCleanupTimeoutMs: 50 })
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser close operation exceeded its fixed time limit.',
+      code: 'close_timeout',
+    })
+    expect(cleanupStarted).toBe(true)
+    expect(cleanupSettled).toBe(true)
   })
 
   it('returns a sanitized typed production analysis timeout', async () => {
