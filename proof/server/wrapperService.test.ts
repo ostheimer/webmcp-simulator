@@ -236,6 +236,18 @@ async function startFixture(): Promise<Fixture> {
         <div class="main-paint">Main frame paint</div>`)
       return
     }
+    if (requestUrl === '/late-persistent-initial-subframe') {
+      response.end(`<!doctype html><title>Late persistent initial frame</title>
+        <input type="search" aria-label="Main frame search">
+        <script>
+          setTimeout(() => {
+            const frame = document.createElement('iframe');
+            frame.srcdoc = '<body>Persistent child</body>';
+            document.body.append(frame);
+          }, 560);
+        </script>`)
+      return
+    }
     if (requestUrl.startsWith('/non-network-subframe-boundary')) {
       const kind = new URL(requestUrl, 'http://fixture.invalid').searchParams.get('kind') ?? 'neutral'
       const childDocument = `<!doctype html><style>
@@ -323,7 +335,6 @@ async function startFixture(): Promise<Fixture> {
     }
     if (requestUrl === '/resource-policy-action-destination') {
       response.end(`<!doctype html><title>Resource action destination</title>
-        <img src="/checkout-tracking-pixel.svg" alt="Decorative proof" loading="eager" fetchpriority="high" decoding="sync" width="2" height="2">
         <input type="search" aria-label="Destination resource search">`)
       return
     }
@@ -2984,6 +2995,7 @@ function createService(options: {
   afterActionRecapture?: (page: Page) => Promise<void>
   duringActionCaptureArm?: (page: Page) => Promise<void>
   beforeActionStateCapture?: (page: Page) => Promise<void>
+  beforeSubframeOwnerLookup?: (page: Page, frameId: string, attempt: number) => Promise<void>
 } = {}) {
   const resolveTarget = async (value: string): Promise<PublicTarget> => {
     const url = new URL(value)
@@ -3011,6 +3023,7 @@ function createService(options: {
     afterActionRecapture: options.afterActionRecapture,
     duringActionCaptureArm: options.duringActionCaptureArm,
     beforeActionStateCapture: options.beforeActionStateCapture,
+    beforeSubframeOwnerLookup: options.beforeSubframeOwnerLookup,
   })
 }
 
@@ -9955,11 +9968,30 @@ describe('WrapperProofService security boundaries', () => {
       '/neutral-resource.woff2',
     ]))
 
-    const actionService = createService()
-    services.push(actionService)
-    const actionAnalysis = await actionService.analyze(`${fixture.origin}/resource-policy-action-source`)
+    let delayedResourceInjected = false
+    const delayedActionService = createService({
+      beforeAnalysisScreenshot: async (page) => {
+        if (
+          delayedResourceInjected
+          || new URL(page.url()).pathname !== '/resource-policy-action-destination'
+        ) return
+        delayedResourceInjected = true
+        await page.evaluate(() => new Promise<void>((resolve) => {
+          const stylesheet = document.createElement('link')
+          const settle = () => resolve()
+          stylesheet.rel = 'stylesheet'
+          stylesheet.href = '/checkout-delayed-action.css'
+          stylesheet.addEventListener('load', settle, { once: true })
+          stylesheet.addEventListener('error', settle, { once: true })
+          document.head.append(stylesheet)
+          setTimeout(settle, 1_000)
+        }))
+      },
+    })
+    services.push(delayedActionService)
+    const actionAnalysis = await delayedActionService.analyze(`${fixture.origin}/resource-policy-action-source`)
     const navigation = actionAnalysis.capabilities.find(({ kind }) => kind === 'navigation')!
-    await expect(actionService.execute(
+    await expect(delayedActionService.execute(
       actionAnalysis.sessionId,
       actionAnalysis.sessionToken,
       navigation.name,
@@ -9967,8 +9999,10 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       navigation.id,
     )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(delayedResourceInjected).toBe(true)
     expect(fixture.requests).toContain('/resource-policy-action-destination')
-    expect(fixture.requests).not.toContain('/checkout-tracking-pixel.svg')
+    expect(fixture.requests).not.toContain('/checkout-delayed-action.css')
+    expect(internalServiceState(delayedActionService)).toEqual({ sessions: 0, reservations: 0 })
   }, 60_000)
 
   it('publishes no evidence from consequential initial, redirected, or encoded hash destinations', async () => {
@@ -10124,6 +10158,21 @@ describe('WrapperProofService security boundaries', () => {
     services.push(service)
     const analysis = await service.analyze(`${fixture.origin}/iframe-navigation-source`)
     const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    const session = internalSession(service, analysis.sessionId)
+    const cdp = session.cdp as unknown as {
+      send(method: string, params?: Record<string, unknown>): Promise<unknown>
+    }
+    const originalSend = cdp.send.bind(cdp)
+    let frameOwnerAttempts = 0
+    cdp.send = async (method, params) => {
+      if (method === 'DOM.getFrameOwner') {
+        frameOwnerAttempts += 1
+        if (frameOwnerAttempts === 1) {
+          throw new Error('The frame owner is not available yet.')
+        }
+      }
+      return originalSend(method, params)
+    }
 
     const result = await service.execute(
       analysis.sessionId,
@@ -10139,6 +10188,7 @@ describe('WrapperProofService security boundaries', () => {
       structuredContent: { navigationOccurred: true, targetStateVerified: true },
     })
     expect(result.structuredContent.blockedNetworkRequests).toBeGreaterThanOrEqual(1)
+    expect(frameOwnerAttempts).toBeGreaterThanOrEqual(2)
     expect(fixture.requests).toContain('/iframe-destination')
     expect(fixture.requests).not.toContain('/booking-widget')
     const search = result.analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
@@ -10150,6 +10200,63 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       search.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('invalidates when a persistent child frame cannot be removed within the bounded retry', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/iframe-navigation-source`)
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    const session = internalSession(service, analysis.sessionId)
+    const cdp = session.cdp as unknown as {
+      send(method: string, params?: Record<string, unknown>): Promise<unknown>
+    }
+    const originalSend = cdp.send.bind(cdp)
+    let frameOwnerAttempts = 0
+    cdp.send = async (method, params) => {
+      if (method === 'DOM.getFrameOwner') {
+        frameOwnerAttempts += 1
+        throw new Error('The persistent frame owner cannot be retained.')
+      }
+      return originalSend(method, params)
+    }
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      { linkIndex: 0 },
+      undefined,
+      navigation.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+
+    expect(frameOwnerAttempts).toBe(6)
+    expect(fixture.requests).toContain('/iframe-destination')
+    expect(fixture.requests).not.toContain('/booking-widget')
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('preserves the analysis error contract when a frame-owner retry crosses the freeze boundary', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let frameOwnerAttempts = 0
+    const service = createService({
+      beforeSubframeOwnerLookup: async (page) => {
+        if (new URL(page.url()).pathname !== '/late-persistent-initial-subframe') return
+        frameOwnerAttempts += 1
+        throw new Error('The initial frame owner remains unavailable.')
+      },
+    })
+    services.push(service)
+
+    await expect(service.analyze(
+      `${fixture.origin}/late-persistent-initial-subframe`,
+    )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+
+    expect(frameOwnerAttempts).toBe(6)
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('removes non-network child frames before their DOM or pixels enter main-frame evidence', async () => {

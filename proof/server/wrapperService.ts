@@ -45,6 +45,8 @@ const FOCUS_CHANGE_STATE_KEY = '__webmcp_proof_focus_changes__'
 const MAX_ANALYSIS_SCROLL_NODES = 512
 const MAX_ANALYSIS_WATCH_NODES = 2_048
 const MAX_ACTIVE_TOP_LAYER_ELEMENTS = 32
+const SUBFRAME_REMOVAL_ATTEMPTS = 6
+const SUBFRAME_REMOVAL_RETRY_DELAY_MS = 15
 const UNSAFE_FIELD_HINT = /(?:^|\s)(?:(?:api|access|private)\s*keys?|cvc|cvv|otp|pin|verification\s+codes?)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|pay|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|delete|deletion|logoff|logout|order|ordering|purchase|purchasing|removal|remove|reservation|reserve|signout|subscribe|tokens?|unsubscribe|unsubscription|termin|abmelden|abmeldung|austragen|bestellen|bestellung|buchen|buchung|entfernen|entfernung|kaufen|kasse|kündigen|kündigung|löschen|löschung|reservieren|reservierung|warenkorb)\b/i
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
@@ -164,6 +166,8 @@ export interface WrapperProofServiceOptions {
   duringActionCaptureArm?: (page: Page) => Promise<void>
   /** Test-only hook for deterministic failure after the preparation network lock is acquired. */
   beforeActionStateCapture?: (page: Page) => Promise<void>
+  /** Test-only hook for deterministic frame-owner availability races. */
+  beforeSubframeOwnerLookup?: (page: Page, frameId: string, attempt: number) => Promise<void>
 }
 
 interface PendingActionEvidence {
@@ -5449,6 +5453,7 @@ export class WrapperProofService {
   private readonly afterActionRecapture?: (page: Page) => Promise<void>
   private readonly duringActionCaptureArm?: (page: Page) => Promise<void>
   private readonly beforeActionStateCapture?: (page: Page) => Promise<void>
+  private readonly beforeSubframeOwnerLookup?: (page: Page, frameId: string, attempt: number) => Promise<void>
 
   constructor(options: WrapperProofServiceOptions = {}) {
     this.resolveTarget = options.resolveTarget ?? resolvePublicTarget
@@ -5470,6 +5475,7 @@ export class WrapperProofService {
     this.afterActionRecapture = options.afterActionRecapture
     this.duringActionCaptureArm = options.duringActionCaptureArm
     this.beforeActionStateCapture = options.beforeActionStateCapture
+    this.beforeSubframeOwnerLookup = options.beforeSubframeOwnerLookup
   }
 
   private reserveAnalysisSlot(): void {
@@ -5621,37 +5627,54 @@ export class WrapperProofService {
   }
 
   private async removeAttachedSubframe(session: ProofSession, frameId: string): Promise<void> {
-    try {
-      const owner = await session.cdp.send('DOM.getFrameOwner', { frameId }) as {
-        backendNodeId?: number
+    const containsFrame = (value: unknown): boolean => {
+      if (!value || typeof value !== 'object') return false
+      const node = value as {
+        frame?: { id?: string }
+        childFrames?: unknown[]
       }
-      if (!owner.backendNodeId) throw new Error('The isolated child-frame owner is unavailable.')
-      await session.cdp.send('DOM.getDocument', { depth: 0, pierce: true })
-      const pushed = await session.cdp.send('DOM.pushNodesByBackendIdsToFrontend', {
-        backendNodeIds: [owner.backendNodeId],
-      }) as { nodeIds?: number[] }
-      const nodeId = pushed.nodeIds?.[0]
-      if (!nodeId) throw new Error('The isolated child-frame owner could not be retained.')
-      await session.cdp.send('DOM.removeNode', { nodeId })
-    } catch (error) {
-      const tree = await session.cdp.send('Page.getFrameTree').catch(() => undefined) as {
-        frameTree?: {
-          frame?: { id?: string }
-          childFrames?: unknown[]
-        }
-      } | undefined
-      const containsFrame = (value: unknown): boolean => {
-        if (!value || typeof value !== 'object') return false
-        const node = value as {
-          frame?: { id?: string }
-          childFrames?: unknown[]
-        }
-        return node.frame?.id === frameId
-          || (node.childFrames ?? []).some((child) => containsFrame(child))
-      }
-      if (!containsFrame(tree?.frameTree)) return
-      throw error
+      return node.frame?.id === frameId
+        || (node.childFrames ?? []).some((child) => containsFrame(child))
     }
+    let lastError: unknown = new Error('The isolated child frame could not be removed.')
+    for (let attempt = 0; attempt < SUBFRAME_REMOVAL_ATTEMPTS; attempt += 1) {
+      try {
+        await this.beforeSubframeOwnerLookup?.(session.page, frameId, attempt)
+        const owner = await session.cdp.send('DOM.getFrameOwner', { frameId }) as {
+          backendNodeId?: number
+        }
+        if (!owner.backendNodeId) throw new Error('The isolated child-frame owner is unavailable.')
+        await session.cdp.send('DOM.getDocument', { depth: 0, pierce: true })
+        const pushed = await session.cdp.send('DOM.pushNodesByBackendIdsToFrontend', {
+          backendNodeIds: [owner.backendNodeId],
+        }) as { nodeIds?: number[] }
+        const nodeId = pushed.nodeIds?.[0]
+        if (!nodeId) throw new Error('The isolated child-frame owner could not be retained.')
+        await session.cdp.send('DOM.removeNode', { nodeId })
+        return
+      } catch (error) {
+        lastError = error
+        let tree: {
+          frameTree?: {
+            frame?: { id?: string }
+            childFrames?: unknown[]
+          }
+        }
+        try {
+          tree = await session.cdp.send('Page.getFrameTree') as typeof tree
+        } catch (treeError) {
+          lastError = treeError
+          if (attempt + 1 >= SUBFRAME_REMOVAL_ATTEMPTS) break
+          await waitFor(SUBFRAME_REMOVAL_RETRY_DELAY_MS)
+          continue
+        }
+        if (!containsFrame(tree.frameTree)) return
+        if (attempt + 1 < SUBFRAME_REMOVAL_ATTEMPTS) {
+          await waitFor(SUBFRAME_REMOVAL_RETRY_DELAY_MS)
+        }
+      }
+    }
+    throw lastError
   }
 
   private installSubframeBoundaryGuard(session: ProofSession): void {
@@ -5664,21 +5687,22 @@ export class WrapperProofService {
       )
       session.blockedRequests += 1
       if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
+      const policyError = session.networkMode === 'observing'
+        ? new WrapperServiceError(
+            'unsupported_page',
+            'This page could not be loaded safely in the isolated browser.',
+            422,
+          )
+        : new WrapperServiceError(
+            'invalid_action',
+            'The isolated page attached an unsupported child frame and was stopped.',
+            409,
+            { sessionInvalidated: true },
+          )
       const operation = this.removeAttachedSubframe(session, event.frameId)
         .catch(() => {
           if (session.navigationPolicyError) return
-          session.navigationPolicyError = session.networkMode === 'observing'
-            ? new WrapperServiceError(
-                'unsupported_page',
-                'This page could not be loaded safely in the isolated browser.',
-                422,
-              )
-            : new WrapperServiceError(
-                'invalid_action',
-                'The isolated page attached an unsupported child frame and was stopped.',
-                409,
-                { sessionInvalidated: true },
-              )
+          session.navigationPolicyError = policyError
           this.stopForPolicyFailure(session)
         })
       session.pendingSubframeBlocks.add(operation)
@@ -6098,10 +6122,11 @@ export class WrapperProofService {
         const blockForFrozenSession = session.networkMode === 'blocked'
           || session.networkLocked
           || Boolean(session.targetTrafficError)
-        if (
-          !blockForFrozenSession
-          && allowedByOrigin
+        const consequentialResource = allowedByOrigin
           && isConsequentialNavigationUrl(resourceUrl)
+        if (
+          consequentialResource
+          && (!blockForFrozenSession || session.activeNetworkMetrics !== null)
         ) {
           session.blockedRequests += 1
           if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
