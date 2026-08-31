@@ -41,6 +41,7 @@ const MAX_SAFETY_EVIDENCE_LENGTH = 4_096
 const MAX_TOTAL_SAFETY_EVIDENCE_LENGTH = 24 * 1_024
 const MAX_ANALYSIS_CAPTURE_ATTEMPTS = 2
 const MAX_ANALYSIS_SCROLL_NODES = 512
+const MAX_ANALYSIS_WATCH_NODES = 2_048
 const MAX_ACTIVE_TOP_LAYER_ELEMENTS = 32
 const UNSAFE_FIELD_HINT = /(?:^|\s)(?:cvc|cvv)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|order|ordering|purchase|purchasing|reservation|reserve|subscribe|termin|bestellen|bestellung|buchen|buchung|kaufen|kasse|reservieren|reservierung|warenkorb)\b/i
@@ -236,21 +237,89 @@ async function captureActionTargetDigests(
 }
 
 interface PausedDocumentAnimations {
+  reassert(): Promise<void>
   restore(): Promise<void>
 }
 
+interface DocumentAnimationPauseState {
+  playbackRate: number
+  leases: number
+}
+
+const documentAnimationPauseStates = new WeakMap<CDPSession, DocumentAnimationPauseState>()
+const documentAnimationOperationTails = new WeakMap<CDPSession, Promise<void>>()
+
+async function withDocumentAnimationOperationLock<T>(
+  cdp: CDPSession,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = documentAnimationOperationTails.get(cdp) ?? Promise.resolve()
+  let release!: () => void
+  const turn = new Promise<void>((resolve) => { release = resolve })
+  documentAnimationOperationTails.set(cdp, previous.then(() => turn, () => turn))
+  await previous.catch(() => undefined)
+  try {
+    return await operation()
+  } finally {
+    release()
+  }
+}
+
 async function pauseDocumentAnimations(cdp: CDPSession): Promise<PausedDocumentAnimations> {
-  await cdp.send('Animation.enable')
-  const current = await cdp.send('Animation.getPlaybackRate') as { playbackRate?: number }
-  const playbackRate = Number.isFinite(current.playbackRate) ? Number(current.playbackRate) : 1
-  await cdp.send('Animation.setPlaybackRate', { playbackRate: 0 })
+  const state = await withDocumentAnimationOperationLock(cdp, async () => {
+    const active = documentAnimationPauseStates.get(cdp)
+    if (active) {
+      // A temporary inspector session can reset Chromium's document-timeline
+      // rate when it detaches. Every nested lease therefore reasserts the pause.
+      await cdp.send('Animation.setPlaybackRate', { playbackRate: 0 })
+      active.leases += 1
+      return active
+    }
+    await cdp.send('Animation.enable')
+    try {
+      const current = await cdp.send('Animation.getPlaybackRate') as { playbackRate?: number }
+      const playbackRate = Number.isFinite(current.playbackRate) ? Number(current.playbackRate) : 1
+      await cdp.send('Animation.setPlaybackRate', { playbackRate: 0 })
+      const created = { playbackRate, leases: 1 }
+      documentAnimationPauseStates.set(cdp, created)
+      return created
+    } catch (error) {
+      await cdp.send('Animation.disable').catch(() => undefined)
+      throw error
+    }
+  })
   let restored = false
   return {
+    async reassert() {
+      await withDocumentAnimationOperationLock(cdp, async () => {
+        if (restored || documentAnimationPauseStates.get(cdp) !== state) {
+          throw new Error('The isolated animation pause lease became unavailable.')
+        }
+        await cdp.send('Animation.setPlaybackRate', { playbackRate: 0 })
+      })
+    },
     async restore() {
-      if (restored) return
-      await cdp.send('Animation.setPlaybackRate', { playbackRate })
-      await cdp.send('Animation.disable')
-      restored = true
+      await withDocumentAnimationOperationLock(cdp, async () => {
+        if (restored) return
+        restored = true
+        const active = documentAnimationPauseStates.get(cdp)
+        if (active !== state) throw new Error('The isolated animation pause lease became unavailable.')
+        active.leases -= 1
+        if (active.leases > 0) return
+        documentAnimationPauseStates.delete(cdp)
+        let restoreError: unknown
+        try {
+          await cdp.send('Animation.setPlaybackRate', { playbackRate: active.playbackRate })
+        } catch (error) {
+          restoreError = error
+        }
+        try {
+          await cdp.send('Animation.disable')
+        } catch (error) {
+          restoreError ??= error
+        }
+        if (restoreError) throw restoreError
+      })
     },
   }
 }
@@ -479,6 +548,201 @@ function isElementScreenshotVisible(
   viewportHeight: number,
 ): boolean {
   if (!element.isConnected || element.hidden) return false
+  const nativeGetComputedStyle = Object.getOwnPropertyDescriptor(window, 'getComputedStyle')?.value
+  if (!nativeGetComputedStyle) return false
+  const computedStyle = (target: Element, pseudo?: string) =>
+    nativeGetComputedStyle.call(window, target, pseudo) as CSSStyleDeclaration
+  const paintContext = typeof OffscreenCanvas === 'function'
+    ? new OffscreenCanvas(1, 1).getContext('2d', { willReadFrequently: true })
+    : null
+  const colorHasPaint = (value: unknown): boolean => {
+    const source = String(value ?? '').trim()
+    if (!source || !paintContext) return false
+    try {
+      paintContext.clearRect(0, 0, 1, 1)
+      paintContext.fillStyle = 'rgba(0, 0, 0, 0)'
+      paintContext.fillStyle = source
+      paintContext.fillRect(0, 0, 1, 1)
+      return paintContext.getImageData(0, 0, 1, 1).data[3] > 0
+    } catch {
+      return false
+    }
+  }
+  const hasPaintedColorToken = (value: unknown): boolean => {
+    const source = String(value ?? '').slice(0, 4_097)
+    const tokens = source.match(
+      /(?:rgba?|hsla?|hwb|lab|lch|oklab|oklch|color)\([^)]*\)|#[\da-f]{3,8}/gi,
+    ) ?? []
+    return tokens.some((token) => colorHasPaint(token))
+  }
+  const hasTextPaint = (style: CSSStyleDeclaration): boolean => {
+    const textFill = style.getPropertyValue('-webkit-text-fill-color')
+    return colorHasPaint(textFill || style.color) || hasPaintedColorToken(style.textShadow)
+  }
+  const hasBoundedRenderedText = (target: HTMLElement): boolean => {
+    if (target instanceof HTMLInputElement) {
+      const typeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
+      const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+      const type = typeGetter ? String(typeGetter.call(target)) : ''
+      if (
+        !valueGetter
+        || !['date', 'datetime-local', 'email', 'month', 'number', 'password', 'search', 'tel', 'text', 'time', 'url', 'week'].includes(type)
+      ) return false
+      return /\S/.test(String(valueGetter.call(target) ?? '').slice(0, 4_097))
+    }
+    if (target instanceof HTMLTextAreaElement) {
+      const valueGetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
+      if (!valueGetter) return false
+      if (/\S/.test(String(valueGetter.call(target) ?? '').slice(0, 4_097))) return true
+    }
+    const createTreeWalker = Document.prototype.createTreeWalker
+    const nextNode = TreeWalker.prototype.nextNode
+    const walker = createTreeWalker.call(document, target, NodeFilter.SHOW_TEXT)
+    let inspected = 0
+    while (inspected < 256) {
+      const node = nextNode.call(walker)
+      if (!node) break
+      inspected += 1
+      if (/\S/.test(String(node.nodeValue ?? '').slice(0, 4_097))) return true
+    }
+    return false
+  }
+  const hasPaintedPlaceholder = (target: HTMLElement): boolean => {
+    if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLTextAreaElement)) return false
+    const placeholder = String(target.getAttribute('placeholder') ?? '').slice(0, 4_097)
+    return /\S/.test(placeholder) && hasTextPaint(computedStyle(target, '::placeholder'))
+  }
+  const hasBoundedReplacedPaint = (target: HTMLElement): boolean => {
+    const walker = Document.prototype.createTreeWalker.call(
+      document,
+      target,
+      NodeFilter.SHOW_ELEMENT,
+    )
+    const nextNode = TreeWalker.prototype.nextNode
+    let inspected = 0
+    while (inspected < 256) {
+      const node = nextNode.call(walker)
+      if (!node) break
+      inspected += 1
+      if (!(node instanceof HTMLImageElement)) continue
+      const naturalWidthGetter = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'naturalWidth')?.get
+      const naturalHeightGetter = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'naturalHeight')?.get
+      const altGetter = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'alt')?.get
+      if (!naturalWidthGetter || !naturalHeightGetter || !altGetter) continue
+      const imageStyle = computedStyle(node)
+      if (
+        imageStyle.display === 'none'
+        || imageStyle.visibility === 'hidden'
+        || Number.parseFloat(imageStyle.opacity || '1') <= 0
+        || imageStyle.filter !== 'none'
+        || imageStyle.getPropertyValue('mask-image') !== 'none'
+        || imageStyle.getPropertyValue('-webkit-mask-image') !== 'none'
+      ) continue
+      const targetRect = target.getBoundingClientRect()
+      const imageRects = Array.from(node.getClientRects())
+      const hasRenderedImageArea = imageRects.some((rect) => {
+        let left = Math.max(0, targetRect.left, rect.left)
+        let top = Math.max(0, targetRect.top, rect.top)
+        let right = Math.min(viewportWidth, targetRect.right, rect.right)
+        let bottom = Math.min(viewportHeight, targetRect.bottom, rect.bottom)
+        if (right <= left || bottom <= top) return false
+        let current: HTMLElement | null = node
+        while (current && current !== target) {
+          const currentStyle = computedStyle(current)
+          if (
+            current.hidden
+            || currentStyle.display === 'none'
+            || currentStyle.visibility === 'hidden'
+            || currentStyle.visibility === 'collapse'
+            || Number.parseFloat(currentStyle.opacity || '1') <= 0
+            || currentStyle.filter !== 'none'
+            || currentStyle.clip !== 'auto'
+            || currentStyle.clipPath !== 'none'
+            || currentStyle.getPropertyValue('mask-image') !== 'none'
+            || currentStyle.getPropertyValue('-webkit-mask-image') !== 'none'
+          ) return false
+          const currentRect = current.getBoundingClientRect()
+          if (currentStyle.overflowX !== 'visible') {
+            left = Math.max(left, currentRect.left)
+            right = Math.min(right, currentRect.right)
+          }
+          if (currentStyle.overflowY !== 'visible') {
+            top = Math.max(top, currentRect.top)
+            bottom = Math.min(bottom, currentRect.bottom)
+          }
+          if (right <= left || bottom <= top) return false
+          current = current.parentElement
+        }
+        return current === target && right > left && bottom > top
+      })
+      if (!hasRenderedImageArea) continue
+      const naturalWidth = Number(naturalWidthGetter.call(node))
+      const naturalHeight = Number(naturalHeightGetter.call(node))
+      if (naturalWidth > 0 && naturalHeight > 0 && paintContext) {
+        try {
+          paintContext.clearRect(0, 0, 1, 1)
+          paintContext.drawImage(node, 0, 0, 1, 1)
+          if (paintContext.getImageData(0, 0, 1, 1).data[3] > 0) return true
+        } catch {
+          // Cross-origin or otherwise unreadable pixels are not trusted as
+          // proof that the control contributes visible screenshot content.
+        }
+        continue
+      }
+      const alt = String(altGetter.call(node) ?? '').slice(0, 4_097)
+      if (/\S/.test(alt) && hasTextPaint(imageStyle)) return true
+    }
+    return false
+  }
+  const hasProvableOwnPaint = (target: HTMLElement, style: CSSStyleDeclaration): boolean => {
+    const appearance = String(
+      style.getPropertyValue('appearance') || style.getPropertyValue('-webkit-appearance'),
+    ).trim()
+    if (target instanceof HTMLInputElement && appearance !== 'none') {
+      const typeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
+      const type = typeGetter ? String(typeGetter.call(target)) : ''
+      if (['checkbox', 'color', 'radio', 'range'].includes(type)) return true
+    }
+    if (colorHasPaint(style.backgroundColor)) return true
+    for (const side of ['top', 'right', 'bottom', 'left']) {
+      const borderStyle = style.getPropertyValue(`border-${side}-style`)
+      const borderWidth = Number.parseFloat(style.getPropertyValue(`border-${side}-width`) || '0')
+      if (
+        borderStyle !== 'none'
+        && borderStyle !== 'hidden'
+        && borderWidth > 0
+        && colorHasPaint(style.getPropertyValue(`border-${side}-color`))
+      ) return true
+    }
+    const outlineWidth = Number.parseFloat(style.outlineWidth || '0')
+    if (
+      style.outlineStyle !== 'none'
+      && style.outlineStyle !== 'hidden'
+      && outlineWidth > 0
+      && colorHasPaint(style.outlineColor)
+    ) return true
+    if (hasPaintedPlaceholder(target)) return true
+    if (hasBoundedRenderedText(target) && hasTextPaint(style)) return true
+    if (hasBoundedReplacedPaint(target)) return true
+    for (const pseudo of ['::before', '::after']) {
+      const pseudoStyle = computedStyle(target, pseudo)
+      const content = String(pseudoStyle.content ?? '').trim()
+      if (
+        content
+        && content !== 'none'
+        && content !== 'normal'
+        && content !== '""'
+        && content !== "''"
+        && (
+          hasTextPaint(pseudoStyle)
+          || colorHasPaint(pseudoStyle.backgroundColor)
+        )
+      ) return true
+    }
+    return false
+  }
+  const elementStyle = computedStyle(element)
+  if (!hasProvableOwnPaint(element, elementStyle)) return false
   const rects = Array.from(element.getClientRects())
   for (const rect of rects) {
     let left = Math.max(0, rect.left)
@@ -490,7 +754,7 @@ function isElementScreenshotVisible(
     let current: HTMLElement | null = element
     let clippedOut = false
     while (current) {
-      const style = getComputedStyle(current)
+      const style = computedStyle(current)
       const hasFilter = style.filter.trim() !== '' && style.filter !== 'none'
       const hasMask = [
         style.getPropertyValue('mask-image'),
@@ -551,6 +815,7 @@ function captureIsolatedSafetyEvidence(
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
   modalState: { elements: Element[], overflow: boolean, limit: number },
+  captureSourceState?: { elements: Element[], overflow: boolean, limit: number },
 ): {
   snapshot: string
   overflow: boolean
@@ -573,7 +838,16 @@ function captureIsolatedSafetyEvidence(
   const createTreeWalker = Document.prototype.createTreeWalker
   const nextNode = TreeWalker.prototype.nextNode
   let retainedEvidenceLength = 0
-  let aggregateOverflow = false
+  let aggregateOverflow = Boolean(captureSourceState?.overflow)
+  const retainCaptureSource = (source: Element | null) => {
+    if (!captureSourceState || !source || captureSourceState.elements.includes(source)) return
+    if (captureSourceState.elements.length >= captureSourceState.limit) {
+      captureSourceState.overflow = true
+      aggregateOverflow = true
+      return
+    }
+    captureSourceState.elements.push(source)
+  }
   const bounded = (value: unknown, sourceOverflow = false) => {
     if (aggregateOverflow) return { value: '', overflow: true }
     const raw = String(value ?? '')
@@ -915,6 +1189,7 @@ function captureIsolatedSafetyEvidence(
     for (const id of ids) {
       if (aggregateOverflow) break
       const node = document.getElementById(id)
+      retainCaptureSource(node)
       const text = node instanceof Element ? boundedNodeText(node) : bounded('')
       const imageAlts = node instanceof Element
         ? boundedDescendantImageAlts(node)
@@ -976,6 +1251,7 @@ function captureIsolatedSafetyEvidence(
     kind: 'form' | 'fieldset' | 'legend',
     includeText: boolean,
   ) => {
+    retainCaptureSource(root)
     const values: string[] = []
     const retainExisting = (slot: string, value: string) => {
       values.push(slot, value)
@@ -1019,6 +1295,12 @@ function captureIsolatedSafetyEvidence(
         entry.generatedContent.forEach((content, contentIndex) =>
           retainExisting(`${attribute}:generated:${index}:${contentIndex}`, content))
       })
+      ownerContextOverflow ||= reference.entries.some((entry) => Boolean(
+        !entry.found
+        || entry.ariaLabelledBy.value
+        || entry.ariaDescribedBy.value
+        || entry.nativeControlKind.value,
+      ))
       ownerContextOverflow ||= reference.overflow
     }
     if (includeText) {
@@ -1034,6 +1316,7 @@ function captureIsolatedSafetyEvidence(
     ownerContextSnapshots.push({ kind, values })
   }
   let ownerForm: HTMLFormElement | null = null
+  let explicitFormReference = ''
   if (
     element instanceof HTMLInputElement
     || element instanceof HTMLSelectElement
@@ -1047,7 +1330,11 @@ function captureIsolatedSafetyEvidence(
     const formGetter = Object.getOwnPropertyDescriptor(prototype, 'form')?.get
     if (!formGetter) ownerContextOverflow = true
     else ownerForm = formGetter.call(element) as HTMLFormElement | null
+    const formReference = bounded(getAttribute.call(element, 'form') ?? '')
+    explicitFormReference = formReference.value.trim()
+    ownerContextOverflow ||= formReference.overflow
   }
+  if (explicitFormReference && !ownerForm) ownerContextOverflow = true
   if (ownerForm) captureOwnerContextNode(ownerForm, 'form', false)
 
   const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get
@@ -1128,6 +1415,7 @@ function captureIsolatedSafetyEvidence(
     'minlength',
     'maxlength',
     'pattern',
+    'form',
     'multiple',
     'required',
   ]
@@ -1190,6 +1478,7 @@ function captureIsolatedSafetyEvidence(
     ) {
       const label = labelCollection.item(index)
       if (label) {
+        retainCaptureSource(label)
         const text = boundedNodeText(label)
         const imageAlts = boundedDescendantImageAlts(label)
         const ariaLabel = bounded(getAttribute.call(label, 'aria-label') ?? '')
@@ -1390,6 +1679,7 @@ function captureIsolatedSafetyEvidence(
     || generatedContent.overflow
     || optionOverflow
     || ownerContextOverflow
+    || captureSourceState?.overflow
     || effectiveAriaDisabled.overflow
     || effectiveInert.overflow
   if (overflow) {
@@ -1625,6 +1915,7 @@ function classifyDomInIsolatedWorld({
   maxElementsInspected,
   maxDateLikeValues,
   maxSelectOptionsInspected,
+  maxCaptureWatchNodes,
   maxTotalSafetyEvidenceLength,
   viewportWidth,
   viewportHeight,
@@ -1637,14 +1928,25 @@ function classifyDomInIsolatedWorld({
   maxElementsInspected: number
   maxDateLikeValues: number
   maxSelectOptionsInspected: number
+  maxCaptureWatchNodes: number
   maxTotalSafetyEvidenceLength: number
   viewportWidth: number
   viewportHeight: number
   maxSafetyEvidenceLength: number
-}, modalState: { elements: Element[], overflow: boolean, limit: number }): { descriptors: Array<Omit<DetectedControl, 'backendNodeId'>>, elements: Element[] } {
+}, modalState: { elements: Element[], overflow: boolean, limit: number }): {
+  descriptors: Array<Omit<DetectedControl, 'backendNodeId'>>
+  elements: Element[]
+  captureSources: Element[]
+  captureSourcesOverflow: boolean
+} {
     const unsafePattern = new RegExp(unsafePatternSource, 'i')
     const unsafeNavigationPattern = new RegExp(unsafeNavigationPatternSource, 'i')
     const sensitiveAutocomplete = new Set<string>(sensitiveAutocompleteTokens)
+    const captureSourceState = {
+      elements: [] as Element[],
+      overflow: false,
+      limit: maxCaptureWatchNodes,
+    }
     const boundedRaw = (value: unknown) => String(value ?? '').slice(0, maxSafetyEvidenceLength + 1)
     const normalize = (value: unknown, limit = 140) => boundedRaw(value)
       .replace(/\s+/g, ' ')
@@ -1785,6 +2087,7 @@ function classifyDomInIsolatedWorld({
         maxTotalSafetyEvidenceLength,
         maxSelectOptionsInspected,
         modalState,
+        captureSourceState,
       )
       const referencedElements = (attribute: string) => {
         const source = element.getAttribute(attribute) ?? ''
@@ -2291,7 +2594,12 @@ function classifyDomInIsolatedWorld({
         sensitive: sensitive || (!(element instanceof HTMLAnchorElement) && analysisState === undefined),
       }
     })
-    return { descriptors, elements }
+    return {
+      descriptors,
+      elements,
+      captureSources: captureSourceState.elements,
+      captureSourcesOverflow: captureSourceState.overflow,
+    }
 }
 
 async function createIsolatedWorld(cdp: CDPSession): Promise<number> {
@@ -2436,10 +2744,21 @@ async function isCdpPaintVisible(
   return false
 }
 
-async function collectDomEvidence(context: BrowserContext, page: Page): Promise<DetectedControl[]> {
-  const cdp = await context.newCDPSession(page)
+interface CollectedDomEvidence {
+  evidence: DetectedControl[]
+  watchBackendNodeIds: number[]
+}
+
+async function collectDomEvidence(
+  context: BrowserContext,
+  page: Page,
+  existingCdp?: CDPSession,
+): Promise<CollectedDomEvidence> {
+  const cdp = existingCdp ?? await context.newCDPSession(page)
+  const ownsCdp = !existingCdp
   const objectGroup = `webmcp-proof-${randomUUID()}`
   const storageKey = `__webmcp_elements_${randomUUID().replaceAll('-', '')}`
+  const captureSourceStorageKey = `__webmcp_capture_sources_${randomUUID().replaceAll('-', '')}`
   const modalStorageKey = `__webmcp_modals_${randomUUID().replaceAll('-', '')}`
   let executionContextId: number | undefined
   try {
@@ -2453,22 +2772,35 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
       maxElementsInspected: WRAPPER_MAX_DOM_ELEMENTS_INSPECTED,
       maxDateLikeValues: WRAPPER_MAX_DATE_LIKE_VALUES,
       maxSelectOptionsInspected: WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
+      maxCaptureWatchNodes: MAX_ANALYSIS_WATCH_NODES,
       maxTotalSafetyEvidenceLength: MAX_TOTAL_SAFETY_EVIDENCE_LENGTH,
       viewportWidth: CAPTURE_VIEWPORT_WIDTH,
       viewportHeight: CAPTURE_VIEWPORT_HEIGHT,
       maxSafetyEvidenceLength: MAX_SAFETY_EVIDENCE_LENGTH,
     }
     const classification = await cdp.send('Runtime.evaluate', {
-      expression: `(() => { const WRAPPER_MAX_DOM_ELEMENTS_INSPECTED = ${WRAPPER_MAX_DOM_ELEMENTS_INSPECTED}; const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}, globalThis[${JSON.stringify(modalStorageKey)}]); globalThis[${JSON.stringify(storageKey)}] = result.elements; return result.descriptors; })()`,
+      expression: `(() => { const WRAPPER_MAX_DOM_ELEMENTS_INSPECTED = ${WRAPPER_MAX_DOM_ELEMENTS_INSPECTED}; const normalizeUntrustedSafetyEvidence = (${normalizeUntrustedSafetyEvidence.toString()}); const isEffectivelyVisibleSelectOption = (${isEffectivelyVisibleSelectOption.toString()}); const isElementScreenshotVisible = (${isElementScreenshotVisible.toString()}); const captureEffectiveAriaDisabled = (${captureEffectiveAriaDisabled.toString()}); const captureEffectiveInert = (${captureEffectiveInert.toString()}); const captureIsolatedSafetyEvidence = (${captureIsolatedSafetyEvidence.toString()}); const result = (${classifyDomInIsolatedWorld.toString()})(${JSON.stringify(classifierInput)}, globalThis[${JSON.stringify(modalStorageKey)}]); globalThis[${JSON.stringify(storageKey)}] = result.elements; globalThis[${JSON.stringify(captureSourceStorageKey)}] = result.captureSources; return { descriptors: result.descriptors, captureSourcesOverflow: result.captureSourcesOverflow, captureSourceCount: result.captureSources.length }; })()`,
       contextId: executionContextId,
       objectGroup,
       returnByValue: true,
     }) as {
-      result?: { value?: Array<Omit<DetectedControl, 'backendNodeId'>> }
+      result?: { value?: {
+        descriptors?: Array<Omit<DetectedControl, 'backendNodeId'>>
+        captureSourcesOverflow?: boolean
+        captureSourceCount?: number
+      } }
       exceptionDetails?: unknown
     }
-    const descriptors = classification.result?.value
-    if (classification.exceptionDetails || !Array.isArray(descriptors)) {
+    const descriptors = classification.result?.value?.descriptors
+    const captureSourceCount = classification.result?.value?.captureSourceCount
+    if (
+      classification.exceptionDetails
+      || !Array.isArray(descriptors)
+      || classification.result?.value?.captureSourcesOverflow === true
+      || !Number.isInteger(captureSourceCount)
+      || captureSourceCount! < 0
+      || captureSourceCount! > MAX_ANALYSIS_WATCH_NODES
+    ) {
       throw new Error('The isolated browser classifier did not return bounded evidence.')
     }
 
@@ -2499,17 +2831,36 @@ async function collectDomEvidence(context: BrowserContext, page: Page): Promise<
         backendNodeId: described.node.backendNodeId,
       })
     }
-    return detectedControls
+    const watchBackendNodeIds = new Set<number>()
+    for (let index = 0; index < captureSourceCount!; index += 1) {
+      const remoteSource = await cdp.send('Runtime.evaluate', {
+        expression: `globalThis[${JSON.stringify(captureSourceStorageKey)}][${index}]`,
+        contextId: executionContextId,
+        objectGroup,
+      }) as { result?: { objectId?: string }, exceptionDetails?: unknown }
+      const objectId = remoteSource.result?.objectId
+      if (remoteSource.exceptionDetails || !objectId) {
+        throw new Error('The isolated safety-source reference is unavailable.')
+      }
+      const described = await cdp.send('DOM.describeNode', { objectId }) as {
+        node?: { backendNodeId?: number }
+      }
+      if (!described.node?.backendNodeId) {
+        throw new Error('The isolated safety-source identity is unavailable.')
+      }
+      watchBackendNodeIds.add(described.node.backendNodeId)
+    }
+    return { evidence: detectedControls, watchBackendNodeIds: [...watchBackendNodeIds] }
   } finally {
     if (executionContextId) {
       await cdp.send('Runtime.evaluate', {
-        expression: `delete globalThis[${JSON.stringify(storageKey)}]; delete globalThis[${JSON.stringify(modalStorageKey)}]`,
+        expression: `delete globalThis[${JSON.stringify(storageKey)}]; delete globalThis[${JSON.stringify(captureSourceStorageKey)}]; delete globalThis[${JSON.stringify(modalStorageKey)}]`,
         contextId: executionContextId,
         returnByValue: true,
       }).catch(() => undefined)
     }
     await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
-    await cdp.detach()
+    if (ownsCdp) await cdp.detach()
   }
 }
 
@@ -2533,7 +2884,7 @@ async function createAnalysisCaptureGuard(
   page: Page,
 ): Promise<{
   snapshot: () => Promise<AnalysisCaptureGuardSnapshot>
-  arm: (backendNodeIds: number[]) => Promise<void>
+  arm: (controlBackendNodeIds: number[], watchBackendNodeIds: number[]) => Promise<void>
   screenshot: () => Promise<Buffer>
   stop: () => Promise<void>
 }> {
@@ -2571,6 +2922,7 @@ async function createAnalysisCaptureGuard(
         mutationCount: 0,
         observer: null,
         watched: [],
+        watchOverflow: false,
         controls: [],
         scrollNodes: [],
         scrollBaselines: [],
@@ -2696,8 +3048,8 @@ async function createAnalysisCaptureGuard(
         topLayerOverflow,
       }
     },
-    arm: async (backendNodeIds) => {
-      for (const backendNodeId of backendNodeIds) {
+    arm: async (controlBackendNodeIds, watchBackendNodeIds) => {
+      const retainBackendNode = async (backendNodeId: number, isControl: boolean) => {
         const resolved = await cdp.send('DOM.resolveNode', {
           backendNodeId,
           executionContextId,
@@ -2706,14 +3058,21 @@ async function createAnalysisCaptureGuard(
         const objectId = resolved.object?.objectId
         if (!objectId) throw new Error('The isolated analysis identity expired before capture.')
         const retained = await cdp.send('Runtime.callFunctionOn', {
-          functionDeclaration: `function() {
+          functionDeclaration: `function(isControl, maxWatchNodes) {
             const state = globalThis[${JSON.stringify(storageKey)}];
             if (!state || !(this instanceof Element)) return false;
-            state.watched.push(this);
-            state.controls.push(this);
+            if (!state.watched.includes(this)) {
+              if (state.watched.length >= maxWatchNodes) {
+                state.watchOverflow = true;
+                return false;
+              }
+              state.watched.push(this);
+            }
+            if (isControl && !state.controls.includes(this)) state.controls.push(this);
             return true;
           }`,
           objectId,
+          arguments: [{ value: isControl }, { value: MAX_ANALYSIS_WATCH_NODES }],
           objectGroup,
           returnByValue: true,
         }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
@@ -2721,12 +3080,16 @@ async function createAnalysisCaptureGuard(
           throw new Error('The isolated analysis identity could not be retained.')
         }
       }
+      for (const backendNodeId of controlBackendNodeIds) {
+        await retainBackendNode(backendNodeId, true)
+      }
+      for (const backendNodeId of watchBackendNodeIds) {
+        await retainBackendNode(backendNodeId, false)
+      }
       const armed = await cdp.send('Runtime.evaluate', {
         expression: `(() => {
           const state = globalThis[${JSON.stringify(storageKey)}];
           if (!state?.observer) return false;
-          const getAttribute = Element.prototype.getAttribute;
-          const getElementById = Document.prototype.getElementById;
           const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get;
           const scrollingElementGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'scrollingElement')?.get;
           const scrollLeftGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')?.get;
@@ -2736,7 +3099,12 @@ async function createAnalysisCaptureGuard(
             return false;
           }
           const pushUnique = (node) => {
-            if (node instanceof Node && !state.watched.includes(node)) state.watched.push(node);
+            if (!(node instanceof Node) || state.watched.includes(node)) return;
+            if (state.watched.length >= ${MAX_ANALYSIS_WATCH_NODES}) {
+              state.watchOverflow = true;
+              return;
+            }
+            state.watched.push(node);
           };
           const pushScrollNode = (node) => {
             if (!(node instanceof Element) || state.scrollNodes.includes(node)) return;
@@ -2777,19 +3145,7 @@ async function createAnalysisCaptureGuard(
           state.pendingScrollTargets = [];
           state.scrollArmed = true;
           pushUnique(document.querySelector('title'));
-          for (const control of state.controls.slice(0, ${WRAPPER_MAX_DOM_EVIDENCE})) {
-            if (!(control instanceof Element)) continue;
-            for (const attribute of ['aria-labelledby', 'aria-describedby']) {
-              const raw = String(getAttribute.call(control, attribute) ?? '').slice(0, ${MAX_SAFETY_EVIDENCE_LENGTH + 1});
-              const ids = raw.trim().split(/\\s+/).slice(0, 16);
-              for (const id of ids) pushUnique(getElementById.call(document, id));
-            }
-            if ('labels' in control && control.labels) {
-              for (let index = 0; index < control.labels.length && index < 16; index += 1) {
-                pushUnique(control.labels.item(index));
-              }
-            }
-          }
+          if (state.watchOverflow) return false;
           if (state.mutationCount === 0) {
             state.observer.observe(document.documentElement, {
               subtree: true,
@@ -3389,8 +3745,10 @@ async function callOnIsolatedNode<T>(
   backendNodeId: number,
   functionDeclaration: string,
   args: IsolatedControlState[],
+  existingCdp?: CDPSession,
 ): Promise<T> {
-  const cdp = await context.newCDPSession(page)
+  const cdp = existingCdp ?? await context.newCDPSession(page)
+  const ownsCdp = !existingCdp
   const objectGroup = `webmcp-action-${randomUUID()}`
   let scriptExecutionDisabled = false
   try {
@@ -3425,7 +3783,7 @@ async function callOnIsolatedNode<T>(
       }
     } finally {
       await cdp.send('Runtime.releaseObjectGroup', { objectGroup }).catch(() => undefined)
-      await cdp.detach().catch(() => undefined)
+      if (ownsCdp) await cdp.detach().catch(() => undefined)
     }
   }
 }
@@ -3439,6 +3797,7 @@ function readControlState(
   expectedSafetySnapshot: string,
   expectedOptionIndex = -1,
   expectedRadioGroupSize = -1,
+  existingCdp?: CDPSession,
 ): Promise<IsolatedControlState> {
   return callOnIsolatedNode<IsolatedControlState>(
     context,
@@ -3458,6 +3817,7 @@ function readControlState(
       WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
       WRAPPER_MAX_DOM_ELEMENTS_INSPECTED,
     ],
+    existingCdp,
   )
 }
 
@@ -3636,6 +3996,7 @@ function readLinkTarget(
   backendNodeId: number,
   expectedUrl: string,
   expectedSafetySnapshot: string,
+  existingCdp?: CDPSession,
 ): Promise<string> {
   return callOnIsolatedNode<string>(
     context,
@@ -3651,6 +4012,7 @@ function readLinkTarget(
       MAX_TOTAL_SAFETY_EVIDENCE_LENGTH,
       WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
     ],
+    existingCdp,
   )
 }
 
@@ -3658,6 +4020,7 @@ async function revalidateDomEvidence(
   context: BrowserContext,
   page: Page,
   evidence: DetectedControl[],
+  existingCdp?: CDPSession,
 ): Promise<void> {
   for (const control of evidence.filter(({ sensitive }) => !sensitive)) {
     if (control.tag === 'a') {
@@ -3669,6 +4032,7 @@ async function revalidateDomEvidence(
         control.backendNodeId,
         expectedUrl,
         control.safetySnapshot,
+        existingCdp,
       )
       continue
     }
@@ -3681,6 +4045,7 @@ async function revalidateDomEvidence(
       control.safetySnapshot,
       -1,
       control.type === 'radio' ? control.radioGroupSize ?? -1 : -1,
+      existingCdp,
     )
     if (currentState !== control.analysisState) {
       throw new Error('The isolated control state changed while analysis evidence was captured.')
@@ -3692,8 +4057,10 @@ async function collectAxEvidence(
   context: BrowserContext,
   page: Page,
   backendNodeIds: number[],
+  existingCdp?: CDPSession,
 ): Promise<WrapperAxEvidence[]> {
-  const cdp = await context.newCDPSession(page)
+  const cdp = existingCdp ?? await context.newCDPSession(page)
+  const ownsCdp = !existingCdp
   try {
     await cdp.send('Accessibility.enable')
     const usefulRoles = new Set([
@@ -3724,7 +4091,8 @@ async function collectAxEvidence(
     }
     return evidence
   } finally {
-    await cdp.detach()
+    if (ownsCdp) await cdp.detach()
+    else await cdp.send('Accessibility.disable').catch(() => undefined)
   }
 }
 
@@ -4374,7 +4742,11 @@ export class WrapperProofService {
     let lastCaptureError: unknown
     for (let attempt = 0; attempt < MAX_ANALYSIS_CAPTURE_ATTEMPTS; attempt += 1) {
       const guard = await createAnalysisCaptureGuard(session.context, session.page)
+      let pausedAnimations: PausedDocumentAnimations | undefined
+      let captureSucceeded = false
+      let captureCleanupFailed = false
       try {
+        pausedAnimations = await pauseDocumentAnimations(session.cdp)
         const before = await guard.snapshot()
         if (
           before.overflow
@@ -4387,8 +4759,16 @@ export class WrapperProofService {
         ) throw new Error('The isolated analysis capture started from an unsafe page state.')
 
         await this.beforeDomEvidenceCollection?.(session.page, attempt)
-        const candidateDomEvidence = await collectDomEvidence(session.context, session.page)
-        await guard.arm(candidateDomEvidence.map(({ backendNodeId }) => backendNodeId))
+        const collectedDomEvidence = await collectDomEvidence(
+          session.context,
+          session.page,
+          session.cdp,
+        )
+        const candidateDomEvidence = collectedDomEvidence.evidence
+        await guard.arm(
+          candidateDomEvidence.map(({ backendNodeId }) => backendNodeId),
+          collectedDomEvidence.watchBackendNodeIds,
+        )
         await this.beforeAnalysisScreenshot?.(session.page, attempt)
         const candidateScreenshot = await guard.screenshot()
         await this.afterAnalysisScreenshot?.(session.page, attempt)
@@ -4398,8 +4778,14 @@ export class WrapperProofService {
           candidateDomEvidence
             .filter(({ sensitive }) => !sensitive)
             .map(({ backendNodeId }) => backendNodeId),
+          session.cdp,
         )
-        await revalidateDomEvidence(session.context, session.page, candidateDomEvidence)
+        await revalidateDomEvidence(
+          session.context,
+          session.page,
+          candidateDomEvidence,
+          session.cdp,
+        )
         const after = await guard.snapshot()
         if (
           after.overflow
@@ -4423,13 +4809,41 @@ export class WrapperProofService {
         title = after.title
         finalUrl = after.url
         screenshot = candidateScreenshot
-        break
+        captureSucceeded = true
       } catch (error) {
         if (error instanceof WrapperServiceError && error.sessionInvalidated === true) throw error
         lastCaptureError = error
       } finally {
-        await guard.stop()
+        try {
+          await guard.stop()
+        } catch {
+          captureCleanupFailed = true
+        }
+        if (pausedAnimations) {
+          try {
+            // Detaching another inspector session resets Chromium's global
+            // document-timeline rate. Reassert before releasing this nested
+            // lease so an outer action capture remains frozen.
+            await pausedAnimations.reassert()
+          } catch {
+            captureCleanupFailed = true
+          }
+          try {
+            await pausedAnimations.restore()
+          } catch {
+            captureCleanupFailed = true
+          }
+        }
       }
+      if (captureCleanupFailed) {
+        throw new WrapperServiceError(
+          'unsupported_page',
+          'The isolated page could not safely resume after evidence capture.',
+          422,
+          { sessionInvalidated: true },
+        )
+      }
+      if (captureSucceeded) break
     }
     if (!domEvidence || !axEvidence || title === undefined || !finalUrl || !screenshot) {
       throw new Error('The isolated page did not remain stable while analysis evidence was captured.', {
@@ -4888,9 +5302,21 @@ export class WrapperProofService {
       let beforeActionScreenshotDataUrl: string
       let beforeActionTargetDigests: Map<number, string> | null
       try {
-        pausedAnimations = capability.kind === 'navigation'
-          ? null
-          : await raceWithSessionPolicy(session, pauseDocumentAnimations(session.cdp), signal)
+        if (capability.kind !== 'navigation') {
+          const animationPauseAcquisition = pauseDocumentAnimations(session.cdp)
+          try {
+            pausedAnimations = await raceWithSessionPolicy(
+              session,
+              animationPauseAcquisition,
+              signal,
+            )
+          } catch (error) {
+            void animationPauseAcquisition
+              .then((pause) => pause.restore())
+              .catch(() => this.destroySession(sessionId))
+            throw error
+          }
+        }
         beforeActionScreenshotDataUrl = screenshotDataUrl(await raceWithSessionPolicy(
           session,
           captureViewportScreenshot(session.cdp),

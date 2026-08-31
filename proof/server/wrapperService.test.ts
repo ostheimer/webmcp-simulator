@@ -1383,6 +1383,28 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/analysis-owner-watchset') {
+      response.end(`<!doctype html><title>Analysis owner watchset</title>
+        <style>fieldset{border:0;margin:0;padding:0}</style>
+        <span id="watch-form-reference">Neutral form reference</span>
+        <span id="watch-fieldset-reference">Neutral fieldset reference</span>
+        <span id="watch-legend-reference">Neutral legend reference</span>
+        <form id="watch-form" aria-describedby="watch-form-reference">
+          <fieldset id="watch-fieldset" aria-describedby="watch-fieldset-reference">
+            <legend id="watch-legend" aria-describedby="watch-legend-reference">Neutral legend</legend>
+            <input id="watch-owner-value" type="text" aria-label="Watched owner value">
+            <input id="watch-owner-detail" type="text" aria-label="Watched owner detail">
+          </fieldset>
+        </form>
+        <span id="late-missing-owner-source">Neutral late reference</span>
+        <form id="missing-owner-form" aria-describedby="missing-owner-reference">
+          <input type="text" aria-label="Missing owner value">
+          <input type="text" aria-label="Missing owner detail">
+        </form>
+        <input type="text" form="late-external-form" aria-label="Missing external owner value">
+        <input type="text" form="late-external-form" aria-label="Missing external owner detail">`)
+      return
+    }
     if (requestUrl === '/unicode-safety-normalization') {
       response.end(`<!doctype html><title>Unicode safety normalization</title>
         <form id="zero-width-sensitive-form">
@@ -1709,6 +1731,75 @@ async function startFixture(): Promise<Fixture> {
           <option value="one" selected>First visible label</option>
           <option value="two">Second visible label</option>
         </select>`)
+      return
+    }
+    if (requestUrl === '/analysis-animation-capture') {
+      response.end(`<!doctype html><title>Analysis animation capture</title>
+        <style>
+          @keyframes capture-opacity { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+          #css-animated-search { animation: capture-opacity 10000ms linear infinite; }
+        </style>
+        <input id="css-animated-search" type="search" aria-label="CSS animated search">
+        <input id="web-animated-search" type="search" aria-label="Web animated search">
+        <input id="stable-capture-search" type="search" aria-label="Stable capture search">
+        <script>
+          const animation = document.getElementById('web-animated-search').animate(
+            [{ opacity: 1 }, { opacity: 0 }, { opacity: 1 }],
+            { duration: 10000, iterations: Infinity },
+          );
+          animation.id = 'web-opacity-animation';
+        </script>`)
+      return
+    }
+    if (requestUrl === '/paint-evidence-contract') {
+      response.end(`<!doctype html><title>Paint evidence contract</title>
+        <style>
+          .paintless {
+            appearance:none; color:transparent; caret-color:transparent;
+            background:transparent; border:0; outline:0; box-shadow:none;
+            text-shadow:none; width:180px; height:36px; display:block; margin:10px;
+          }
+        </style>
+        <input id="paintless-search" class="paintless" type="search" aria-label="Paintless search">
+        <input id="transparent-gradient-search" class="paintless" type="search" aria-label="Transparent gradient search"
+          style="background-image:linear-gradient(transparent,transparent)">
+        <input id="transparent-shadow-search" class="paintless" type="search" aria-label="Transparent shadow search"
+          style="box-shadow:0 0 0 4px rgba(0,0,0,0)">
+        <input id="zero-size-gradient-search" class="paintless" type="search" aria-label="Zero size gradient search"
+          style="background-image:linear-gradient(red,red);background-size:0 0;background-repeat:no-repeat">
+        <input id="collapsed-shadow-search" class="paintless" type="search" aria-label="Collapsed shadow search"
+          style="box-shadow:0 0 0 -100px red">
+        <input id="appearance-auto-paintless" class="paintless" type="search" aria-label="Appearance auto paintless search"
+          style="appearance:auto">
+        <input id="oklab-transparent-search" class="paintless" type="search" aria-label="OKLab transparent search"
+          style="background-color:oklab(60% .1 .1 / 0)">
+        <input id="paintless-checkbox" class="paintless" type="checkbox" aria-label="Paintless checkbox">
+        <a id="paintless-link" class="paintless" href="/about#paintless" aria-label="Paintless link">Paintless link</a>
+        <input id="painted-custom-search" class="paintless" type="search" aria-label="Painted custom search"
+          style="border:2px solid rgb(30,90,180);color:rgb(20,40,80);caret-color:rgb(20,40,80)">
+        <input id="native-painted-search" type="search" aria-label="Native painted search">
+        <input id="visible-placeholder-search" class="paintless" type="search" aria-label="Visible placeholder search"
+          placeholder="Visible placeholder" style="--placeholder-color:rgb(20,80,160)">
+        <style>#visible-placeholder-search::placeholder{color:var(--placeholder-color)}</style>
+        <input id="visible-text-fill" class="paintless" type="text" aria-label="Visible text fill"
+          value="Visible text" style="-webkit-text-fill-color:rgb(20,80,160)">
+        <input id="oklab-painted-search" class="paintless" type="search" aria-label="OKLab painted search"
+          style="background-color:oklab(60% .1 .1 / 1)">
+        <a id="transparent-image-link" class="paintless" href="/about#transparent-image" aria-label="Transparent image link">
+          <img width="24" height="24" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Crect width='24' height='24' fill='none'/%3E%3C/svg%3E">
+        </a>
+        <a id="zero-size-image-link" class="paintless" href="/about#zero-size-image" aria-label="Zero size image link">
+          <img width="24" height="24" style="width:0;height:0" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Crect width='24' height='24' fill='red'/%3E%3C/svg%3E">
+        </a>
+        <a id="clipped-image-link" class="paintless" href="/about#clipped-image" aria-label="Clipped image link">
+          <span style="display:block;width:0;height:0;overflow:hidden"><img width="24" height="24" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Crect width='24' height='24' fill='red'/%3E%3C/svg%3E"></span>
+        </a>
+        <a id="legacy-clipped-image-link" class="paintless" href="/about#legacy-clipped-image" aria-label="Legacy clipped image link">
+          <img width="24" height="24" style="position:absolute;clip:rect(0,0,0,0)" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Crect width='24' height='24' fill='red'/%3E%3C/svg%3E">
+        </a>
+        <a id="painted-image-link" class="paintless" href="/about#painted-image" aria-label="Painted image link">
+          <img width="24" height="24" alt="" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24'%3E%3Crect width='24' height='24' fill='red'/%3E%3C/svg%3E">
+        </a>`)
       return
     }
     if (requestUrl === '/visible-state-web-animation') {
@@ -4738,6 +4829,122 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
+  it('watches every captured owner-context source across screenshot capture and retries transient drift', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const mutations = [
+      ['#watch-form', 'aria-label', 'Payment', ''],
+      ['#watch-fieldset', 'title', 'User password', ''],
+      ['#watch-legend', undefined, 'Credit card reference', 'Neutral legend'],
+      ['#watch-form-reference', undefined, 'Payment reference', 'Neutral form reference'],
+      ['#watch-fieldset-reference', undefined, 'Password reference', 'Neutral fieldset reference'],
+      ['#watch-legend-reference', undefined, 'Credit card reference', 'Neutral legend reference'],
+    ] as const
+
+    for (const [selector, attribute, unsafeValue, safeValue] of mutations) {
+      let captureCalls = 0
+      const service = createService({
+        beforeAnalysisScreenshot: async (page, attempt) => {
+          captureCalls += 1
+          if (attempt !== 0) return
+          await page.locator(selector).evaluate((node, mutation) => {
+            if (mutation.attribute) node.setAttribute(mutation.attribute, mutation.value)
+            else node.textContent = mutation.value
+          }, { attribute, value: unsafeValue })
+        },
+        afterAnalysisScreenshot: async (page, attempt) => {
+          if (attempt !== 0) return
+          await page.locator(selector).evaluate((node, mutation) => {
+            if (mutation.attribute) {
+              if (mutation.value) node.setAttribute(mutation.attribute, mutation.value)
+              else node.removeAttribute(mutation.attribute)
+            } else node.textContent = mutation.value
+          }, { attribute, value: safeValue })
+        },
+      })
+      services.push(service)
+      const analysis = await service.analyze(`${fixture.origin}/analysis-owner-watchset`)
+      expect(captureCalls).toBe(2)
+      expect(await service.closeSession(analysis.sessionId, analysis.sessionToken)).toBe(true)
+    }
+
+    const stableService = createService()
+    services.push(stableService)
+    const stableAnalysis = await stableService.analyze(`${fixture.origin}/analysis-owner-watchset`)
+    const stableForm = stableAnalysis.capabilities.find(({ kind }) => kind === 'prepare_form')!
+    await expect(stableService.execute(
+      stableAnalysis.sessionId,
+      stableAnalysis.sessionToken,
+      stableForm.name,
+      stableForm.sampleInput,
+      undefined,
+      stableForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await stableService.closeSession(
+      stableAnalysis.sessionId,
+      stableAnalysis.sessionToken,
+    )).toBe(true)
+
+    let continuousCalls = 0
+    const continuouslyChanging = createService({
+      beforeAnalysisScreenshot: async (page) => {
+        continuousCalls += 1
+        await page.locator('#watch-form-reference').evaluate((node) => {
+          node.textContent = 'Payment reference'
+        })
+      },
+      afterAnalysisScreenshot: async (page) => {
+        await page.locator('#watch-form-reference').evaluate((node) => {
+          node.textContent = 'Neutral form reference'
+        })
+      },
+    })
+    services.push(continuouslyChanging)
+    await expect(continuouslyChanging.analyze(
+      `${fixture.origin}/analysis-owner-watchset`,
+    )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+    expect(continuousCalls).toBe(2)
+    expect(internalServiceState(continuouslyChanging)).toEqual({ sessions: 0, reservations: 0 })
+
+    let missingReferenceCaptureCalls = 0
+    const missingReference = createService({
+      beforeAnalysisScreenshot: async (page, attempt) => {
+        missingReferenceCaptureCalls += 1
+        if (attempt !== 0) return
+        await page.locator('#late-missing-owner-source').evaluate((node) => {
+          node.id = 'missing-owner-reference'
+          node.textContent = 'Payment reference'
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.locator('#late-missing-owner-source').evaluate((node) => {
+          node.removeAttribute('id')
+          node.textContent = 'Neutral late reference'
+        })
+      },
+    })
+    services.push(missingReference)
+    const missingAnalysis = await missingReference.analyze(
+      `${fixture.origin}/analysis-owner-watchset`,
+    )
+    expect(missingReferenceCaptureCalls).toBeGreaterThanOrEqual(1)
+    expect(missingReferenceCaptureCalls).toBeLessThanOrEqual(2)
+    const missingEvidence = missingAnalysis.domEvidence.filter(({ label }) =>
+      label === 'Missing owner value' || label === 'Missing owner detail')
+    expect(missingEvidence).toHaveLength(2)
+    expect(missingEvidence.every(({ sensitive }) => sensitive)).toBe(true)
+    expect(missingAnalysis.capabilities.every(({ evidenceIds }) => evidenceIds.every((id) =>
+      !missingEvidence.some((evidence) => evidence.id === id)))).toBe(true)
+    expect(JSON.stringify(missingAnalysis)).not.toContain('Payment reference')
+    const missingExternalOwnerEvidence = missingAnalysis.domEvidence.filter(({ label }) =>
+      label === 'Missing external owner value' || label === 'Missing external owner detail')
+    expect(missingExternalOwnerEvidence).toHaveLength(2)
+    expect(missingExternalOwnerEvidence.every(({ sensitive }) => sensitive)).toBe(true)
+    expect(missingAnalysis.capabilities.every(({ evidenceIds }) => evidenceIds.every((id) =>
+      !missingExternalOwnerEvidence.some((evidence) => evidence.id === id)))).toBe(true)
+  }, 90_000)
+
   it('retries viewport capture after main and nested scroll-out restoration while preserving stable pre-scroll', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -4945,6 +5152,129 @@ describe('WrapperProofService security boundaries', () => {
     })
     expect(captureCalls).toBe(2)
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('freezes CSS and Web Animations for the complete analysis capture and restores them afterwards', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const observations: Array<{ times: number[], opacities: number[] }> = []
+    const readAnimationState = async (page: Page) => page.evaluate(() => ({
+      times: document.getAnimations().map((animation) => Number(animation.currentTime ?? -1)),
+      opacities: ['css-animated-search', 'web-animated-search'].map((id) =>
+        Number(getComputedStyle(document.getElementById(id)!).opacity)),
+    }))
+    const service = createService({
+      beforeDomEvidenceCollection: async (page) => {
+        observations.push(await readAnimationState(page))
+      },
+      beforeAnalysisScreenshot: async (page) => {
+        await new Promise((resolve) => setTimeout(resolve, 120))
+        observations.push(await readAnimationState(page))
+      },
+      afterAnalysisScreenshot: async (page) => {
+        await new Promise((resolve) => setTimeout(resolve, 120))
+        observations.push(await readAnimationState(page))
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/analysis-animation-capture`)
+    expect(analysis.domEvidence.map(({ label }) => label)).toEqual([
+      'CSS animated search',
+      'Web animated search',
+      'Stable capture search',
+    ])
+    expect(observations).toHaveLength(3)
+    const initial = observations[0]
+    expect(initial.times).toHaveLength(2)
+    expect(observations.every(({ times }) => times.every((time, index) =>
+      Math.abs(time - initial.times[index]) < 1))).toBe(true)
+    expect(observations.every(({ opacities }) => opacities.every((opacity, index) =>
+      Math.abs(opacity - initial.opacities[index]) < 0.001))).toBe(true)
+
+    const session = internalSession(service, analysis.sessionId)
+    expect(await session.cdp.send('Animation.getPlaybackRate')).toMatchObject({ playbackRate: 1 })
+    const resumedAt = await readAnimationState(session.page)
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const resumedLater = await readAnimationState(session.page)
+    expect(resumedLater.times.some((time, index) => time > resumedAt.times[index] + 20)).toBe(true)
+
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'nested animation capture' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    const nestedObservations = observations.slice(3)
+    expect(nestedObservations).toHaveLength(3)
+    const nestedInitial = nestedObservations[0]
+    expect(nestedObservations.every(({ times }) => times.every((time, index) =>
+      Math.abs(time - nestedInitial.times[index]) < 1))).toBe(true)
+    expect(nestedObservations.every(({ opacities }) => opacities.every((opacity, index) =>
+      Math.abs(opacity - nestedInitial.opacities[index]) < 0.001))).toBe(true)
+    expect(await session.cdp.send('Animation.getPlaybackRate')).toMatchObject({ playbackRate: 1 })
+  }, 15_000)
+
+  it('restores a late animation-pause acquisition after a pre-action abort', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/paint-evidence-contract`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const session = internalSession(service, analysis.sessionId)
+    const originalSend = session.cdp.send.bind(session.cdp) as (
+      method: string,
+      params?: Record<string, unknown>,
+    ) => Promise<unknown>
+    let releaseAcquire!: () => void
+    let acquireReached!: () => void
+    const stalledAcquire = new Promise<void>((resolve) => { releaseAcquire = resolve })
+    const reachedAcquire = new Promise<void>((resolve) => { acquireReached = resolve })
+    let delayNextPause = true
+    ;(session.cdp as unknown as { send: typeof originalSend }).send = async (method, params) => {
+      if (
+        delayNextPause
+        && method === 'Animation.setPlaybackRate'
+        && params?.playbackRate === 0
+      ) {
+        delayNextPause = false
+        acquireReached()
+        await stalledAcquire
+      }
+      return originalSend(method, params)
+    }
+
+    const controller = new AbortController()
+    const pending = service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'aborted before pause acquisition' },
+      controller.signal,
+      search.id,
+    )
+    await reachedAcquire
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    let reuseSettled = false
+    const reuse = service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'usable while late cleanup is pending' },
+      undefined,
+      search.id,
+    ).finally(() => { reuseSettled = true })
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    expect(reuseSettled).toBe(false)
+    releaseAcquire()
+    await expect(reuse).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    await expect(originalSend('Animation.getPlaybackRate')).resolves.toMatchObject({ playbackRate: 1 })
+    expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
   })
 
   it('normalizes Unicode safety evidence identically and fails closed on late disguised terms', async () => {
@@ -6736,6 +7066,52 @@ describe('WrapperProofService security boundaries', () => {
       analysis.sessionToken,
       search.name,
       { query: 'painted again' },
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('requires bounded target paint evidence and rejects late transparency before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/paint-evidence-contract`)
+
+    expect(analysis.domEvidence.map(({ label }) => label)).toEqual([
+      'Painted custom search',
+      'Native painted search',
+      'Visible placeholder search',
+      'Visible text fill',
+      'OKLab painted search',
+      'Painted image link',
+    ])
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const page = internalSession(service, analysis.sessionId).page
+    expect(analysis.domEvidence.find(({ id }) => search.evidenceIds.includes(id))?.label)
+      .toBe('Painted custom search')
+
+    await page.locator('#painted-custom-search').evaluate((input) => {
+      ;(input as HTMLElement).style.border = '0'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'must remain unpainted' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#painted-custom-search').inputValue()).toBe('')
+
+    await page.locator('#painted-custom-search').evaluate((input) => {
+      ;(input as HTMLElement).style.border = '2px solid rgb(30, 90, 180)'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'painted control' },
       undefined,
       search.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
