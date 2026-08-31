@@ -1714,6 +1714,27 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/credential-code-safety') {
+      response.end(`<!doctype html><title>Project code safety</title>
+        <form id="sensitive-code-form">
+          <input id="sensitive-pin" type="text" name="reference_one" aria-label="P&#x200B;IN" value="opaque-alpha-111">
+          <input id="sensitive-otp" type="text" name="reference_two" aria-label="O&#x200B;TP" value="opaque-beta-222">
+          <input id="sensitive-verification-code" type="text" name="verificationCode" aria-label="Project reference" value="opaque-gamma-333">
+          <input id="sensitive-verification-codes" type="text" name="reference_four" aria-label="Verification_codes" value="opaque-delta-444">
+        </form>
+        <form id="neutral-code-boundary-form">
+          <input id="neutral-spin" type="text" name="spin_setting" aria-label="Spin setting">
+          <input id="neutral-pinot" type="text" name="pinot_note" aria-label="Pinot note">
+          <input id="neutral-verification-status" type="text" name="verification_status" aria-label="Verification status">
+          <input id="neutral-code-review" type="text" name="code_review" aria-label="Code review">
+        </form>
+        <form id="late-code-form">
+          <input id="late-code-one" type="text" name="project_reference" aria-label="Late project reference">
+          <input id="late-code-two" type="text" name="project_note" aria-label="Late project note">
+          <label id="late-code-label">Late project code<input id="late-code-three" type="text" name="project_code"></label>
+        </form>`)
+      return
+    }
     if (requestUrl === '/composed-accessible-safety') {
       response.end(`<!doctype html><title>Composed safety evidence</title>
         <span id="composed-api">API</span><span id="composed-keys">keys</span>
@@ -6885,6 +6906,81 @@ describe('WrapperProofService security boundaries', () => {
     )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(raceValuesBeforeWrite).toEqual(['', ''])
     expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('blocks normalized credential-code phrases without matching neutral word boundaries', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/credential-code-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    for (const label of ['P\u200bIN', 'O\u200bTP', 'Project reference', 'Verification_codes']) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
+    }
+    for (const label of ['Spin setting', 'Pinot note', 'Verification status', 'Code review']) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: false })
+    }
+    expect(JSON.stringify({
+      capabilities: analysis.capabilities,
+      domEvidence: analysis.domEvidence,
+      axEvidence: analysis.axEvidence,
+    })).not.toMatch(/opaque-(?:alpha-111|beta-222|gamma-333|delta-444)/)
+
+    const neutralEvidence = analysis.domEvidence.find(({ label }) => label === 'Spin setting')!
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidence.id))!
+    const neutralResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )
+    expect(neutralResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = neutralResult.analysis
+
+    const lateEvidence = analysis.domEvidence.find(({ label }) => label === 'Late project reference')!
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidence.id))!
+    await page.locator('#late-code-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'P\u200bIN')
+    })
+    await page.locator('#late-code-two').evaluate((input) => {
+      input.setAttribute('name', 'verificationCodes')
+    })
+    await page.locator('#late-code-label').evaluate((label) => {
+      label.firstChild!.textContent = 'Verification code'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-code-one').inputValue()).toBe('')
+    expect(await page.locator('#late-code-two').inputValue()).toBe('')
+    expect(await page.locator('#late-code-three').inputValue()).toBe('')
+
+    await page.locator('#late-code-one').evaluate((input) => {
+      input.setAttribute('aria-label', 'Late project reference')
+    })
+    await page.locator('#late-code-two').evaluate((input) => {
+      input.setAttribute('name', 'project_note')
+    })
+    await page.locator('#late-code-label').evaluate((label) => {
+      label.firstChild!.textContent = 'Late project code'
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
   it('classifies normalized card-verification tokens without matching neutral word substrings', async () => {
