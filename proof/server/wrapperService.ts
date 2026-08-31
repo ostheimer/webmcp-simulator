@@ -160,6 +160,8 @@ export interface WrapperProofServiceOptions {
   afterActionRecapture?: (page: Page) => Promise<void>
   /** Test-only hook for deterministic DOM drift while the action capture guard is being armed. */
   duringActionCaptureArm?: (page: Page) => Promise<void>
+  /** Test-only hook for deterministic failure after the preparation network lock is acquired. */
+  beforeActionStateCapture?: (page: Page) => Promise<void>
 }
 
 interface PendingActionEvidence {
@@ -5088,6 +5090,7 @@ export class WrapperProofService {
   private readonly beforeRadioGroupWrite?: (page: Page) => Promise<void>
   private readonly afterActionRecapture?: (page: Page) => Promise<void>
   private readonly duringActionCaptureArm?: (page: Page) => Promise<void>
+  private readonly beforeActionStateCapture?: (page: Page) => Promise<void>
 
   constructor(options: WrapperProofServiceOptions = {}) {
     this.resolveTarget = options.resolveTarget ?? resolvePublicTarget
@@ -5108,6 +5111,7 @@ export class WrapperProofService {
     this.beforeRadioGroupWrite = options.beforeRadioGroupWrite
     this.afterActionRecapture = options.afterActionRecapture
     this.duringActionCaptureArm = options.duringActionCaptureArm
+    this.beforeActionStateCapture = options.beforeActionStateCapture
   }
 
   private reserveAnalysisSlot(): void {
@@ -5856,6 +5860,11 @@ export class WrapperProofService {
     let pausedAnimations: PausedDocumentAnimations | null = null
     let actionCaptureGuard: Awaited<ReturnType<typeof createAnalysisCaptureGuard>> | null = null
     let actionCaptureBaseline: AnalysisCaptureGuardSnapshot | null = null
+    let preparationNetworkState: {
+      networkLocked: boolean
+      networkMode: SessionNetworkMode
+      activeNetworkMetrics: ActionNetworkMetrics | null
+    } | null = null
 
     try {
       await raceWithSignal(previous, signal)
@@ -5965,6 +5974,11 @@ export class WrapperProofService {
             409,
           )
         }
+        preparationNetworkState = {
+          networkLocked: session.networkLocked,
+          networkMode: session.networkMode,
+          activeNetworkMetrics: session.activeNetworkMetrics,
+        }
         session.networkLocked = true
         session.networkMode = 'blocked'
       }
@@ -5973,6 +5987,11 @@ export class WrapperProofService {
       let beforeActionTargetDigests: Map<number, string> | null
       try {
         if (capability.kind !== 'navigation') {
+          await raceWithSessionPolicy(
+            session,
+            this.beforeActionStateCapture?.(session.page) ?? Promise.resolve(),
+            signal,
+          )
           const animationPauseAcquisition = pauseDocumentAnimations(session.cdp)
           try {
             pausedAnimations = await raceWithSessionPolicy(
@@ -6182,6 +6201,16 @@ export class WrapperProofService {
       if (captureCleanupFailed || animationRestoreFailed) actionStarted = true
       const sessionExpired = error instanceof WrapperServiceError && error.code === 'session_expired'
       const explicitlyInvalidated = error instanceof WrapperServiceError && error.sessionInvalidated === true
+      if (
+        !actionStarted
+        && !sessionExpired
+        && !explicitlyInvalidated
+        && preparationNetworkState
+      ) {
+        session.networkLocked = preparationNetworkState.networkLocked
+        session.networkMode = preparationNetworkState.networkMode
+        session.activeNetworkMetrics = preparationNetworkState.activeNetworkMetrics
+      }
       if (actionStarted || sessionExpired || explicitlyInvalidated) {
         await this.destroySession(sessionId)
         await actionPromise?.catch(() => undefined)

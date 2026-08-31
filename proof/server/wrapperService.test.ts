@@ -2738,6 +2738,7 @@ function createService(options: {
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
   afterActionRecapture?: (page: Page) => Promise<void>
   duringActionCaptureArm?: (page: Page) => Promise<void>
+  beforeActionStateCapture?: (page: Page) => Promise<void>
 } = {}) {
   const resolveTarget = async (value: string): Promise<PublicTarget> => {
     const url = new URL(value)
@@ -2764,6 +2765,7 @@ function createService(options: {
     beforeRadioGroupWrite: options.beforeRadioGroupWrite,
     afterActionRecapture: options.afterActionRecapture,
     duringActionCaptureArm: options.duringActionCaptureArm,
+    beforeActionStateCapture: options.beforeActionStateCapture,
   })
 }
 
@@ -2780,6 +2782,9 @@ interface InternalProofSession {
   context: { newCDPSession: (page: Page) => Promise<CDPSession> }
   expiresAt: number
   createdAtMs: number
+  networkLocked: boolean
+  networkMode: string
+  activeNetworkMetrics: unknown
 }
 
 function internalSession(service: WrapperProofService, sessionId: string): InternalProofSession {
@@ -7615,6 +7620,74 @@ describe('WrapperProofService security boundaries', () => {
       (select) => (select as HTMLSelectElement).selectedIndex,
     )).toBe(0)
     expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
+  })
+
+  it('restores the preparation network state after a pre-action capture rejection', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureAttempts = 0
+    const service = createService({
+      beforeActionStateCapture: async () => {
+        captureAttempts += 1
+        if (captureAttempts === 1) throw new Error('test-only pre-action capture failure')
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/`)
+    const preparation = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      preparation.name,
+      preparation.sampleInput,
+      undefined,
+      preparation.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+
+    const preservedSession = internalSession(service, analysis.sessionId)
+    expect(preservedSession).toMatchObject({
+      networkLocked: false,
+      networkMode: 'blocked',
+      activeNetworkMetrics: null,
+    })
+    const navigationResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      navigation.name,
+      navigation.sampleInput,
+      undefined,
+      navigation.id,
+    )
+    expect(navigationResult).toMatchObject({
+      finalUrl: `${fixture.origin}/next`,
+      analysis: { sessionId: analysis.sessionId },
+      structuredContent: {
+        targetStateVerified: true,
+        navigationOccurred: true,
+      },
+    })
+
+    const retryPreparation = navigationResult.analysis.capabilities.find(
+      ({ name }) => name === 'prepare_page_search',
+    )!
+    const retryResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      retryPreparation.name,
+      retryPreparation.sampleInput,
+      undefined,
+      retryPreparation.id,
+    )
+    expect(retryResult.structuredContent).toMatchObject({
+      targetStateVerified: true,
+      navigationOccurred: false,
+      allowedNetworkRequests: 0,
+      blockedNetworkRequests: 0,
+    })
+    expect(internalSession(service, analysis.sessionId).activeNetworkMetrics).toBeNull()
+    expect(captureAttempts).toBe(2)
   })
 
   it('rejects intersecting dynamic paint while preserving unrelated visible actions', async () => {
