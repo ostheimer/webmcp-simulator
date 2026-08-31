@@ -326,11 +326,27 @@ export function handleAnalyzeRequest(
     504,
     'analysis_timeout',
   )
+  let acceptedSession: { sessionId: string, sessionToken: string } | undefined
+  let cleanupStarted = false
+  const cleanupAnalysisSession = (sessionId: string, sessionToken: string) => {
+    if (cleanupStarted) return
+    cleanupStarted = true
+    void backend.closeSession(sessionId, sessionToken).catch(() => undefined)
+  }
   const cleanupLateAnalysis = (value: unknown) => {
     if (!value || typeof value !== 'object') return
     const result = value as { sessionId?: unknown, sessionToken?: unknown }
     if (typeof result.sessionId !== 'string' || typeof result.sessionToken !== 'string') return
-    void backend.closeSession(result.sessionId, result.sessionToken).catch(() => undefined)
+    cleanupAnalysisSession(result.sessionId, result.sessionToken)
+  }
+  const assertAnalysisResponseAllowed = () => {
+    if (!deadlineReached() && !request.signal.aborted) return
+    operationController.abort()
+    if (acceptedSession) {
+      cleanupAnalysisSession(acceptedSession.sessionId, acceptedSession.sessionToken)
+    }
+    if (deadlineReached()) throw analysisTimeoutError()
+    throw requestAbortError()
   }
   return handle(async () => {
     try {
@@ -359,6 +375,12 @@ export function handleAnalyzeRequest(
           cleanupLateAnalysis(result)
           throw analysisTimeoutError()
         }
+        if (result && typeof result === 'object') {
+          const session = result as { sessionId?: unknown, sessionToken?: unknown }
+          if (typeof session.sessionId === 'string' && typeof session.sessionToken === 'string') {
+            acceptedSession = { sessionId: session.sessionId, sessionToken: session.sessionToken }
+          }
+        }
         return result
       } finally {
         activeAnalyses.delete(sourceId)
@@ -368,7 +390,7 @@ export function handleAnalyzeRequest(
       if (request.signal.aborted) throw requestAbortError()
       throw error
     }
-  }).finally(() => {
+  }, assertAnalysisResponseAllowed).finally(() => {
     clearTimeout(deadlineTimer)
     request.signal.removeEventListener('abort', onRequestAbort)
   })

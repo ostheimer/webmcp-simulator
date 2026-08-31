@@ -606,6 +606,89 @@ describe('production wrapper API boundaries', () => {
     expect(closeSession).toHaveBeenCalledWith('late-session-id', 'late-session-token')
   })
 
+  it('abandons and closes an analysis when the request is cancelled during response serialization', async () => {
+    const controller = new AbortController()
+    const closeSession = vi.fn(async () => true)
+    const sourceIp = '198.51.100.143'
+    const target = backend({
+      closeSession,
+      analyze: vi.fn(async () => ({
+        sessionId: 'cancelled-response-session',
+        sessionToken: 'cancelled-response-token',
+        toJSON() {
+          controller.abort()
+          return { ok: true }
+        },
+      })),
+    })
+
+    const response = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'analysis_response_cancel_1',
+      sourceIp,
+      signal: controller.signal,
+    }), target, { analysisTimeoutMs: 1_000 })
+
+    expect(response.status).toBe(499)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser operation was cancelled.',
+      code: 'cancelled',
+    })
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+    expect(closeSession).toHaveBeenCalledWith(
+      'cancelled-response-session',
+      'cancelled-response-token',
+    )
+    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'analysis_response_cancel_2',
+      sourceIp,
+    }), backend(), { analysisTimeoutMs: 1_000 })).status).toBe(200)
+  })
+
+  it('abandons and closes an analysis when its deadline expires during response serialization', async () => {
+    const closeSession = vi.fn(async () => true)
+    const sourceIp = '198.51.100.144'
+    const target = backend({
+      closeSession,
+      analyze: vi.fn(async () => ({
+        sessionId: 'deadline-response-session',
+        sessionToken: 'deadline-response-token',
+        toJSON() {
+          const stopAt = Date.now() + 20
+          while (Date.now() < stopAt) { /* deterministic synchronous response stall */ }
+          return { ok: true }
+        },
+      })),
+    })
+
+    const response = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'analysis_response_deadline_1',
+      sourceIp,
+    }), target, { analysisTimeoutMs: 5 })
+
+    expect(response.status).toBe(504)
+    expect(await response.json()).toEqual({
+      error: 'The isolated browser analysis exceeded its fixed time limit.',
+      code: 'analysis_timeout',
+    })
+    await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
+    expect(closeSession).toHaveBeenCalledWith(
+      'deadline-response-session',
+      'deadline-response-token',
+    )
+    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'analysis_response_deadline_2',
+      sourceIp,
+    }), backend(), { analysisTimeoutMs: 1_000 })).status).toBe(200)
+  })
+
   it('releases the source reservation after an aborted backend analysis', async () => {
     const controller = new AbortController()
     const analyze = vi.fn(async (_url: string, signal?: AbortSignal) => {

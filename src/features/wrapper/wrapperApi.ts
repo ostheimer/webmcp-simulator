@@ -37,23 +37,38 @@ function wrapperHeaders(): HeadersInit {
 }
 
 async function readResponse<T>(response: Response): Promise<T> {
-  const body = await response.json() as T & {
-    error?: unknown
-    code?: unknown
-    sessionInvalidated?: unknown
+  const rawBody = await response.text()
+  let parsedBody: unknown
+  try {
+    parsedBody = rawBody ? JSON.parse(rawBody) : undefined
+  } catch {
+    parsedBody = undefined
   }
+  const body = parsedBody && typeof parsedBody === 'object' && !Array.isArray(parsedBody)
+    ? parsedBody as {
+        error?: unknown
+        code?: unknown
+        sessionInvalidated?: unknown
+      }
+    : undefined
   if (!response.ok) {
     throw new WrapperApiError(
-      typeof body.error === 'string' ? body.error : `Wrapper request failed (${response.status}).`,
+      typeof body?.error === 'string' ? body.error : `Wrapper request failed (${response.status}).`,
       {
-        code: typeof body.code === 'string' ? body.code : undefined,
-        sessionInvalidated: typeof body.sessionInvalidated === 'boolean'
+        code: typeof body?.code === 'string' ? body.code : undefined,
+        sessionInvalidated: typeof body?.sessionInvalidated === 'boolean'
           ? body.sessionInvalidated
           : undefined,
       },
     )
   }
-  return body
+  if (!body) {
+    throw new WrapperApiError(
+      'The wrapper service returned an invalid response.',
+      { code: 'invalid_response' },
+    )
+  }
+  return body as T
 }
 
 export async function analyzeWebsiteInWrapper(url: string, signal?: AbortSignal): Promise<WrapperAnalysis> {

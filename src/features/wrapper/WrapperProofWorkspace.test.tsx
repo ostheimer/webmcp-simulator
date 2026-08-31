@@ -201,10 +201,9 @@ describe('WrapperProofWorkspace invalidation lifecycle', () => {
     expect(screen.getByText('Current isolated page')).toBeTruthy()
   })
 
-  it('retires tools when the action error lacks an explicit trusted non-mutating false', async () => {
+  it('retires tools after a sanitized platform failure without an explicit trusted false', async () => {
     executeWrapperAction.mockRejectedValue(new WrapperApiError(
-      'The action response did not prove whether the session survived.',
-      { code: 'internal_error' },
+      'Wrapper request failed (502).',
     ))
     render(<WrapperProofWorkspace analysis={analysis} onBack={vi.fn()} />)
     await waitFor(() => expect(registeredTool).toBeDefined())
@@ -220,6 +219,7 @@ describe('WrapperProofWorkspace invalidation lifecycle', () => {
     expect(closeWrapperSession).toHaveBeenCalledWith('session-current', 'token-current')
     expect(screen.queryByText('Current isolated page')).toBeNull()
     expect(screen.queryByText('prepare_page_search')).toBeNull()
+    expect(screen.getByText('Wrapper request failed (502).')).toBeTruthy()
   })
 
   it('retires exactly at the local deadline and blocks retained callbacks without a backend request', async () => {

@@ -230,6 +230,54 @@ async function startFixture(): Promise<Fixture> {
       response.end('<!doctype html><title>Blocked booking widget</title>')
       return
     }
+    if (requestUrl === '/late-non-network-subframe-boundary') {
+      response.end(`<!doctype html><title>Late non-network frame</title>
+        <style>body{margin:0}.main-paint{position:absolute;left:20px;top:20px;width:260px;height:90px;background:rgb(37,99,235)}</style>
+        <div class="main-paint">Main frame paint</div>`)
+      return
+    }
+    if (requestUrl.startsWith('/non-network-subframe-boundary')) {
+      const kind = new URL(requestUrl, 'http://fixture.invalid').searchParams.get('kind') ?? 'neutral'
+      const childDocument = `<!doctype html><style>
+        html,body{margin:0;width:100%;height:100%;background:rgb(220,38,38)}
+        #child-frame-marker{width:100%;height:100%;animation:child-paint 40ms linear infinite alternate}
+        @keyframes child-paint{from{background:rgb(220,38,38)}to{background:rgb(250,204,21)}}
+      </style><div id="child-frame-marker">Child frame paint</div>`
+      const encodedChildDocument = Buffer.from(childDocument).toString('base64')
+      const frameStyle = 'position:absolute;left:20px;top:20px;width:260px;height:90px;border:0;z-index:10'
+      const escapedSrcdoc = childDocument
+        .replaceAll('&', '&amp;')
+        .replaceAll('"', '&quot;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+      const frameMarkup = kind === 'data'
+        ? `<iframe style="${frameStyle}" src="data:text/html;base64,${encodedChildDocument}"></iframe>`
+        : kind === 'blob'
+          ? `<script>
+              const childFrame = document.createElement('iframe');
+              childFrame.style.cssText = ${JSON.stringify(frameStyle)};
+              childFrame.src = URL.createObjectURL(new Blob([atob(${JSON.stringify(encodedChildDocument)})], { type: 'text/html' }));
+              document.body.append(childFrame);
+            </script>`
+          : kind === 'srcdoc'
+            ? `<iframe style="${frameStyle}" srcdoc="${escapedSrcdoc}"></iframe>`
+            : kind === 'about'
+              ? `<iframe style="${frameStyle}" src="about:blank" onload="
+                  if (!this.dataset.written) {
+                    this.dataset.written = 'true';
+                    this.contentDocument.open();
+                    this.contentDocument.write(atob('${encodedChildDocument}'));
+                    this.contentDocument.close();
+                  }
+                "></iframe>`
+              : ''
+      response.end(`<!doctype html><title>Non-network subframe boundary</title>
+        <style>body{margin:0}.main-paint{position:absolute;left:20px;top:20px;width:260px;height:90px;background:rgb(37,99,235)}</style>
+        <div class="main-paint">Main frame paint</div>
+        <input type="search" aria-label="Main frame search" style="position:absolute;left:20px;top:130px;width:260px;height:36px">
+        ${frameMarkup}`)
+      return
+    }
     if (requestUrl === '/about-risk') {
       response.statusCode = 302
       response.setHeader('Location', '/purchase')
@@ -2612,6 +2660,7 @@ function createService(options: {
   beforeControlWrite?: (page: Page) => Promise<void>
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
   afterActionRecapture?: (page: Page) => Promise<void>
+  duringActionCaptureArm?: (page: Page) => Promise<void>
 } = {}) {
   const resolveTarget = async (value: string): Promise<PublicTarget> => {
     const url = new URL(value)
@@ -2637,6 +2686,7 @@ function createService(options: {
     beforeControlWrite: options.beforeControlWrite,
     beforeRadioGroupWrite: options.beforeRadioGroupWrite,
     afterActionRecapture: options.afterActionRecapture,
+    duringActionCaptureArm: options.duringActionCaptureArm,
   })
 }
 
@@ -7205,6 +7255,38 @@ describe('WrapperProofService security boundaries', () => {
     expect(internalServiceState(idPaintService)).toEqual({ sessions: 0, reservations: 0 })
   }, 15_000)
 
+  it('rejects existing sibling drift while the action-capture baseline is armed before any native write', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let armMutations = 0
+    const service = createService({
+      duringActionCaptureArm: async (page) => {
+        armMutations += 1
+        await page.locator('#semantic-css-filter').evaluate((sibling) => {
+          sibling.classList.add('action-capture-arm-drift')
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/visible-state-contract`)
+    const evidence = analysis.domEvidence.find(({ label }) => label === 'Visible result filter')!
+    const capability = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      capability.name,
+      capability.sampleInput,
+      undefined,
+      capability.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409, sessionInvalidated: false })
+    expect(armMutations).toBe(1)
+    expect(await internalSession(service, analysis.sessionId).page.locator('#visible-filter').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(0)
+    expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
+  })
+
   it('rejects intersecting dynamic paint while preserving unrelated visible actions', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -8958,6 +9040,70 @@ describe('WrapperProofService security boundaries', () => {
       search.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
+
+  it('removes non-network child frames before their DOM or pixels enter main-frame evidence', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const neutralService = createService()
+    services.push(neutralService)
+    const neutral = await neutralService.analyze(
+      `${fixture.origin}/non-network-subframe-boundary?kind=neutral`,
+    )
+    const neutralPage = internalSession(neutralService, neutral.sessionId).page
+    expect(neutralPage.frames()).toHaveLength(1)
+    expect(await neutralPage.locator('iframe, frame').count()).toBe(0)
+    expect(neutral.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+
+    for (const kind of ['data', 'blob', 'srcdoc', 'about'] as const) {
+      const service = createService()
+      services.push(service)
+      const analysis = await service.analyze(
+        `${fixture.origin}/non-network-subframe-boundary?kind=${kind}`,
+      )
+      const page = internalSession(service, analysis.sessionId).page
+      expect(page.frames(), kind).toHaveLength(1)
+      expect(await page.locator('iframe, frame').count(), kind).toBe(0)
+      expect(await page.locator('#child-frame-marker').count(), kind).toBe(0)
+      expect(analysis.screenshotDataUrl, kind).toBe(neutral.screenshotDataUrl)
+      expect(analysis.blockedRequests, kind).toBeGreaterThanOrEqual(1)
+      expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search'), kind).toBe(true)
+    }
+  }, 30_000)
+
+  it('retries capture when a non-network child frame attaches at the screenshot boundary', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const neutralService = createService()
+    services.push(neutralService)
+    const neutral = await neutralService.analyze(
+      `${fixture.origin}/late-non-network-subframe-boundary`,
+    )
+
+    let captureCalls = 0
+    const service = createService({
+      beforeAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          const frame = document.createElement('iframe')
+          frame.style.cssText = 'position:absolute;left:20px;top:20px;width:260px;height:90px;border:0;z-index:10;background:red'
+          frame.srcdoc = '<body style="margin:0;background:red"><div style="width:100vw;height:100vh;background:red">Child</div></body>'
+          document.body.append(frame)
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(
+      `${fixture.origin}/late-non-network-subframe-boundary`,
+    )
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(captureCalls).toBe(2)
+    expect(page.frames()).toHaveLength(1)
+    expect(await page.locator('iframe, frame').count()).toBe(0)
+    expect(analysis.screenshotDataUrl).toBe(neutral.screenshotDataUrl)
+    expect(analysis.blockedRequests).toBeGreaterThanOrEqual(1)
+  }, 15_000)
 
   it('rejects oversized target documents from headers and live chunk measurement', async () => {
     const fixture = await startFixture()

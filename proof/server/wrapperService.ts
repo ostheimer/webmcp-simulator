@@ -125,6 +125,8 @@ interface ProofSession {
   resolveTargetTrafficFailure: (error: WrapperServiceError) => void
   navigationPolicyError: WrapperServiceError | null
   mainFrameId: string
+  pendingSubframeBlocks: Set<Promise<void>>
+  subframeBoundaryCount: number
 }
 
 interface AxNode {
@@ -156,6 +158,8 @@ export interface WrapperProofServiceOptions {
   beforeControlWrite?: (page: Page) => Promise<void>
   /** Test-only hook for deterministic target-state drift immediately after action recapture. */
   afterActionRecapture?: (page: Page) => Promise<void>
+  /** Test-only hook for deterministic DOM drift while the action capture guard is being armed. */
+  duringActionCaptureArm?: (page: Page) => Promise<void>
 }
 
 interface PendingActionEvidence {
@@ -490,14 +494,16 @@ async function waitForNetworkQuiescence(
   timeoutMs = 4_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs
-  while (session.inFlightRequests.size > 0) {
+  while (session.inFlightRequests.size > 0 || session.pendingSubframeBlocks.size > 0) {
     if (session.targetTrafficError) throw session.targetTrafficError
     if (session.navigationPolicyError) throw session.navigationPolicyError
     if (Date.now() >= deadline) {
-      throw new Error('The page kept a network request open beyond the isolation deadline.')
+      throw new Error('The page did not reach the isolated loading boundary before the deadline.')
     }
     await raceWithSignal(waitFor(25), signal)
   }
+  if (session.targetTrafficError) throw session.targetTrafficError
+  if (session.navigationPolicyError) throw session.navigationPolicyError
 }
 
 async function raceWithSessionPolicy<T>(
@@ -3183,6 +3189,19 @@ function actionCaptureStayedStable(
     && after.topLayerSignature === before.topLayerSignature
 }
 
+function actionCaptureStartedClean(snapshot: AnalysisCaptureGuardSnapshot): boolean {
+  return !snapshot.overflow
+    && !snapshot.topLayerOverflow
+    && snapshot.documentIdMutationCount === 0
+    && snapshot.mutationCount === 0
+    && snapshot.navigationCount === 0
+    && !snapshot.scrollChanged
+    && !snapshot.scrollOverflow
+    && !snapshot.scrollStateMismatch
+    && snapshot.styleSheetChangeCount === 0
+    && snapshot.topLayerChangeCount === 0
+}
+
 async function createAnalysisCaptureGuard(
   context: BrowserContext,
   page: Page,
@@ -3192,6 +3211,7 @@ async function createAnalysisCaptureGuard(
     controlBackendNodeIds: number[],
     watchBackendNodeIds: number[],
     watchWholeDocument?: boolean,
+    duringArm?: () => Promise<void>,
   ) => Promise<void>
   screenshot: () => Promise<Buffer>
   stop: () => Promise<void>
@@ -3365,7 +3385,27 @@ async function createAnalysisCaptureGuard(
         topLayerOverflow,
       }
     },
-    arm: async (controlBackendNodeIds, watchBackendNodeIds, watchWholeDocument = false) => {
+    arm: async (controlBackendNodeIds, watchBackendNodeIds, watchWholeDocument = false, duringArm) => {
+      if (watchWholeDocument) {
+        const documentWatched = await cdp.send('Runtime.evaluate', {
+          expression: `(() => {
+            const state = globalThis[${JSON.stringify(storageKey)}];
+            if (!state?.observer || !document.documentElement) return false;
+            if (state.watched.includes(document.documentElement)) return true;
+            if (state.watched.length >= ${MAX_ANALYSIS_WATCH_NODES}) {
+              state.watchOverflow = true;
+              return false;
+            }
+            state.watched.push(document.documentElement);
+            return true;
+          })()`,
+          contextId: executionContextId,
+          returnByValue: true,
+        }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
+        if (documentWatched.exceptionDetails || documentWatched.result?.value !== true) {
+          throw new Error('The isolated analysis document could not be retained.')
+        }
+      }
       const retainBackendNode = async (backendNodeId: number, isControl: boolean) => {
         const resolved = await cdp.send('DOM.resolveNode', {
           backendNodeId,
@@ -3403,17 +3443,11 @@ async function createAnalysisCaptureGuard(
       for (const backendNodeId of watchBackendNodeIds) {
         await retainBackendNode(backendNodeId, false)
       }
+      await duringArm?.()
       const armed = await cdp.send('Runtime.evaluate', {
         expression: `(() => {
           const state = globalThis[${JSON.stringify(storageKey)}];
           if (!state?.observer) return false;
-          if (${JSON.stringify(watchWholeDocument)} && !state.watched.includes(document.documentElement)) {
-            if (state.watched.length >= ${MAX_ANALYSIS_WATCH_NODES}) {
-              state.watchOverflow = true;
-              return false;
-            }
-            state.watched.push(document.documentElement);
-          }
           const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get;
           const scrollingElementGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'scrollingElement')?.get;
           const scrollLeftGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')?.get;
@@ -4997,6 +5031,7 @@ export class WrapperProofService {
   private readonly beforeControlWrite?: (page: Page) => Promise<void>
   private readonly beforeRadioGroupWrite?: (page: Page) => Promise<void>
   private readonly afterActionRecapture?: (page: Page) => Promise<void>
+  private readonly duringActionCaptureArm?: (page: Page) => Promise<void>
 
   constructor(options: WrapperProofServiceOptions = {}) {
     this.resolveTarget = options.resolveTarget ?? resolvePublicTarget
@@ -5016,6 +5051,7 @@ export class WrapperProofService {
     this.beforeControlWrite = options.beforeControlWrite
     this.beforeRadioGroupWrite = options.beforeRadioGroupWrite
     this.afterActionRecapture = options.afterActionRecapture
+    this.duringActionCaptureArm = options.duringActionCaptureArm
   }
 
   private reserveAnalysisSlot(): void {
@@ -5166,6 +5202,72 @@ export class WrapperProofService {
     })
   }
 
+  private async removeAttachedSubframe(session: ProofSession, frameId: string): Promise<void> {
+    try {
+      const owner = await session.cdp.send('DOM.getFrameOwner', { frameId }) as {
+        backendNodeId?: number
+      }
+      if (!owner.backendNodeId) throw new Error('The isolated child-frame owner is unavailable.')
+      await session.cdp.send('DOM.getDocument', { depth: 0, pierce: true })
+      const pushed = await session.cdp.send('DOM.pushNodesByBackendIdsToFrontend', {
+        backendNodeIds: [owner.backendNodeId],
+      }) as { nodeIds?: number[] }
+      const nodeId = pushed.nodeIds?.[0]
+      if (!nodeId) throw new Error('The isolated child-frame owner could not be retained.')
+      await session.cdp.send('DOM.removeNode', { nodeId })
+    } catch (error) {
+      const tree = await session.cdp.send('Page.getFrameTree').catch(() => undefined) as {
+        frameTree?: {
+          frame?: { id?: string }
+          childFrames?: unknown[]
+        }
+      } | undefined
+      const containsFrame = (value: unknown): boolean => {
+        if (!value || typeof value !== 'object') return false
+        const node = value as {
+          frame?: { id?: string }
+          childFrames?: unknown[]
+        }
+        return node.frame?.id === frameId
+          || (node.childFrames ?? []).some((child) => containsFrame(child))
+      }
+      if (!containsFrame(tree?.frameTree)) return
+      throw error
+    }
+  }
+
+  private installSubframeBoundaryGuard(session: ProofSession): void {
+    session.cdp.on('Page.frameAttached', (rawEvent: unknown) => {
+      const event = rawEvent as { frameId?: string, parentFrameId?: string }
+      if (!event.frameId || !event.parentFrameId) return
+      session.subframeBoundaryCount = Math.min(
+        Number.MAX_SAFE_INTEGER,
+        session.subframeBoundaryCount + 1,
+      )
+      session.blockedRequests += 1
+      if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
+      const operation = this.removeAttachedSubframe(session, event.frameId)
+        .catch(() => {
+          if (session.navigationPolicyError) return
+          session.navigationPolicyError = session.networkMode === 'observing'
+            ? new WrapperServiceError(
+                'unsupported_page',
+                'This page could not be loaded safely in the isolated browser.',
+                422,
+              )
+            : new WrapperServiceError(
+                'invalid_action',
+                'The isolated page attached an unsupported child frame and was stopped.',
+                409,
+                { sessionInvalidated: true },
+              )
+          this.stopForPolicyFailure(session)
+        })
+      session.pendingSubframeBlocks.add(operation)
+      void operation.finally(() => session.pendingSubframeBlocks.delete(operation))
+    })
+  }
+
   private async closeExpiredSessions(): Promise<void> {
     const now = Date.now()
     await Promise.all([...this.sessions.values()]
@@ -5182,6 +5284,9 @@ export class WrapperProofService {
     let screenshot: Buffer | undefined
     let lastCaptureError: unknown
     for (let attempt = 0; attempt < MAX_ANALYSIS_CAPTURE_ATTEMPTS; attempt += 1) {
+      await session.cdp.send('Page.getFrameTree')
+      await waitForNetworkQuiescence(session)
+      const subframeBoundaryBefore = session.subframeBoundaryCount
       const guard = await createAnalysisCaptureGuard(session.context, session.page)
       let pausedAnimations: PausedDocumentAnimations | undefined
       let captureSucceeded = false
@@ -5211,6 +5316,8 @@ export class WrapperProofService {
           collectedDomEvidence.watchBackendNodeIds,
         )
         await this.beforeAnalysisScreenshot?.(session.page, attempt)
+        await session.cdp.send('Page.getFrameTree')
+        await waitForNetworkQuiescence(session)
         const candidateScreenshot = await guard.screenshot()
         await this.afterAnalysisScreenshot?.(session.page, attempt)
         const candidateAxEvidence = await collectAxEvidence(
@@ -5227,6 +5334,8 @@ export class WrapperProofService {
           candidateDomEvidence,
           session.cdp,
         )
+        await session.cdp.send('Page.getFrameTree')
+        await waitForNetworkQuiescence(session)
         const after = await guard.snapshot()
         if (
           after.overflow
@@ -5243,6 +5352,7 @@ export class WrapperProofService {
           || after.scrollOverflow
           || after.scrollStateMismatch
           || after.styleSheetChangeCount !== before.styleSheetChangeCount
+          || session.subframeBoundaryCount !== subframeBoundaryBefore
           || after.url !== before.url
           || after.title !== before.title
           || !isSameOriginHttpUrl(after.url, session.targetOrigin)
@@ -5486,6 +5596,7 @@ export class WrapperProofService {
       const page = await raceWithSignal(context.newPage(), signal)
       const cdp = await raceWithSignal(context.newCDPSession(page), signal)
       await raceWithSignal(cdp.send('Page.enable'), signal)
+      await raceWithSignal(cdp.send('DOM.enable'), signal)
       await raceWithSignal(cdp.send('Network.enable'), signal)
       const frameTree = await raceWithSignal(cdp.send('Page.getFrameTree'), signal) as {
         frameTree?: { frame?: { id?: string } }
@@ -5527,6 +5638,8 @@ export class WrapperProofService {
         resolveTargetTrafficFailure,
         navigationPolicyError: null,
         mainFrameId,
+        pendingSubframeBlocks: new Set(),
+        subframeBoundaryCount: 0,
       }
         releaseAnalysisReservation()
         this.sessions.set(id, session)
@@ -5538,6 +5651,7 @@ export class WrapperProofService {
         createdSessionId = id
       this.installTargetTrafficMonitor(session)
       this.installNavigationDocumentGuard(session)
+      this.installSubframeBoundaryGuard(session)
       cdp.on('Page.frameNavigated', (rawEvent: unknown) => {
         const event = rawEvent as { frame?: { id?: string, parentId?: string } }
         if (event.frame?.id && !event.frame.parentId) session.mainFrameId = event.frame.id
@@ -5766,7 +5880,14 @@ export class WrapperProofService {
           )
           await raceWithSessionPolicy(
             session,
-            actionCaptureGuard.arm(targetBackendNodeIds, [], true),
+            actionCaptureGuard.arm(
+              targetBackendNodeIds,
+              [],
+              true,
+              this.duringActionCaptureArm
+                ? () => this.duringActionCaptureArm!(session.page)
+                : undefined,
+            ),
             signal,
           )
           actionCaptureBaseline = await raceWithSessionPolicy(
@@ -5774,7 +5895,7 @@ export class WrapperProofService {
             actionCaptureGuard.snapshot(),
             signal,
           )
-          if (!actionCaptureStayedStable(actionCaptureBaseline, actionCaptureBaseline)) {
+          if (!actionCaptureStartedClean(actionCaptureBaseline)) {
             throw new Error('The isolated action capture started from an unsafe page state.')
           }
         } catch (error) {

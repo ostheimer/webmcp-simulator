@@ -85,4 +85,46 @@ describe('closeWrapperSession', () => {
       { query: 'x' },
     )).rejects.toMatchObject({ sessionInvalidated: undefined })
   })
+
+  it('sanitizes empty, HTML, and successful non-JSON platform responses', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('<html>private gateway detail</html>', {
+        status: 502,
+        headers: { 'Content-Type': 'text/html' },
+      }))
+      .mockResolvedValueOnce(new Response('', { status: 504 }))
+      .mockResolvedValueOnce(new Response('upstream success text', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(executeWrapperAction(
+      'session',
+      'token',
+      'capability-current',
+      'prepare_page_search',
+      { query: 'x' },
+    )).rejects.toMatchObject({
+      name: 'WrapperApiError',
+      message: 'Wrapper request failed (502).',
+      code: undefined,
+      sessionInvalidated: undefined,
+    })
+    await expect(executeWrapperAction(
+      'session',
+      'token',
+      'capability-current',
+      'prepare_page_search',
+      { query: 'x' },
+    )).rejects.toMatchObject({
+      name: 'WrapperApiError',
+      message: 'Wrapper request failed (504).',
+      code: undefined,
+      sessionInvalidated: undefined,
+    })
+    await expect(analyzeWebsiteInWrapper('https://public.example.at/')).rejects.toMatchObject({
+      name: 'WrapperApiError',
+      message: 'The wrapper service returned an invalid response.',
+      code: 'invalid_response',
+      sessionInvalidated: undefined,
+    })
+  })
 })

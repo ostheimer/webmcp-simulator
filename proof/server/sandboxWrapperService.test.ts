@@ -207,6 +207,7 @@ function createHarness(
   serviceOptions: {
     actionTimeoutMs?: number
     beforeActionReturn?: () => void | Promise<void>
+    now?: () => number
   } = {},
 ) {
   const sandbox = new FakeSandbox()
@@ -463,6 +464,45 @@ describe('SandboxWrapperService session boundaries', () => {
     expect(failed.sandbox.deleted).toBe(2)
   })
 
+  it('retries failed action cleanup without treating an unconfirmed deletion as complete', async () => {
+    const transient = createHarness()
+    const transientAnalysis = await transient.service.analyze('https://public.example.at')
+    transient.sandbox.commandError = new Error('unknown command failure')
+    transient.sandbox.deleteErrors.push(new Error('transient provider delete failure'))
+
+    await expect(transient.service.execute(
+      transientAnalysis.sessionId,
+      transientAnalysis.sessionToken,
+      'prepare_page_search',
+      { query: 'cleanup retry' },
+    )).rejects.toMatchObject({
+      code: 'action_failed',
+      sessionInvalidated: true,
+    })
+    expect(transient.sandbox.deleted).toBe(2)
+
+    const exhausted = createHarness()
+    const exhaustedAnalysis = await exhausted.service.analyze('https://public.example.at')
+    exhausted.sandbox.commandError = new Error('unknown command failure')
+    exhausted.sandbox.deleteErrors.push(
+      new Error('provider delete failure one'),
+      new Error('provider delete failure two'),
+      new Error('must remain unconsumed'),
+    )
+
+    await expect(exhausted.service.execute(
+      exhaustedAnalysis.sessionId,
+      exhaustedAnalysis.sessionToken,
+      'prepare_page_search',
+      { query: 'bounded cleanup retry' },
+    )).rejects.toMatchObject({
+      code: 'action_failed',
+      sessionInvalidated: true,
+    })
+    expect(exhausted.sandbox.deleted).toBe(2)
+    expect(exhausted.sandbox.deleteErrors).toHaveLength(1)
+  })
+
   it('does not return closed true when provider deletion stalls past the close deadline', async () => {
     const harness = createHarness()
     const analysis = await harness.service.analyze('https://public.example.at')
@@ -635,6 +675,63 @@ describe('SandboxWrapperService session boundaries', () => {
       'prepare_page_search',
       { query: 'must not appear valid' },
     )).rejects.toMatchObject({ code: 'session_expired' })
+  })
+
+  it('deletes and invalidates an action session that reaches its effective expiry before return', async () => {
+    let currentTimeMs = Date.parse('2026-08-30T10:00:00.000Z')
+    let outerExpiryMs = Number.POSITIVE_INFINITY
+    const harness = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      {
+        now: () => currentTimeMs,
+        beforeActionReturn: () => { currentTimeMs = outerExpiryMs },
+      },
+    )
+    const analysis = await harness.service.analyze('https://public.example.at')
+    outerExpiryMs = Date.parse(analysis.expiresAt)
+
+    await expect(harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'must not return expired activity' },
+    )).rejects.toMatchObject({
+      code: 'session_expired',
+      status: 410,
+      sessionInvalidated: true,
+      message: 'The isolated browser session expired. Analyze the site again.',
+    })
+    expect(harness.sandbox.deleted).toBe(1)
+  })
+
+  it('preserves a selected session-expired result while bounded cleanup crosses the action deadline', async () => {
+    let currentTimeMs = Date.parse('2026-08-30T10:00:00.000Z')
+    let outerExpiryMs = Number.POSITIVE_INFINITY
+    const harness = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      {
+        actionTimeoutMs: 20,
+        now: () => currentTimeMs,
+        beforeActionReturn: () => { currentTimeMs = outerExpiryMs },
+      },
+    )
+    const analysis = await harness.service.analyze('https://public.example.at')
+    outerExpiryMs = Date.parse(analysis.expiresAt)
+    const deleteGate = deferred<void>()
+    harness.sandbox.deleteGate = deleteGate.promise
+    setTimeout(() => deleteGate.resolve(), 60)
+
+    await expect(harness.service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      'prepare_page_search',
+      { query: 'preserve the selected expiry classification' },
+    )).rejects.toMatchObject({
+      code: 'session_expired',
+      status: 410,
+      sessionInvalidated: true,
+    })
+    expect(harness.sandbox.deleted).toBe(1)
   })
 
   it('enforces one absolute action deadline across reconnect, command, output, and return', async () => {

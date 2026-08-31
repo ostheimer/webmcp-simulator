@@ -414,8 +414,12 @@ export class SandboxWrapperService {
     const deleted = new WeakSet<object>()
     const deleteSandboxOnce = async (handle: SandboxHandle | undefined): Promise<void> => {
       if (!handle || deleted.has(handle)) return
-      deleted.add(handle)
-      await handle.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
+      try {
+        await deleteClosedSandbox(handle)
+        deleted.add(handle)
+      } catch {
+        // Cleanup is best-effort here; preserve the original analysis failure.
+      }
     }
     try {
       if (!this.snapshotId && !this.image) throw sandboxConfigurationError()
@@ -541,8 +545,12 @@ export class SandboxWrapperService {
     const deleted = new WeakSet<object>()
     const deleteSandboxOnce = async (handle: SandboxHandle | undefined): Promise<void> => {
       if (!handle || deleted.has(handle)) return
-      deleted.add(handle)
-      await handle.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
+      try {
+        await deleteClosedSandbox(handle)
+        deleted.add(handle)
+      } catch {
+        // Cleanup is best-effort here; preserve the original action failure.
+      }
     }
     try {
       const reconnectPromise = this.getExisting(
@@ -610,6 +618,14 @@ export class SandboxWrapperService {
         operationController.abort()
         throw sandboxAnalysisAbortError()
       }
+      if (this.now() >= expiresAtMs) {
+        throw new WrapperServiceError(
+          'session_expired',
+          'The isolated browser session expired. Analyze the site again.',
+          410,
+          { sessionInvalidated: true },
+        )
+      }
       return response
     } catch (error) {
       let timedOut = deadlineReached()
@@ -618,6 +634,10 @@ export class SandboxWrapperService {
         operationController.abort()
       }
       let externallyAborted = signal?.aborted === true
+      const selectedSessionExpiry = !timedOut
+        && !externallyAborted
+        && error instanceof WrapperServiceError
+        && error.code === 'session_expired'
       const nonMutating = !timedOut
         && !externallyAborted
         && isNonMutatingActionRejection(error)
@@ -626,6 +646,11 @@ export class SandboxWrapperService {
         if (!operationController.signal.aborted) {
           await raceSandboxOperation(cleanup, operationController.signal).catch(() => undefined)
         }
+      }
+      if (selectedSessionExpiry) {
+        throw new WrapperServiceError(error.code, error.message, error.status, {
+          sessionInvalidated: true,
+        })
       }
       timedOut = deadlineReached()
       externallyAborted = signal?.aborted === true
@@ -658,7 +683,7 @@ export class SandboxWrapperService {
     } catch (error) {
       if (error instanceof WrapperServiceError && error.code === 'invalid_capability') return false
       if (error instanceof WrapperServiceError && error.code === 'session_expired') return false
-      await sandbox?.delete({ deleteOrphanSnapshots: true }).catch(() => undefined)
+      if (sandbox) await deleteClosedSandbox(sandbox).catch(() => undefined)
       throw error
     }
     await deleteClosedSandbox(sandbox, signal)
