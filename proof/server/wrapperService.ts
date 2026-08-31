@@ -3310,14 +3310,17 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
   const stateKey = `__webmcp_native_transitions_${randomUUID().replaceAll('-', '')}`
   const recordKey = `__webmcp_native_record_${randomUUID().replaceAll('-', '')}`
   const internalsHostKey = `__webmcp_internals_host_${randomUUID().replaceAll('-', '')}`
+  const highlightRecordKey = `__webmcp_highlight_record_${randomUUID().replaceAll('-', '')}`
   const installed = await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
     runImmediately: true,
     source: `(() => {
       const stateKey = ${JSON.stringify(stateKey)};
       const recordKey = ${JSON.stringify(recordKey)};
       const internalsHostKey = ${JSON.stringify(internalsHostKey)};
+      const highlightRecordKey = ${JSON.stringify(highlightRecordKey)};
       if (Object.prototype.hasOwnProperty.call(globalThis, stateKey)) return;
       const getDescriptor = Object.getOwnPropertyDescriptor;
+      const getPrototypeOf = Object.getPrototypeOf;
       const defineProperty = Object.defineProperty;
       const apply = Reflect.apply;
       const isConnectedGetter = getDescriptor(Node.prototype, 'isConnected')?.get;
@@ -3465,6 +3468,62 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
           overflow = true;
         }
       };
+      const wrapPaintSetter = (prototype, property, recordTarget) => {
+        const descriptor = getDescriptor(prototype, property);
+        if (!descriptor || typeof descriptor.set !== 'function') {
+          overflow = true;
+          return;
+        }
+        const original = descriptor.set;
+        const wrapped = function(value) {
+          recordTarget(this);
+          return apply(original, this, [value]);
+        };
+        try {
+          defineProperty(prototype, property, { ...descriptor, configurable: false, set: wrapped });
+          bindings.push([prototype, property, 'set', wrapped]);
+        } catch {
+          overflow = true;
+        }
+      };
+      const wrapPaintMethod = (prototype, property, recordTarget) => {
+        const descriptor = getDescriptor(prototype, property);
+        if (!descriptor || typeof descriptor.value !== 'function') {
+          overflow = true;
+          return;
+        }
+        const original = descriptor.value;
+        const wrapped = function(...args) {
+          recordTarget(this);
+          return apply(original, this, args);
+        };
+        try {
+          defineProperty(prototype, property, { ...descriptor, configurable: false, value: wrapped });
+          bindings.push([prototype, property, 'value', wrapped]);
+        } catch {
+          overflow = true;
+        }
+      };
+      const wrapPaintSetterAround = (prototype, property, recordTarget) => {
+        const descriptor = getDescriptor(prototype, property);
+        if (!descriptor || typeof descriptor.set !== 'function') {
+          overflow = true;
+          return;
+        }
+        const original = descriptor.set;
+        const wrapped = function(value) {
+          recordTarget(this);
+          const result = apply(original, this, [value]);
+          recordTarget(this);
+          return result;
+        };
+        try {
+          defineProperty(prototype, property, { ...descriptor, configurable: false, set: wrapped });
+          bindings.push([prototype, property, 'set', wrapped]);
+        } catch {
+          overflow = true;
+        }
+      };
       wrapSetter(HTMLInputElement.prototype, 'value');
       wrapSetter(HTMLInputElement.prototype, 'checked');
       wrapSetter(HTMLInputElement.prototype, 'indeterminate');
@@ -3597,6 +3656,148 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
           apply(addEventListener, document, ['selectionchange', recordSelection, true]);
         } catch {
           overflow = true;
+        }
+      }
+      const highlightRegistry = globalThis.CSS?.highlights;
+      if (highlightRegistry) {
+        const highlightPrototype = getPrototypeOf(highlightRegistry);
+        const highlightValuePrototype = globalThis.Highlight?.prototype;
+        const registryRecorder = () => record();
+        try {
+          defineProperty(highlightRegistry, highlightRecordKey, {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            value: registryRecorder,
+          });
+          bindings.push([highlightRegistry, highlightRecordKey, 'value', registryRecorder]);
+        } catch {
+          overflow = true;
+        }
+        const recordHighlightRegistry = (registry) => {
+          try {
+            const recorder = registry?.[highlightRecordKey];
+            if (typeof recorder !== 'function') {
+              overflow = true;
+              return;
+            }
+            apply(recorder, registry, []);
+          } catch {
+            overflow = true;
+          }
+        };
+        const bindHighlightRecorder = (highlight, recorder) => {
+          try {
+            if (!highlight || typeof recorder !== 'function') {
+              overflow = true;
+              return;
+            }
+            const existing = highlight[highlightRecordKey];
+            if (existing === recorder) return;
+            if (existing !== undefined) {
+              overflow = true;
+              return;
+            }
+            defineProperty(highlight, highlightRecordKey, {
+              configurable: false,
+              enumerable: false,
+              writable: false,
+              value: recorder,
+            });
+          } catch {
+            overflow = true;
+          }
+        };
+        const recordHighlight = (highlight) => {
+          try {
+            const recorder = highlight?.[highlightRecordKey];
+            if (typeof recorder !== 'function') {
+              overflow = true;
+              return;
+            }
+            apply(recorder, highlight, []);
+          } catch {
+            overflow = true;
+          }
+        };
+        const setDescriptor = getDescriptor(highlightPrototype, 'set');
+        if (!setDescriptor || typeof setDescriptor.value !== 'function') {
+          overflow = true;
+        } else {
+          const originalSet = setDescriptor.value;
+          const wrappedSet = function(key, highlight) {
+            const recorder = this?.[highlightRecordKey];
+            bindHighlightRecorder(highlight, recorder);
+            recordHighlightRegistry(this);
+            return apply(originalSet, this, [key, highlight]);
+          };
+          try {
+            defineProperty(highlightPrototype, 'set', {
+              ...setDescriptor,
+              configurable: false,
+              value: wrappedSet,
+            });
+            bindings.push([highlightPrototype, 'set', 'value', wrappedSet]);
+          } catch {
+            overflow = true;
+          }
+        }
+        for (const property of ['delete', 'clear']) {
+          wrapPaintMethod(highlightPrototype, property, recordHighlightRegistry);
+        }
+        if (!highlightValuePrototype) {
+          overflow = true;
+        } else {
+          for (const property of ['add', 'delete', 'clear']) {
+            wrapPaintMethod(highlightValuePrototype, property, recordHighlight);
+          }
+          for (const property of ['priority', 'type']) {
+            wrapPaintSetter(highlightValuePrototype, property, recordHighlight);
+          }
+        }
+      }
+      const animationPrototype = globalThis.Animation?.prototype;
+      const animationEffectPrototype = globalThis.AnimationEffect?.prototype;
+      const keyframeEffectPrototype = globalThis.KeyframeEffect?.prototype;
+      if (!animationPrototype || !animationEffectPrototype || !keyframeEffectPrototype) {
+        overflow = true;
+      } else {
+        const effectGetter = getDescriptor(animationPrototype, 'effect')?.get;
+        const targetGetter = getDescriptor(keyframeEffectPrototype, 'target')?.get;
+        if (typeof effectGetter !== 'function' || typeof targetGetter !== 'function') {
+          overflow = true;
+        } else {
+          const recordEffectTarget = (effect) => {
+            try {
+              const target = effect && apply(targetGetter, effect, []);
+              if (target) recordConnected(target);
+            } catch {
+              overflow = true;
+            }
+          };
+          const recordAnimationTarget = (animation) => {
+            try {
+              const effect = apply(effectGetter, animation, []);
+              recordEffectTarget(effect);
+            } catch {
+              overflow = true;
+            }
+          };
+          wrapPaintSetter(animationPrototype, 'currentTime', recordAnimationTarget);
+          wrapPaintSetter(animationPrototype, 'playbackRate', recordAnimationTarget);
+          for (const property of ['startTime', 'timeline', 'rangeStart', 'rangeEnd']) {
+            wrapPaintSetter(animationPrototype, property, recordAnimationTarget);
+          }
+          wrapPaintSetterAround(animationPrototype, 'effect', recordAnimationTarget);
+          wrapPaintMethod(animationPrototype, 'updatePlaybackRate', recordAnimationTarget);
+          for (const property of ['cancel', 'finish', 'pause', 'play', 'reverse']) {
+            wrapPaintMethod(animationPrototype, property, recordAnimationTarget);
+          }
+          wrapPaintMethod(animationEffectPrototype, 'updateTiming', recordEffectTarget);
+          wrapPaintMethod(keyframeEffectPrototype, 'setKeyframes', recordEffectTarget);
+          wrapPaintSetterAround(keyframeEffectPrototype, 'target', recordEffectTarget);
+          wrapPaintSetter(keyframeEffectPrototype, 'composite', recordEffectTarget);
+          wrapPaintSetter(keyframeEffectPrototype, 'pseudoElement', recordEffectTarget);
         }
       }
       const dispatchDescriptor = getDescriptor(EventTarget.prototype, 'dispatchEvent');
@@ -4359,20 +4560,28 @@ async function createAnalysisCaptureGuard(
         nativeStateControlsOverflow: false,
         scrollNodes: [],
         scrollBaselines: [],
+        dynamicScrollEntries: [],
+        dynamicScrollBaselines: [],
+        dynamicScrollRoots: [],
         pendingScrollTargets: [],
         scrollChanged: false,
         scrollOverflow: false,
         scrollArmed: false,
         documentScrollListener: null,
         windowScrollListener: null,
+        addEventListener: null,
+        removeEventListener: null,
       };
       const Observer = globalThis.MutationObserver;
       const addEventListener = EventTarget.prototype.addEventListener;
+      const removeEventListener = EventTarget.prototype.removeEventListener;
       const getBoundingClientRect = Element.prototype.getBoundingClientRect;
+      const contains = Node.prototype.contains;
       const focusState = globalThis[${JSON.stringify(FOCUS_CHANGE_STATE_KEY)}];
       if (
         typeof Observer !== 'function'
         || typeof addEventListener !== 'function'
+        || typeof removeEventListener !== 'function'
         || typeof getBoundingClientRect !== 'function'
         || !document.documentElement
         || focusState?.version !== 1
@@ -4380,7 +4589,53 @@ async function createAnalysisCaptureGuard(
         || focusState.count < 0
         || focusState.count >= Number.MAX_SAFE_INTEGER
       ) return false;
+      state.addEventListener = addEventListener;
+      state.removeEventListener = removeEventListener;
       state.focusStartCount = focusState.count;
+      const clippedRect = (element) => {
+        const rect = getBoundingClientRect.call(element);
+        const left = Math.max(0, Number(rect.left));
+        const top = Math.max(0, Number(rect.top));
+        const right = Math.min(${CAPTURE_VIEWPORT_WIDTH}, Number(rect.right));
+        const bottom = Math.min(${CAPTURE_VIEWPORT_HEIGHT}, Number(rect.bottom));
+        if (
+          !Number.isFinite(left)
+          || !Number.isFinite(top)
+          || !Number.isFinite(right)
+          || !Number.isFinite(bottom)
+          || right <= left
+          || bottom <= top
+        ) return null;
+        return { left, top, right, bottom };
+      };
+      const intersectsDynamicTarget = (source) => {
+        const sourceRect = clippedRect(source);
+        if (!sourceRect) return false;
+        return state.dynamicTargets.some((target) => {
+          const targetRect = clippedRect(target);
+          return targetRect
+            && sourceRect.left < targetRect.right
+            && sourceRect.right > targetRect.left
+            && sourceRect.top < targetRect.bottom
+            && sourceRect.bottom > targetRect.top;
+        });
+      };
+      const recordDynamicSourceScroll = (target) => {
+        const affectedSources = state.dynamicScrollEntries
+          .filter(([node]) => node === target)
+          .map(([, source]) => source);
+        if (affectedSources.length === 0) return;
+        state.dynamicMutationChecks += affectedSources.length;
+        if (state.dynamicMutationChecks > ${MAX_CAPTURE_NATIVE_TRANSITIONS}) {
+          state.watchOverflow = true;
+          return;
+        }
+        try {
+          if (affectedSources.some(intersectsDynamicTarget)) state.mutationCount = 1;
+        } catch {
+          state.watchOverflow = true;
+        }
+      };
       const recordScroll = (event) => {
         const target = event?.target;
         if (state.scrollArmed) {
@@ -4389,6 +4644,7 @@ async function createAnalysisCaptureGuard(
             || target === document
             || state.scrollNodes.some((node) => node === target)
           ) state.scrollChanged = true;
+          else recordDynamicSourceScroll(target);
           return;
         }
         if (!target || state.pendingScrollTargets.some((node) => node === target)) return;
@@ -4403,35 +4659,6 @@ async function createAnalysisCaptureGuard(
       addEventListener.call(document, 'scroll', state.documentScrollListener, true);
       addEventListener.call(globalThis, 'scroll', state.windowScrollListener, true);
       state.observer = new Observer((records) => {
-        const contains = Node.prototype.contains;
-        const clippedRect = (element) => {
-          const rect = getBoundingClientRect.call(element);
-          const left = Math.max(0, Number(rect.left));
-          const top = Math.max(0, Number(rect.top));
-          const right = Math.min(${CAPTURE_VIEWPORT_WIDTH}, Number(rect.right));
-          const bottom = Math.min(${CAPTURE_VIEWPORT_HEIGHT}, Number(rect.bottom));
-          if (
-            !Number.isFinite(left)
-            || !Number.isFinite(top)
-            || !Number.isFinite(right)
-            || !Number.isFinite(bottom)
-            || right <= left
-            || bottom <= top
-          ) return null;
-          return { left, top, right, bottom };
-        };
-        const intersectsDynamicTarget = (source) => {
-          const sourceRect = clippedRect(source);
-          if (!sourceRect) return false;
-          return state.dynamicTargets.some((target) => {
-            const targetRect = clippedRect(target);
-            return targetRect
-              && sourceRect.left < targetRect.right
-              && sourceRect.right > targetRect.left
-              && sourceRect.top < targetRect.bottom
-              && sourceRect.bottom > targetRect.top;
-          });
-        };
         for (const record of records) {
           if (record.type === 'attributes' && record.attributeName === 'id') {
             state.documentIdMutationCount = Math.min(
@@ -4783,7 +5010,6 @@ async function createAnalysisCaptureGuard(
       for (const backendNodeId of dynamicTargetBackendNodeIds) {
         await retainBackendNode(backendNodeId, true, false, true)
       }
-      await duringArm?.()
       const armed = await cdp.send('Runtime.evaluate', {
         expression: `(() => {
           const state = globalThis[${JSON.stringify(storageKey)}];
@@ -4792,7 +5018,18 @@ async function createAnalysisCaptureGuard(
           const scrollingElementGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'scrollingElement')?.get;
           const scrollLeftGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')?.get;
           const scrollTopGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')?.get;
-          if (!parentElementGetter || !scrollingElementGetter || !scrollLeftGetter || !scrollTopGetter) {
+          const getRootNode = Node.prototype.getRootNode;
+          const shadowHostGetter = globalThis.ShadowRoot
+            ? Object.getOwnPropertyDescriptor(ShadowRoot.prototype, 'host')?.get
+            : undefined;
+          if (
+            !parentElementGetter
+            || !scrollingElementGetter
+            || !scrollLeftGetter
+            || !scrollTopGetter
+            || typeof getRootNode !== 'function'
+            || typeof state.addEventListener !== 'function'
+          ) {
             state.scrollOverflow = true;
             return false;
           }
@@ -4803,6 +5040,33 @@ async function createAnalysisCaptureGuard(
               return;
             }
             state.scrollNodes.push(node);
+          };
+          const nextScrollAncestor = (node) => {
+            const parent = parentElementGetter.call(node);
+            if (parent instanceof Element) return parent;
+            const root = getRootNode.call(node);
+            if (!root || root === document) return null;
+            if (!shadowHostGetter) {
+              state.scrollOverflow = true;
+              return null;
+            }
+            try {
+              return shadowHostGetter.call(root);
+            } catch {
+              state.scrollOverflow = true;
+              return null;
+            }
+          };
+          const pushDynamicScrollEntry = (node, source) => {
+            if (!(node instanceof Element) || !(source instanceof Element)) return;
+            if (state.scrollNodes.includes(node)) return;
+            if (state.dynamicScrollEntries.some(([entryNode, entrySource]) =>
+              entryNode === node && entrySource === source)) return;
+            if (state.dynamicScrollEntries.length >= ${MAX_ANALYSIS_SCROLL_NODES}) {
+              state.scrollOverflow = true;
+              return;
+            }
+            state.dynamicScrollEntries.push([node, source]);
           };
           pushScrollNode(scrollingElementGetter.call(document));
           for (const control of state.controls.slice(0, ${WRAPPER_MAX_DOM_EVIDENCE})) {
@@ -4819,7 +5083,28 @@ async function createAnalysisCaptureGuard(
             }
             if (current instanceof Element) state.scrollOverflow = true;
           }
+          let dynamicScrollSteps = 0;
+          for (const source of state.dynamicSources) {
+            let current = source;
+            while (current instanceof Element && !state.scrollOverflow) {
+              dynamicScrollSteps += 1;
+              if (dynamicScrollSteps > ${MAX_ANALYSIS_SCROLL_NODES}) {
+                state.scrollOverflow = true;
+                break;
+              }
+              pushDynamicScrollEntry(current, source);
+              current = nextScrollAncestor(current);
+            }
+          }
           state.scrollBaselines = state.scrollNodes.map((node) => [
+            node,
+            Number(scrollLeftGetter.call(node)),
+            Number(scrollTopGetter.call(node)),
+          ]);
+          const dynamicScrollNodes = state.dynamicScrollEntries
+            .map(([node]) => node)
+            .filter((node, index, nodes) => nodes.indexOf(node) === index);
+          state.dynamicScrollBaselines = dynamicScrollNodes.map((node) => [
             node,
             Number(scrollLeftGetter.call(node)),
             Number(scrollTopGetter.call(node)),
@@ -4827,11 +5112,16 @@ async function createAnalysisCaptureGuard(
           if (state.scrollBaselines.some(([, left, top]) => !Number.isFinite(left) || !Number.isFinite(top))) {
             state.scrollOverflow = true;
           }
-          if (state.pendingScrollTargets.some((target) =>
-            target === globalThis
-            || target === document
-            || state.scrollNodes.some((node) => node === target)
-          )) state.scrollChanged = true;
+          if (state.dynamicScrollBaselines.some(([, left, top]) =>
+            !Number.isFinite(left) || !Number.isFinite(top))) state.scrollOverflow = true;
+          for (const target of state.pendingScrollTargets) {
+            if (
+              target === globalThis
+              || target === document
+              || state.scrollNodes.some((node) => node === target)
+            ) state.scrollChanged = true;
+            else recordDynamicSourceScroll(target);
+          }
           state.pendingScrollTargets = [];
           state.scrollArmed = true;
           state.ignoredNativeStateControls = [];
@@ -4844,9 +5134,7 @@ async function createAnalysisCaptureGuard(
               attributes: true,
             };
             state.observer.observe(document.documentElement, observerOptions);
-            const getRootNode = Node.prototype.getRootNode;
             const observedRoots = [];
-            if (typeof getRootNode !== 'function') return false;
             for (const watched of state.dynamicSources) {
               const root = getRootNode.call(watched);
               if (!root || root === document || observedRoots.includes(root)) continue;
@@ -4856,6 +5144,8 @@ async function createAnalysisCaptureGuard(
               }
               observedRoots.push(root);
               state.observer.observe(root, observerOptions);
+              state.addEventListener.call(root, 'scroll', state.documentScrollListener, true);
+              state.dynamicScrollRoots.push(root);
             }
           }
           return true;
@@ -4866,6 +5156,7 @@ async function createAnalysisCaptureGuard(
       if (armed.exceptionDetails || armed.result?.value !== true) {
         throw new Error('The isolated analysis mutation guard could not be armed.')
       }
+      await duringArm?.()
     },
     maskBoundControlStates: async (expectedFullSignature) => {
       await refreshNativeStateControls()
@@ -4979,12 +5270,17 @@ async function createAnalysisCaptureGuard(
         expression: `(() => {
           const state = globalThis[${JSON.stringify(storageKey)}];
           state?.observer?.disconnect();
-          const removeEventListener = EventTarget.prototype.removeEventListener;
+          const removeEventListener = state?.removeEventListener;
           if (state?.documentScrollListener && typeof removeEventListener === 'function') {
             removeEventListener.call(document, 'scroll', state.documentScrollListener, true);
           }
           if (state?.windowScrollListener && typeof removeEventListener === 'function') {
             removeEventListener.call(globalThis, 'scroll', state.windowScrollListener, true);
+          }
+          if (state?.documentScrollListener && typeof removeEventListener === 'function') {
+            for (const root of state.dynamicScrollRoots ?? []) {
+              removeEventListener.call(root, 'scroll', state.documentScrollListener, true);
+            }
           }
           delete globalThis[${JSON.stringify(storageKey)}];
         })()`,
@@ -7479,11 +7775,14 @@ export class WrapperProofService {
           if (targetBackendNodeIds.length === 0) {
             throw new Error('The isolated action has no visible target binding.')
           }
-          await raceWithSessionPolicy(
+          const dynamicPaint = await raceWithSessionPolicy(
             session,
-            assertNoDynamicPaintIntersectsTargets(session.cdp, targetBackendNodeIds),
+            inspectDynamicPaintIntersections(session.cdp, targetBackendNodeIds),
             signal,
           )
+          if (dynamicPaint.intersectingTargetBackendNodeIds.size > 0) {
+            throw new Error('The isolated action target overlaps an unfreezable paint source.')
+          }
           actionCaptureGuard = await raceWithSessionPolicy(
             session,
             createAnalysisCaptureGuard(
@@ -7502,6 +7801,8 @@ export class WrapperProofService {
               this.duringActionCaptureArm
                 ? () => this.duringActionCaptureArm!(session.page)
                 : undefined,
+              dynamicPaint.sourceBackendNodeIds,
+              targetBackendNodeIds,
             ),
             signal,
           )

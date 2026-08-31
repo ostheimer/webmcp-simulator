@@ -2420,6 +2420,10 @@ async function startFixture(): Promise<Fixture> {
             { duration: 10000, iterations: Infinity },
           );
           animation.id = 'web-opacity-animation';
+          const animationFrame = document.createElement('iframe');
+          document.body.append(animationFrame);
+          globalThis.__foreignAnimationCancelForTest = animationFrame.contentWindow.Animation.prototype.cancel;
+          animationFrame.remove();
         </script>`)
       return
     }
@@ -2543,6 +2547,68 @@ async function startFixture(): Promise<Fixture> {
           const target = document.getElementById('selection-paint-target');
           target.focus({ preventScroll: true });
           target.setSelectionRange(0, 0, 'none');
+        </script>`)
+      return
+    }
+    if (requestUrl === '/custom-highlight-paint-contract') {
+      response.end(`<!doctype html><title>Custom highlight paint contract</title>
+        <style>::highlight(webmcp-proof-highlight) { background: rgb(220, 38, 38); color: white; }</style>
+        <p id="highlight-paint-source">Transient custom highlight paint source</p>
+        <input id="highlight-paint-search" type="search" aria-label="Highlight paint search">
+        <script>
+          const range = new Range();
+          range.selectNodeContents(document.getElementById('highlight-paint-source'));
+          globalThis.__highlightPaintForTest = new Highlight(range);
+          globalThis.__highlightRangeForTest = range;
+          globalThis.__highlightMembershipForTest = new Highlight();
+          CSS.highlights.set('webmcp-proof-filled', globalThis.__highlightPaintForTest);
+          CSS.highlights.set('webmcp-proof-membership', globalThis.__highlightMembershipForTest);
+          const highlightFrame = document.createElement('iframe');
+          document.body.append(highlightFrame);
+          globalThis.__foreignHighlightAddForTest = highlightFrame.contentWindow.Highlight.prototype.add;
+          highlightFrame.remove();
+        </script>`)
+      return
+    }
+    if (requestUrl === '/dynamic-scroll-paint-contract') {
+      response.end(`<!doctype html><title>Dynamic scroll paint contract</title>
+        <style>
+          .paint-scroll-shell { position:absolute;width:220px;height:36px;overflow:auto;pointer-events:none; }
+          .paint-scroll-shell::-webkit-scrollbar { display:none; }
+          .paint-scroll-content { position:relative;width:480px;height:36px; }
+          .paint-scroll-source { position:absolute;left:260px;top:0;width:220px;height:36px;z-index:6; }
+        </style>
+        <input id="dynamic-scroll-target" type="search" aria-label="Dynamic scroll target" style="position:absolute;left:20px;top:140px;width:220px;height:36px;z-index:5">
+        <div id="dynamic-scroll-shell" class="paint-scroll-shell" style="left:20px;top:140px">
+          <div class="paint-scroll-content"><canvas id="dynamic-scroll-source" class="paint-scroll-source" width="220" height="36"></canvas></div>
+        </div>
+        <input id="neutral-scroll-target" type="text" aria-label="Neutral scroll target" style="position:absolute;left:20px;top:220px;width:220px;height:36px">
+        <div id="neutral-scroll-shell" class="paint-scroll-shell" style="left:20px;top:20px">
+          <div class="paint-scroll-content"><canvas id="neutral-scroll-source" class="paint-scroll-source" width="220" height="36"></canvas></div>
+        </div>
+        <script>
+          for (const id of ['dynamic-scroll-source', 'neutral-scroll-source']) {
+            const canvas = document.getElementById(id);
+            const context = canvas.getContext('2d');
+            context.fillStyle = id.startsWith('dynamic') ? '#dc2626' : '#2563eb';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+          }
+        </script>`)
+      return
+    }
+    if (requestUrl === '/closed-dynamic-scroll-paint-contract') {
+      response.end(`<!doctype html><title>Closed dynamic scroll paint contract</title>
+        <input id="closed-dynamic-scroll-target" type="search" aria-label="Closed dynamic scroll target" style="position:absolute;left:20px;top:140px;width:220px;height:36px;z-index:5">
+        <div id="closed-dynamic-scroll-host" style="position:absolute;left:20px;top:140px;width:220px;height:36px;pointer-events:none"></div>
+        <script>
+          const closedRoot = document.getElementById('closed-dynamic-scroll-host').attachShadow({ mode: 'closed' });
+          closedRoot.innerHTML = '<style>.shell{width:220px;height:36px;overflow:auto;scrollbar-width:none}.shell::-webkit-scrollbar{display:none}.content{position:relative;width:480px;height:36px}canvas{position:absolute;left:260px;top:0;width:220px;height:36px;z-index:6}</style><div class="shell"><div class="content"><canvas width="220" height="36"></canvas></div></div>';
+          const closedShell = closedRoot.querySelector('.shell');
+          const closedCanvas = closedRoot.querySelector('canvas');
+          const closedContext = closedCanvas.getContext('2d');
+          closedContext.fillStyle = '#9333ea';
+          closedContext.fillRect(0, 0, closedCanvas.width, closedCanvas.height);
+          globalThis.__closedDynamicScrollShellForTest = closedShell;
         </script>`)
       return
     }
@@ -6420,6 +6486,512 @@ describe('WrapperProofService security boundaries', () => {
       `${fixture.origin}/selection-paint-contract?kind=input`,
     )).rejects.toMatchObject({ code: 'unsupported_page' })
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('retries analysis when a retained dynamic source scrolls across a target and restores', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.locator('#dynamic-scroll-shell').evaluate(async (shell) => {
+          shell.scrollLeft = 260
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.locator('#dynamic-scroll-shell').evaluate(async (shell) => {
+          shell.scrollLeft = 0
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/dynamic-scroll-paint-contract`)
+
+    expect(analysis.domEvidence.map(({ label }) => label)).toContain('Dynamic scroll target')
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it('allows unrelated dynamic-source scrolling that never intersects a retained target', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page) => {
+        captureCalls += 1
+        await page.locator('#neutral-scroll-shell').evaluate(async (shell) => {
+          shell.scrollLeft = shell.scrollLeft === 0 ? 260 : 0
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/dynamic-scroll-paint-contract`)
+
+    expect(analysis.domEvidence.map(({ label }) => label)).toContain('Dynamic scroll target')
+    expect(captureCalls).toBe(1)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it('invalidates an action after transient dynamic-source scroll paint', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringActionScreenshot: async (page) => {
+        await page.locator('#dynamic-scroll-shell').evaluate(async (shell) => {
+          shell.scrollLeft = 260
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        })
+      },
+      afterActionScreenshot: async (page) => {
+        await page.locator('#dynamic-scroll-shell').evaluate(async (shell) => {
+          shell.scrollLeft = 0
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/dynamic-scroll-paint-contract`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('retries analysis when a retained closed-shadow dynamic source scrolls across a target', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(async () => {
+          const shell = (globalThis as typeof globalThis & {
+            __closedDynamicScrollShellForTest: HTMLElement
+          }).__closedDynamicScrollShellForTest
+          shell.scrollLeft = 260
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate(async () => {
+          const shell = (globalThis as typeof globalThis & {
+            __closedDynamicScrollShellForTest: HTMLElement
+          }).__closedDynamicScrollShellForTest
+          shell.scrollLeft = 0
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/closed-dynamic-scroll-paint-contract`)
+
+    expect(analysis.domEvidence.map(({ label }) => label)).toContain('Closed dynamic scroll target')
+    expect(captureCalls).toBe(2)
+  })
+
+  it('rejects closed-shadow dynamic-source scrolling while an action guard is armed', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringActionCaptureArm: async (page) => {
+        await page.evaluate(async () => {
+          const shell = (globalThis as typeof globalThis & {
+            __closedDynamicScrollShellForTest: HTMLElement
+          }).__closedDynamicScrollShellForTest
+          shell.scrollLeft = 260
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+          shell.scrollLeft = 0
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/closed-dynamic-scroll-paint-contract`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(internalServiceState(service)).toEqual({ sessions: 1, reservations: 0 })
+    await service.closeSession(analysis.sessionId, analysis.sessionToken)
+  })
+
+  it('retries analysis after transient CSS custom-highlight paint', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          const scope = globalThis as typeof globalThis & { __highlightPaintForTest: unknown }
+          const registry = CSS.highlights as unknown as Map<string, unknown>
+          registry.set('webmcp-proof-highlight', scope.__highlightPaintForTest)
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          const registry = CSS.highlights as unknown as Map<string, unknown>
+          registry.delete('webmcp-proof-highlight')
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/custom-highlight-paint-contract`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it('invalidates an action after transient CSS custom-highlight paint', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringActionScreenshot: async (page) => {
+        await page.evaluate(() => {
+          const scope = globalThis as typeof globalThis & { __highlightPaintForTest: unknown }
+          const registry = CSS.highlights as unknown as Map<string, unknown>
+          registry.set('webmcp-proof-highlight', scope.__highlightPaintForTest)
+        })
+      },
+      afterActionScreenshot: async (page) => {
+        await page.evaluate(() => {
+          const registry = CSS.highlights as unknown as Map<string, unknown>
+          registry.delete('webmcp-proof-highlight')
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/custom-highlight-paint-contract`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it.each([
+    'membership',
+    'membership-clear',
+    'foreign-membership',
+    'registry-clear',
+    'priority',
+    'type',
+  ] as const)(
+    'retries analysis after transient CSS custom-highlight %s mutation',
+    async (transition) => {
+      const fixture = await startFixture()
+      fixtures.push(fixture)
+      let captureCalls = 0
+      const service = createService({
+        duringAnalysisScreenshot: async (page, attempt) => {
+          captureCalls += 1
+          if (attempt !== 0) return
+          await page.evaluate((kind) => {
+            const scope = globalThis as typeof globalThis & {
+              __highlightMembershipForTest: Highlight & { priority: number, type: string }
+              __highlightPaintForTest: Highlight
+              __highlightRangeForTest: Range
+              __highlightPropertyBaselineForTest?: number | string
+              __foreignHighlightAddForTest: (range: Range) => Highlight
+            }
+            const highlight = scope.__highlightMembershipForTest
+            if (kind === 'membership') highlight.add(scope.__highlightRangeForTest)
+            if (kind === 'membership-clear') {
+              ;(scope.__highlightPaintForTest as Highlight).clear()
+            }
+            if (kind === 'foreign-membership') {
+              scope.__foreignHighlightAddForTest.call(highlight, scope.__highlightRangeForTest)
+            }
+            if (kind === 'registry-clear') CSS.highlights.clear()
+            if (kind === 'priority') {
+              scope.__highlightPropertyBaselineForTest = highlight.priority
+              highlight.priority = 17
+            }
+            if (kind === 'type') {
+              scope.__highlightPropertyBaselineForTest = highlight.type
+              highlight.type = 'spelling-error'
+            }
+          }, transition)
+        },
+        afterAnalysisScreenshot: async (page, attempt) => {
+          if (attempt !== 0) return
+          await page.evaluate((kind) => {
+            const scope = globalThis as typeof globalThis & {
+              __highlightMembershipForTest: Highlight & { priority: number, type: string }
+              __highlightPaintForTest: Highlight
+              __highlightRangeForTest: Range
+              __highlightPropertyBaselineForTest: number | string
+            }
+            const highlight = scope.__highlightMembershipForTest
+            if (kind === 'membership' || kind === 'foreign-membership') {
+              highlight.delete(scope.__highlightRangeForTest)
+            }
+            if (kind === 'membership-clear') {
+              scope.__highlightPaintForTest.add(scope.__highlightRangeForTest)
+            }
+            if (kind === 'registry-clear') {
+              CSS.highlights.set('webmcp-proof-filled', scope.__highlightPaintForTest)
+              CSS.highlights.set('webmcp-proof-membership', highlight)
+            }
+            if (kind === 'priority') highlight.priority = Number(scope.__highlightPropertyBaselineForTest)
+            if (kind === 'type') highlight.type = String(scope.__highlightPropertyBaselineForTest) as
+              'highlight' | 'spelling-error' | 'grammar-error'
+          }, transition)
+        },
+      })
+      services.push(service)
+
+      const analysis = await service.analyze(`${fixture.origin}/custom-highlight-paint-contract`)
+
+      expect(captureCalls).toBe(2)
+      expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+    },
+  )
+
+  it('invalidates an action after transient registered-highlight membership paint', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringActionScreenshot: async (page) => {
+        await page.evaluate(() => {
+          const scope = globalThis as typeof globalThis & {
+            __highlightMembershipForTest: Highlight
+            __highlightRangeForTest: Range
+          }
+          scope.__highlightMembershipForTest.add(scope.__highlightRangeForTest)
+        })
+      },
+      afterActionScreenshot: async (page) => {
+        await page.evaluate(() => {
+          const scope = globalThis as typeof globalThis & {
+            __highlightMembershipForTest: Highlight
+            __highlightRangeForTest: Range
+          }
+          scope.__highlightMembershipForTest.delete(scope.__highlightRangeForTest)
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/custom-highlight-paint-contract`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it.each([
+    'current-time',
+    'playback-rate',
+    'update-playback-rate',
+    'effect-timing',
+  ] as const)('retries analysis after transient WAAPI %s mutation', async (transition) => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate((kind) => {
+          const animation = document.getAnimations().find(({ id }) => id === 'web-opacity-animation')!
+          const scope = globalThis as typeof globalThis & {
+            __waapiBaselineForTest?: { currentTime: CSSNumberish | null, playbackRate: number, duration: number, iterations: number }
+          }
+          const timing = animation.effect!.getTiming()
+          scope.__waapiBaselineForTest = {
+            currentTime: animation.currentTime,
+            playbackRate: animation.playbackRate,
+            duration: Number(timing.duration),
+            iterations: Number(timing.iterations),
+          }
+          if (kind === 'current-time') animation.currentTime = 5_000
+          if (kind === 'playback-rate') animation.playbackRate = 2
+          if (kind === 'update-playback-rate') animation.updatePlaybackRate(2)
+          if (kind === 'effect-timing') animation.effect!.updateTiming({ duration: 5_000 })
+        }, transition)
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate((kind) => {
+          const animation = document.getAnimations().find(({ id }) => id === 'web-opacity-animation')!
+          const scope = globalThis as typeof globalThis & {
+            __waapiBaselineForTest: { currentTime: CSSNumberish | null, playbackRate: number, duration: number, iterations: number }
+          }
+          const baseline = scope.__waapiBaselineForTest
+          if (kind === 'current-time') animation.currentTime = baseline.currentTime
+          if (kind === 'playback-rate') animation.playbackRate = baseline.playbackRate
+          if (kind === 'update-playback-rate') animation.updatePlaybackRate(baseline.playbackRate)
+          if (kind === 'effect-timing') animation.effect!.updateTiming({
+            duration: baseline.duration,
+            iterations: baseline.iterations,
+          })
+        }, transition)
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/analysis-animation-capture`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it('invalidates an action after transient WAAPI seek and restore', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringActionScreenshot: async (page) => {
+        await page.evaluate(() => {
+          const animation = document.getAnimations().find(({ id }) => id === 'web-opacity-animation')!
+          ;(globalThis as typeof globalThis & { __waapiCurrentTimeForTest?: CSSNumberish | null })
+            .__waapiCurrentTimeForTest = animation.currentTime
+          animation.currentTime = 5_000
+        })
+      },
+      afterActionScreenshot: async (page) => {
+        await page.evaluate(() => {
+          const animation = document.getAnimations().find(({ id }) => id === 'web-opacity-animation')!
+          animation.currentTime = (
+            globalThis as typeof globalThis & { __waapiCurrentTimeForTest: CSSNumberish | null }
+          ).__waapiCurrentTimeForTest
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/analysis-animation-capture`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it.each([
+    'start-time',
+    'effect',
+    'cancel',
+    'finish',
+    'reverse',
+    'set-keyframes',
+    'foreign-cancel',
+  ] as const)('retries analysis after transient extended WAAPI %s mutation', async (transition) => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate((kind) => {
+          const animation = document.getAnimations().find(({ id }) => id === 'web-opacity-animation')!
+          const scope = globalThis as typeof globalThis & {
+            __foreignAnimationCancelForTest: () => void
+          }
+          const effect = animation.effect as KeyframeEffect
+          const baselineTime = animation.currentTime
+          if (kind === 'start-time') {
+            const baseline = animation.startTime
+            animation.startTime = 250
+            animation.startTime = baseline
+          }
+          if (kind === 'effect') {
+            const baseline = animation.effect
+            animation.effect = new KeyframeEffect(
+              document.getElementById('web-animated-search'),
+              [{ opacity: 1 }, { opacity: 0.5 }],
+              { duration: 10000 },
+            )
+            animation.effect = baseline
+          }
+          if (kind === 'cancel') {
+            animation.cancel()
+            animation.play()
+            animation.pause()
+            animation.currentTime = baselineTime
+          }
+          if (kind === 'foreign-cancel') {
+            scope.__foreignAnimationCancelForTest.call(animation)
+            animation.play()
+            animation.currentTime = baselineTime
+          }
+          if (kind === 'finish') {
+            const baselineTiming = effect.getTiming()
+            effect.updateTiming({ duration: 10000, iterations: 1 })
+            animation.finish()
+            animation.pause()
+            effect.updateTiming({
+              duration: Number(baselineTiming.duration),
+              iterations: baselineTiming.iterations,
+            })
+            animation.currentTime = baselineTime
+          }
+          if (kind === 'reverse') {
+            const baselineRate = animation.playbackRate
+            animation.reverse()
+            animation.pause()
+            animation.playbackRate = baselineRate
+            animation.currentTime = baselineTime
+          }
+          if (kind === 'set-keyframes') {
+            const baseline = effect.getKeyframes()
+            effect.setKeyframes([{ transform: 'translateX(0px)' }, { transform: 'translateX(12px)' }])
+            effect.setKeyframes(baseline)
+          }
+        }, transition)
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/analysis-animation-capture`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
   })
 
   it.each(['main', 'foreign'] as const)(

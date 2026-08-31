@@ -168,6 +168,12 @@ metadata.
   of claiming that no external effect occurred. A production service still
   needs a network-level egress firewall and site-specific abuse review because
   HTTP method semantics cannot prove business safety.
+- Screenshot attribution uses bounded dynamic-source scroll chains, including
+  closed-shadow scroll roots, plus a pre-page-script monotone guard for Custom
+  Highlight registry/membership mutations and script-driven WAAPI timing,
+  effect, keyframe, and play-state changes. This surface is verified only for
+  the pinned Chromium build and must be revalidated on every browser or
+  Playwright upgrade.
 - Cancellation closes any session whose browser mutation has begun; callers
   must analyze again instead of continuing from a partially mutated page. The
   wrapper also retires its local analysis, credentials, and registered tools
