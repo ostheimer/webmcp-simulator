@@ -246,6 +246,59 @@ async function startFixture(): Promise<Fixture> {
       response.end('<!doctype html><title>Purchase must not load</title>')
       return
     }
+    if (requestUrl.startsWith('/resource-policy-initial?')) {
+      const kind = new URL(requestUrl, 'http://fixture.invalid').searchParams.get('kind')
+      const resource = kind === 'script'
+        ? '<script src="/purchase-resource.js"></script>'
+        : kind === 'image'
+          ? '<img src="/purchase-resource.svg" alt="Decorative proof">'
+          : kind === 'style'
+            ? '<link rel="stylesheet" href="/purchase-resource.css">'
+            : '<style>@font-face{font-family:proof-font;src:url("/purchase-resource.woff2")}body{font-family:proof-font}</style><span>Font proof</span>'
+      response.end(`<!doctype html><title>Consequential resource policy</title>
+        ${resource}<input type="search" aria-label="Resource policy search">`)
+      return
+    }
+    if (requestUrl === '/resource-policy-safe') {
+      response.end(`<!doctype html><title>Safe resource policy</title>
+        <link rel="stylesheet" href="/neutral-resource.css">
+        <script src="/neutral-resource.js"></script>
+        <img src="/neutral-resource.svg" alt="Decorative proof">
+        <style>@font-face{font-family:neutral-font;src:url("/neutral-resource.woff2")}body{font-family:neutral-font}</style>
+        <input type="search" aria-label="Safe resource search">`)
+      return
+    }
+    if (requestUrl === '/resource-policy-action-source') {
+      response.end(`<!doctype html><title>Resource action source</title>
+        <a href="/resource-policy-action-destination">Open resource destination</a>`)
+      return
+    }
+    if (requestUrl === '/resource-policy-action-destination') {
+      response.end(`<!doctype html><title>Resource action destination</title>
+        <img src="/checkout-tracking-pixel.svg" alt="Decorative proof">
+        <input type="search" aria-label="Destination resource search">`)
+      return
+    }
+    if (requestUrl.endsWith('-resource.js')) {
+      response.setHeader('Content-Type', 'application/javascript; charset=utf-8')
+      response.end('globalThis.__neutralResourceLoaded = true')
+      return
+    }
+    if (requestUrl.endsWith('-resource.css')) {
+      response.setHeader('Content-Type', 'text/css; charset=utf-8')
+      response.end('body { color: rgb(20, 30, 40); }')
+      return
+    }
+    if (requestUrl.endsWith('-resource.svg') || requestUrl === '/checkout-tracking-pixel.svg') {
+      response.setHeader('Content-Type', 'image/svg+xml')
+      response.end('<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="#999"/></svg>')
+      return
+    }
+    if (requestUrl.endsWith('-resource.woff2')) {
+      response.setHeader('Content-Type', 'font/woff2')
+      response.end(Buffer.from('not-a-real-font'))
+      return
+    }
     if (requestUrl === '/initial-consequential-redirect') {
       response.statusCode = 302
       response.setHeader('Location', '/purchase')
@@ -1415,6 +1468,34 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/owner-form-action-safety') {
+      response.end(`<!doctype html><title>Owner form action safety</title>
+        <form action="/checkout">
+          <input type="text" aria-label="Consequential action value">
+          <input type="text" aria-label="Consequential action detail">
+        </form>
+        <form action="https://example.com/contact">
+          <input type="text" aria-label="Cross origin action value">
+          <input type="text" aria-label="Cross origin action detail">
+        </form>
+        <form action="http://[">
+          <input type="text" aria-label="Malformed action value">
+          <input type="text" aria-label="Malformed action detail">
+        </form>
+        <form action="${'x'.repeat(4_200)}">
+          <input type="text" aria-label="Overflow action value">
+          <input type="text" aria-label="Overflow action detail">
+        </form>
+        <form id="late-action-form" action="/about#overview">
+          <input id="late-action-value" type="text" aria-label="Late action value">
+          <input id="late-action-detail" type="text" aria-label="Late action detail">
+        </form>
+        <form action="/about?section=overview#history">
+          <input type="text" aria-label="Neutral action value">
+          <input type="text" aria-label="Neutral action detail">
+        </form>`)
+      return
+    }
     if (requestUrl === '/analysis-owner-watchset') {
       response.end(`<!doctype html><title>Analysis owner watchset</title>
         <style>fieldset{border:0;margin:0;padding:0}</style>
@@ -1820,6 +1901,75 @@ async function startFixture(): Promise<Fixture> {
           <option value="one" selected>First visible label</option>
           <option value="two">Second visible label</option>
         </select>`)
+      return
+    }
+    if (requestUrl === '/dynamic-render-contract') {
+      const animatedSvg = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="220" height="36"><rect width="220" height="36" fill="red"><animate attributeName="fill" values="red;blue;red" dur="0.08s" repeatCount="indefinite"/></rect></svg>`)
+      response.end(`<!doctype html><title>Dynamic render contract</title>
+        <style>
+          .render-stack { position:absolute;left:20px;width:220px;height:36px }
+          .semantic-render { appearance:none;background:transparent;border:0;color:#111;width:220px;height:36px;position:absolute;inset:0;z-index:1 }
+        </style>
+        <div class="render-stack" style="top:20px">
+          <canvas id="moving-canvas" width="220" height="36" style="position:absolute;inset:0"></canvas>
+          <select id="semantic-canvas-filter" class="semantic-render" aria-label="Semantic canvas filter"><option selected>Same label</option><option>Same label</option></select>
+        </div>
+        <div class="render-stack" style="top:80px">
+          <img src="data:image/svg+xml,${animatedSvg}" alt="" width="220" height="36" style="position:absolute;inset:0;visibility:visible!important">
+          <select id="semantic-image-filter" class="semantic-render" aria-label="Semantic animated image filter"><option selected>Same label</option><option>Same label</option></select>
+        </div>
+        <input id="visible-render-search" type="search" aria-label="Visible render search" style="position:absolute;left:20px;top:140px;width:220px;height:36px">
+        <script>
+          globalThis.__renderFrame = 0;
+          const canvas = document.getElementById('moving-canvas');
+          const context = canvas.getContext('2d');
+          const draw = () => {
+            globalThis.__renderFrame += 1;
+            context.fillStyle = globalThis.__renderFrame % 2 ? '#ef4444' : '#2563eb';
+            context.fillRect(0, 0, canvas.width, canvas.height);
+            requestAnimationFrame(draw);
+          };
+          requestAnimationFrame(draw);
+        </script>`)
+      return
+    }
+    if (requestUrl === '/dynamic-media-contract') {
+      response.end(`<!doctype html><title>Dynamic media contract</title>
+        <video id="moving-video" autoplay muted playsinline style="position:absolute;left:20px;top:20px;width:220px;height:36px"></video>
+        <select id="semantic-media-filter" aria-label="Semantic media filter" style="appearance:none;background:transparent;border:0;color:#111;position:absolute;left:20px;top:20px;width:220px;height:36px"><option selected>Same label</option><option>Same label</option></select>
+        <script>
+          const mediaCanvas = document.createElement('canvas');
+          mediaCanvas.width = 220; mediaCanvas.height = 36;
+          const mediaContext = mediaCanvas.getContext('2d');
+          let mediaFrame = 0;
+          setInterval(() => {
+            mediaFrame += 1;
+            mediaContext.fillStyle = mediaFrame % 2 ? '#16a34a' : '#9333ea';
+            mediaContext.fillRect(0, 0, 220, 36);
+          }, 30);
+          const video = document.getElementById('moving-video');
+          video.srcObject = mediaCanvas.captureStream(20);
+          video.play();
+        </script>`)
+      return
+    }
+    if (requestUrl === '/dynamic-shadow-contract') {
+      response.end(`<!doctype html><title>Dynamic shadow contract</title>
+        <div id="closed-paint-host" style="position:absolute;left:20px;top:20px;width:220px;height:36px"></div>
+        <select id="semantic-shadow-filter" aria-label="Semantic shadow filter" style="appearance:none;background:transparent;border:0;color:#111;position:absolute;left:20px;top:20px;width:220px;height:36px"><option selected>Same label</option><option>Same label</option></select>
+        <script>
+          const root = document.getElementById('closed-paint-host').attachShadow({ mode: 'closed' });
+          const canvas = document.createElement('canvas');
+          canvas.width = 220; canvas.height = 36;
+          root.append(canvas);
+          const context = canvas.getContext('2d');
+          const draw = () => {
+            context.fillStyle = Math.random() > .5 ? '#dc2626' : '#2563eb';
+            context.fillRect(0, 0, 220, 36);
+            requestAnimationFrame(draw);
+          };
+          requestAnimationFrame(draw);
+        </script>`)
       return
     }
     if (requestUrl === '/analysis-animation-capture') {
@@ -5197,6 +5347,85 @@ describe('WrapperProofService security boundaries', () => {
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
+  it('classifies the owning form action privately and revalidates late action drift', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/owner-form-action-safety`)
+    const evidenceByLabel = new Map(analysis.domEvidence.map((evidence) => [evidence.label, evidence]))
+
+    for (const label of [
+      'Consequential action value',
+      'Consequential action detail',
+      'Cross origin action value',
+      'Cross origin action detail',
+      'Malformed action value',
+      'Malformed action detail',
+      'Overflow action value',
+      'Overflow action detail',
+    ]) expect(evidenceByLabel.get(label)?.sensitive).toBe(true)
+    expect(JSON.stringify(analysis)).not.toContain('/checkout')
+    expect(JSON.stringify(analysis)).not.toContain('example.com/contact')
+
+    const lateEvidence = evidenceByLabel.get('Late action value')!
+    const lateForm = analysis.capabilities.find(({ kind, evidenceIds }) =>
+      kind === 'prepare_form' && evidenceIds.includes(lateEvidence.id))!
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#late-action-form').evaluate((form) => {
+      form.setAttribute('action', '/booking')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-action-value').inputValue()).toBe('')
+    expect(await page.locator('#late-action-detail').inputValue()).toBe('')
+
+    await page.locator('#late-action-form').evaluate((form) => {
+      form.setAttribute('action', '/about#overview')
+    })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    let admittedBeforeWriteValues: string[] = []
+    const admittedService = createService({
+      beforeControlWrite: async (page) => {
+        await page.locator('#late-action-form').evaluate((form) => {
+          form.setAttribute('action', '/booking')
+        })
+        admittedBeforeWriteValues = await page.locator(
+          '#late-action-value, #late-action-detail',
+        ).evaluateAll((controls) => controls.map((control) => (control as HTMLInputElement).value))
+      },
+    })
+    services.push(admittedService)
+    const admittedAnalysis = await admittedService.analyze(`${fixture.origin}/owner-form-action-safety`)
+    const admittedEvidence = admittedAnalysis.domEvidence.find(({ label }) => label === 'Late action value')!
+    const admittedForm = admittedAnalysis.capabilities.find(({ kind, evidenceIds }) =>
+      kind === 'prepare_form' && evidenceIds.includes(admittedEvidence.id))!
+    await expect(admittedService.execute(
+      admittedAnalysis.sessionId,
+      admittedAnalysis.sessionToken,
+      admittedForm.name,
+      admittedForm.sampleInput,
+      undefined,
+      admittedForm.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(admittedBeforeWriteValues).toEqual(['', ''])
+    expect(internalServiceState(admittedService)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
   it('watches every captured owner-context source across screenshot capture and retries transient drift', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -6723,7 +6952,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       lateReadonly.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
-  })
+  }, 10_000)
 
   it('invalidates admitted option and readonly actions when their ARIA operability changes', async () => {
     const fixture = await startFixture()
@@ -6900,6 +7129,147 @@ describe('WrapperProofService security boundaries', () => {
       'Animation.getPlaybackRate',
     )).toMatchObject({ playbackRate: 1 })
   })
+
+  it('rejects one-shot target CSS, DOM, and scroll drift as visible action evidence', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    for (const drift of ['style', 'dom', 'scroll'] as const) {
+      const service = createService({
+        beforeControlWrite: async (page) => {
+          if (drift === 'style') {
+            await page.locator('#semantic-css-filter').evaluate((select) => {
+              ;(select as HTMLElement).style.background = 'rgb(255, 0, 0)'
+            })
+          } else if (drift === 'dom') {
+            await page.evaluate(() => document.body.append(document.createElement('span')))
+          } else {
+            await page.evaluate(() => {
+              document.documentElement.style.minHeight = '2000px'
+              globalThis.scrollTo(0, 40)
+            })
+          }
+        },
+      })
+      services.push(service)
+      const analysis = await service.analyze(`${fixture.origin}/visible-state-contract`)
+      const evidence = analysis.domEvidence.find(({ label }) => label === 'Semantic CSS filter')!
+      const semanticOnly = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))!
+      await expect(service.execute(
+        analysis.sessionId,
+        analysis.sessionToken,
+        semanticOnly.name,
+        semanticOnly.sampleInput,
+        undefined,
+        semanticOnly.id,
+      )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+      expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+    }
+  }, 15_000)
+
+  it('rejects intersecting dynamic paint while preserving unrelated visible actions', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const capabilityFor = (
+      snapshot: Awaited<ReturnType<WrapperProofService['analyze']>>,
+      label: string,
+    ) => {
+      const evidence = snapshot.domEvidence.find((item) => item.label === label)!
+      return snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))!
+    }
+    const canvasService = createService()
+    services.push(canvasService)
+    const canvasAnalysis = await canvasService.analyze(`${fixture.origin}/dynamic-render-contract`)
+    const canvasPage = internalSession(canvasService, canvasAnalysis.sessionId).page
+    const movingFrame = await canvasPage.evaluate(() => Number(
+      (globalThis as typeof globalThis & { __renderFrame?: number }).__renderFrame ?? -1,
+    ))
+    expect(movingFrame).toBeGreaterThan(0)
+    const semanticCanvas = capabilityFor(canvasAnalysis, 'Semantic canvas filter')
+    await expect(canvasService.execute(
+      canvasAnalysis.sessionId,
+      canvasAnalysis.sessionToken,
+      semanticCanvas.name,
+      semanticCanvas.sampleInput,
+      undefined,
+      semanticCanvas.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await canvasPage.locator('#semantic-canvas-filter').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(0)
+    expect(internalServiceState(canvasService)).toEqual({ sessions: 1, reservations: 0 })
+
+    const imageService = createService()
+    services.push(imageService)
+    const imageAnalysis = await imageService.analyze(`${fixture.origin}/dynamic-render-contract`)
+    const imagePage = internalSession(imageService, imageAnalysis.sessionId).page
+    const semanticImage = capabilityFor(imageAnalysis, 'Semantic animated image filter')
+    await expect(imageService.execute(
+      imageAnalysis.sessionId,
+      imageAnalysis.sessionToken,
+      semanticImage.name,
+      semanticImage.sampleInput,
+      undefined,
+      semanticImage.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await imagePage.locator('#semantic-image-filter').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(0)
+
+    const mediaService = createService()
+    services.push(mediaService)
+    const mediaAnalysis = await mediaService.analyze(`${fixture.origin}/dynamic-media-contract`)
+    const mediaPage = internalSession(mediaService, mediaAnalysis.sessionId).page
+    await expect.poll(() => mediaPage.locator('#moving-video').evaluate((video) => ({
+      paused: (video as HTMLVideoElement).paused,
+      hasStream: Boolean((video as HTMLVideoElement).srcObject),
+    }))).toEqual({ paused: false, hasStream: true })
+    const semanticMedia = capabilityFor(mediaAnalysis, 'Semantic media filter')
+    await expect(mediaService.execute(
+      mediaAnalysis.sessionId,
+      mediaAnalysis.sessionToken,
+      semanticMedia.name,
+      semanticMedia.sampleInput,
+      undefined,
+      semanticMedia.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await mediaPage.locator('#semantic-media-filter').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(0)
+
+    const shadowService = createService()
+    services.push(shadowService)
+    const shadowAnalysis = await shadowService.analyze(`${fixture.origin}/dynamic-shadow-contract`)
+    const shadowPage = internalSession(shadowService, shadowAnalysis.sessionId).page
+    const semanticShadow = capabilityFor(shadowAnalysis, 'Semantic shadow filter')
+    await expect(shadowService.execute(
+      shadowAnalysis.sessionId,
+      shadowAnalysis.sessionToken,
+      semanticShadow.name,
+      semanticShadow.sampleInput,
+      undefined,
+      semanticShadow.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await shadowPage.locator('#semantic-shadow-filter').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(0)
+
+    const visibleService = createService()
+    services.push(visibleService)
+    const visibleAnalysis = await visibleService.analyze(`${fixture.origin}/dynamic-render-contract`)
+    const visiblePage = internalSession(visibleService, visibleAnalysis.sessionId).page
+    const visible = capabilityFor(visibleAnalysis, 'Visible render search')
+    await expect(visibleService.execute(
+      visibleAnalysis.sessionId,
+      visibleAnalysis.sessionToken,
+      visible.name,
+      visible.sampleInput,
+      undefined,
+      visible.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await visiblePage.locator('#visible-render-search').inputValue()).toBe(
+      String(visible.sampleInput.query),
+    )
+  }, 40_000)
 
   it('fails closed on an over-budget ARIA-disabled ancestor chain while retaining safe controls', async () => {
     const fixture = await startFixture()
@@ -8317,6 +8687,52 @@ describe('WrapperProofService security boundaries', () => {
     expect(fixture.requests).toContain('/about-safe')
     expect(fixture.requests).toContain('/next')
   })
+
+  it('blocks consequential same-origin static resources during analysis and navigation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    for (const [kind, resourcePath] of [
+      ['script', '/purchase-resource.js'],
+      ['image', '/purchase-resource.svg'],
+      ['style', '/purchase-resource.css'],
+      ['font', '/purchase-resource.woff2'],
+    ] as const) {
+      const service = createService()
+      services.push(service)
+      const before = fixture.requests.length
+      await expect(service.analyze(
+        `${fixture.origin}/resource-policy-initial?kind=${kind}`,
+      )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+      expect(fixture.requests.slice(before), kind).not.toContain(resourcePath)
+      expect(internalServiceState(service), kind).toEqual({ sessions: 0, reservations: 0 })
+    }
+
+    const safeService = createService()
+    services.push(safeService)
+    const safeAnalysis = await safeService.analyze(`${fixture.origin}/resource-policy-safe`)
+    expect(safeAnalysis.capabilities.some(({ kind }) => kind === 'prepare_search')).toBe(true)
+    expect(fixture.requests).toEqual(expect.arrayContaining([
+      '/neutral-resource.js',
+      '/neutral-resource.css',
+      '/neutral-resource.svg',
+      '/neutral-resource.woff2',
+    ]))
+
+    const actionService = createService()
+    services.push(actionService)
+    const actionAnalysis = await actionService.analyze(`${fixture.origin}/resource-policy-action-source`)
+    const navigation = actionAnalysis.capabilities.find(({ kind }) => kind === 'navigation')!
+    await expect(actionService.execute(
+      actionAnalysis.sessionId,
+      actionAnalysis.sessionToken,
+      navigation.name,
+      navigation.sampleInput,
+      undefined,
+      navigation.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(fixture.requests).toContain('/resource-policy-action-destination')
+    expect(fixture.requests).not.toContain('/checkout-tracking-pixel.svg')
+  }, 30_000)
 
   it('publishes no evidence from consequential initial, redirected, or encoded hash destinations', async () => {
     const fixture = await startFixture()

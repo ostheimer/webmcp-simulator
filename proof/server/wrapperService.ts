@@ -205,37 +205,134 @@ function actionTargetBackendNodeIds(
   return [...ids]
 }
 
-async function captureActionTargetDigests(
+interface PaintRect { left: number, top: number, right: number, bottom: number }
+
+function paintRect(border: number[]): PaintRect | undefined {
+  if (border.length < 8) return undefined
+  const left = Math.max(0, Math.min(border[0], border[2], border[4], border[6]))
+  const top = Math.max(0, Math.min(border[1], border[3], border[5], border[7]))
+  const right = Math.min(
+    CAPTURE_VIEWPORT_WIDTH,
+    Math.max(border[0], border[2], border[4], border[6]),
+  )
+  const bottom = Math.min(
+    CAPTURE_VIEWPORT_HEIGHT,
+    Math.max(border[1], border[3], border[5], border[7]),
+  )
+  return right > left && bottom > top ? { left, top, right, bottom } : undefined
+}
+
+function paintRectsIntersect(left: PaintRect, right: PaintRect): boolean {
+  return left.left < right.right
+    && left.right > right.left
+    && left.top < right.bottom
+    && left.bottom > right.top
+}
+
+async function assertNoDynamicPaintIntersectsTargets(
   cdp: CDPSession,
-  action: CapabilityAction,
-  input: Record<string, unknown>,
-): Promise<Map<number, string>> {
-  const digests = new Map<number, string>()
-  for (const backendNodeId of actionTargetBackendNodeIds(action, input)) {
+  targetBackendNodeIds: number[],
+): Promise<void> {
+  const targetRects: PaintRect[] = []
+  for (const backendNodeId of targetBackendNodeIds) {
     const box = await cdp.send('DOM.getBoxModel', { backendNodeId }) as {
       model?: { border?: number[] }
     }
-    const border = box.model?.border
-    if (!border || border.length < 8) throw new Error('The isolated action target has no painted bounds.')
-    const x = Math.max(0, Math.min(border[0], border[2], border[4], border[6]))
-    const y = Math.max(0, Math.min(border[1], border[3], border[5], border[7]))
-    const right = Math.min(CAPTURE_VIEWPORT_WIDTH, Math.max(border[0], border[2], border[4], border[6]))
-    const bottom = Math.min(CAPTURE_VIEWPORT_HEIGHT, Math.max(border[1], border[3], border[5], border[7]))
-    const width = right - x
-    const height = bottom - y
-    if (width <= 0 || height <= 0) throw new Error('The isolated action target left the captured viewport.')
+    const rect = box.model?.border ? paintRect(box.model.border) : undefined
+    if (!rect) throw new Error('The isolated action target has no painted bounds.')
+    targetRects.push(rect)
+  }
+
+  await cdp.send('DOM.enable')
+  const search = await cdp.send('DOM.performSearch', {
+    query: 'canvas, img, video, audio, svg, object, embed, input[type="image"]',
+    includeUserAgentShadowDOM: true,
+  }) as { searchId?: string, resultCount?: number }
+  const searchId = search.searchId
+  const resultCount = Number(search.resultCount ?? 0)
+  if (!searchId || !Number.isInteger(resultCount) || resultCount < 0 || resultCount > 256) {
+    if (searchId) await cdp.send('DOM.discardSearchResults', { searchId }).catch(() => undefined)
+    throw new Error('The isolated dynamic paint search exceeded its safety bound.')
+  }
+  try {
+    if (resultCount === 0) return
+    const results = await cdp.send('DOM.getSearchResults', {
+      searchId,
+      fromIndex: 0,
+      toIndex: resultCount,
+    }) as { nodeIds?: number[] }
+    if (!Array.isArray(results.nodeIds) || results.nodeIds.length !== resultCount) {
+      throw new Error('The isolated dynamic paint search was incomplete.')
+    }
+    for (const nodeId of results.nodeIds) {
+      let box: { model?: { border?: number[] } }
+      try {
+        box = await cdp.send('DOM.getBoxModel', { nodeId }) as typeof box
+      } catch {
+        continue
+      }
+      const rect = box.model?.border ? paintRect(box.model.border) : undefined
+      if (rect && targetRects.some((targetRect) => paintRectsIntersect(targetRect, rect))) {
+        throw new Error('The isolated action target overlaps an unfreezable paint source.')
+      }
+    }
+  } finally {
+    await cdp.send('DOM.discardSearchResults', { searchId }).catch(() => undefined)
+  }
+}
+
+async function captureRawActionTargetDigests(
+  cdp: CDPSession,
+  targetBackendNodeIds: number[],
+): Promise<Map<number, string>> {
+  const digests = new Map<number, string>()
+  for (const backendNodeId of targetBackendNodeIds) {
+    const box = await cdp.send('DOM.getBoxModel', { backendNodeId }) as {
+      model?: { border?: number[] }
+    }
+    const rect = box.model?.border ? paintRect(box.model.border) : undefined
+    if (!rect) throw new Error('The isolated action target has no painted bounds.')
     const captured = await cdp.send('Page.captureScreenshot', {
       format: 'jpeg',
       quality: 72,
       fromSurface: true,
       captureBeyondViewport: false,
-      clip: { x, y, width, height, scale: 1 },
+      clip: {
+        x: rect.left,
+        y: rect.top,
+        width: rect.right - rect.left,
+        height: rect.bottom - rect.top,
+        scale: 1,
+      },
     }) as { data?: string }
     if (!captured.data) throw new Error('The isolated action target screenshot failed.')
     digests.set(backendNodeId, screenshotDigest(Buffer.from(captured.data, 'base64')))
   }
-  if (digests.size === 0) throw new Error('The isolated action has no visible target binding.')
   return digests
+}
+
+async function captureActionTargetDigests(
+  cdp: CDPSession,
+  action: CapabilityAction,
+  input: Record<string, unknown>,
+  checkDynamicPaint: boolean,
+): Promise<Map<number, string>> {
+  const targetBackendNodeIds = actionTargetBackendNodeIds(action, input)
+  if (targetBackendNodeIds.length === 0) {
+    throw new Error('The isolated action has no visible target binding.')
+  }
+  if (checkDynamicPaint) {
+    await assertNoDynamicPaintIntersectsTargets(cdp, targetBackendNodeIds)
+  }
+  const first = await captureRawActionTargetDigests(cdp, targetBackendNodeIds)
+  await waitFor(8)
+  const second = await captureRawActionTargetDigests(cdp, targetBackendNodeIds)
+  for (const [backendNodeId, digest] of first) {
+    if (second.get(backendNodeId) !== digest) {
+      throw new Error('The isolated action target paint did not remain stable.')
+    }
+  }
+  return second
 }
 
 interface PausedDocumentAnimations {
@@ -272,7 +369,8 @@ async function pauseDocumentAnimations(cdp: CDPSession): Promise<PausedDocumentA
     const active = documentAnimationPauseStates.get(cdp)
     if (active) {
       // A temporary inspector session can reset Chromium's document-timeline
-      // rate when it detaches. Every nested lease therefore reasserts the pause.
+      // rate when it detaches. Every nested lease therefore reasserts the
+      // document-timeline pause.
       await cdp.send('Animation.setPlaybackRate', { playbackRate: 0 })
       active.leases += 1
       return active
@@ -904,6 +1002,7 @@ function captureIsolatedSafetyEvidence(
   anchorImageAlts: string[]
   generatedContent: string[]
   ownerContextEvidence: string[]
+  ownerActionEvidence: string[]
   targetNativeControlValue: string
 } {
   const getAttribute = Element.prototype.getAttribute
@@ -1320,6 +1419,7 @@ function captureIsolatedSafetyEvidence(
     }
   }
   const ownerContextEvidence: string[] = []
+  const ownerActionEvidence: string[] = []
   const ownerContextSnapshots: Array<{ kind: string, values: string[] }> = []
   let ownerContextOverflow = false
   const captureOwnerContextNode = (
@@ -1332,6 +1432,9 @@ function captureIsolatedSafetyEvidence(
     const retainExisting = (slot: string, value: string) => {
       values.push(slot, value)
       ownerContextEvidence.push(value)
+    }
+    const retainSnapshotOnly = (slot: string, value: string) => {
+      values.push(slot, value)
     }
     const retain = (slot: string, value: unknown) => {
       const captured = bounded(value)
@@ -1348,6 +1451,43 @@ function captureIsolatedSafetyEvidence(
       'id',
       'role',
     ]) retain(`attribute:${name}`, getAttribute.call(root, name) ?? '')
+    if (kind === 'form') {
+      const formActionGetter = root instanceof HTMLFormElement
+        ? Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action')?.get
+        : undefined
+      const rawActionSource = getAttribute.call(root, 'action')
+      retainSnapshotOnly('attribute:action-present', rawActionSource === null ? 'false' : 'true')
+      const rawAction = bounded(rawActionSource ?? '')
+      retainSnapshotOnly('attribute:action', rawAction.value)
+      ownerContextOverflow ||= rawAction.overflow || !formActionGetter
+      if (formActionGetter && !ownerContextOverflow && rawAction.value.trim().length > 0) {
+        const resolvedAction = bounded(formActionGetter.call(root))
+        retainSnapshotOnly('native:action', resolvedAction.value)
+        ownerContextOverflow ||= resolvedAction.overflow
+        if (!ownerContextOverflow) {
+          try {
+            const actionUrl = new URL(resolvedAction.value)
+            if (
+              !['http:', 'https:'].includes(actionUrl.protocol)
+              || actionUrl.origin !== location.origin
+            ) {
+              ownerContextOverflow = true
+            } else {
+              const decodedComponents: string[] = []
+              for (const component of [actionUrl.pathname, actionUrl.search, actionUrl.hash]) {
+                decodedComponents.push(decodeURIComponent(component))
+              }
+              const actionEvidence = bounded(decodedComponents.join(''))
+              retainSnapshotOnly('native:action-evidence', actionEvidence.value)
+              ownerActionEvidence.push(actionEvidence.value)
+              ownerContextOverflow ||= actionEvidence.overflow
+            }
+          } catch {
+            ownerContextOverflow = true
+          }
+        }
+      }
+    }
     for (const attribute of ['aria-labelledby', 'aria-describedby']) {
       const reference = referenced(root, attribute)
       retainExisting(`${attribute}:raw`, reference.raw)
@@ -1791,6 +1931,7 @@ function captureIsolatedSafetyEvidence(
       anchorImageAlts: [],
       generatedContent: [],
       ownerContextEvidence: [],
+      ownerActionEvidence: [],
       targetNativeControlValue: '',
     }
   }
@@ -1864,6 +2005,7 @@ function captureIsolatedSafetyEvidence(
       anchorImageAlts: [],
       generatedContent: [],
       ownerContextEvidence: [],
+      ownerActionEvidence: [],
       targetNativeControlValue: '',
     }
   }
@@ -1877,6 +2019,7 @@ function captureIsolatedSafetyEvidence(
     anchorImageAlts: anchorImageAlts.values,
     generatedContent: generatedContent.values,
     ownerContextEvidence,
+    ownerActionEvidence,
     targetNativeControlValue: targetNativeControlValue.value,
   }
 }
@@ -2648,8 +2791,10 @@ function classifyDomInIsolatedWorld({
           || tokenized === undefined
           || unsafePattern.test(tokenized)
       })
-      const hasUnsafeNavigationEvidence = element instanceof HTMLAnchorElement
-        && safetyEvidenceSources.some((value) => {
+      const navigationSafetyEvidence = element instanceof HTMLAnchorElement
+        ? safetyEvidenceSources
+        : safetyCapture.ownerActionEvidence
+      const hasUnsafeNavigationEvidence = navigationSafetyEvidence.some((value) => {
           const tokenized = tokenizeEvidence(value)
           return value.length > maxSafetyEvidenceLength
             || tokenized === undefined
@@ -3019,12 +3164,34 @@ interface AnalysisCaptureGuardSnapshot {
   topLayerOverflow: boolean
 }
 
+function actionCaptureStayedStable(
+  before: AnalysisCaptureGuardSnapshot,
+  after: AnalysisCaptureGuardSnapshot,
+): boolean {
+  return !after.overflow
+    && !after.topLayerOverflow
+    && after.mutationCount === before.mutationCount
+    && after.navigationCount === before.navigationCount
+    && !after.scrollChanged
+    && !after.scrollOverflow
+    && !after.scrollStateMismatch
+    && after.styleSheetChangeCount === before.styleSheetChangeCount
+    && after.url === before.url
+    && after.title === before.title
+    && after.topLayerChangeCount === before.topLayerChangeCount
+    && after.topLayerSignature === before.topLayerSignature
+}
+
 async function createAnalysisCaptureGuard(
   context: BrowserContext,
   page: Page,
 ): Promise<{
   snapshot: () => Promise<AnalysisCaptureGuardSnapshot>
-  arm: (controlBackendNodeIds: number[], watchBackendNodeIds: number[]) => Promise<void>
+  arm: (
+    controlBackendNodeIds: number[],
+    watchBackendNodeIds: number[],
+    watchWholeDocument?: boolean,
+  ) => Promise<void>
   screenshot: () => Promise<Buffer>
   stop: () => Promise<void>
 }> {
@@ -3106,6 +3273,7 @@ async function createAnalysisCaptureGuard(
               Number.MAX_SAFE_INTEGER,
               state.documentIdMutationCount + 1,
             );
+            continue;
           }
           const target = record.target;
           const head = document.head;
@@ -3196,7 +3364,7 @@ async function createAnalysisCaptureGuard(
         topLayerOverflow,
       }
     },
-    arm: async (controlBackendNodeIds, watchBackendNodeIds) => {
+    arm: async (controlBackendNodeIds, watchBackendNodeIds, watchWholeDocument = false) => {
       const retainBackendNode = async (backendNodeId: number, isControl: boolean) => {
         const resolved = await cdp.send('DOM.resolveNode', {
           backendNodeId,
@@ -3238,6 +3406,13 @@ async function createAnalysisCaptureGuard(
         expression: `(() => {
           const state = globalThis[${JSON.stringify(storageKey)}];
           if (!state?.observer) return false;
+          if (${JSON.stringify(watchWholeDocument)} && !state.watched.includes(document.documentElement)) {
+            if (state.watched.length >= ${MAX_ANALYSIS_WATCH_NODES}) {
+              state.watchOverflow = true;
+              return false;
+            }
+            state.watched.push(document.documentElement);
+          }
           const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get;
           const scrollingElementGetter = Object.getOwnPropertyDescriptor(Document.prototype, 'scrollingElement')?.get;
           const scrollLeftGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')?.get;
@@ -5380,16 +5555,6 @@ export class WrapperProofService {
         const method = request.method().toUpperCase()
         const resourceType = request.resourceType()
         const isSubframe = request.isNavigationRequest() && request.frame() !== page.mainFrame()
-        const isMainFrameDocument = resourceType === 'document' && !isSubframe
-        const consequentialNavigation = isMainFrameDocument
-          && isConsequentialNavigationUrl(resourceUrl)
-        if (consequentialNavigation) {
-          session.blockedRequests += 1
-          if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
-          this.failConsequentialNavigation(session)
-          await route.abort('blockedbyclient')
-          return
-        }
         const allowedByOrigin = isSameOriginHttpUrl(resourceUrl, session.targetOrigin)
           && ['GET', 'HEAD'].includes(method)
           && ['document', 'stylesheet', 'image', 'font', 'script'].includes(resourceType)
@@ -5397,6 +5562,17 @@ export class WrapperProofService {
         const blockForFrozenSession = session.networkMode === 'blocked'
           || session.networkLocked
           || Boolean(session.targetTrafficError)
+        if (
+          !blockForFrozenSession
+          && allowedByOrigin
+          && isConsequentialNavigationUrl(resourceUrl)
+        ) {
+          session.blockedRequests += 1
+          if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
+          this.failConsequentialNavigation(session)
+          await route.abort('blockedbyclient')
+          return
+        }
         if (blockForFrozenSession || !allowedByOrigin) {
           session.blockedRequests += 1
           if (session.activeNetworkMetrics) session.activeNetworkMetrics.blocked += 1
@@ -5507,6 +5683,8 @@ export class WrapperProofService {
     let actionStarted = false
     let actionPromise: Promise<PendingActionEvidence> | null = null
     let pausedAnimations: PausedDocumentAnimations | null = null
+    let actionCaptureGuard: Awaited<ReturnType<typeof createAnalysisCaptureGuard>> | null = null
+    let actionCaptureBaseline: AnalysisCaptureGuardSnapshot | null = null
 
     try {
       await raceWithSignal(previous, signal)
@@ -5568,6 +5746,51 @@ export class WrapperProofService {
         )
       }
 
+      const metrics: ActionNetworkMetrics = { allowed: 0, blocked: 0 }
+      if (capability.kind !== 'navigation') {
+        const targetBackendNodeIds = actionTargetBackendNodeIds(capability.action, acceptedInput)
+        try {
+          if (targetBackendNodeIds.length === 0) {
+            throw new Error('The isolated action has no visible target binding.')
+          }
+          await raceWithSessionPolicy(
+            session,
+            assertNoDynamicPaintIntersectsTargets(session.cdp, targetBackendNodeIds),
+            signal,
+          )
+          actionCaptureGuard = await raceWithSessionPolicy(
+            session,
+            createAnalysisCaptureGuard(session.context, session.page),
+            signal,
+          )
+          await raceWithSessionPolicy(
+            session,
+            actionCaptureGuard.arm(targetBackendNodeIds, [], true),
+            signal,
+          )
+          actionCaptureBaseline = await raceWithSessionPolicy(
+            session,
+            actionCaptureGuard.snapshot(),
+            signal,
+          )
+          if (!actionCaptureStayedStable(actionCaptureBaseline, actionCaptureBaseline)) {
+            throw new Error('The isolated action capture started from an unsafe page state.')
+          }
+        } catch (error) {
+          await actionCaptureGuard?.stop().catch(() => undefined)
+          actionCaptureGuard = null
+          actionCaptureBaseline = null
+          if (signal?.aborted || error instanceof WrapperServiceError) throw error
+          throw preActionError(
+            'invalid_action',
+            'The isolated page could not establish a visible pre-action state.',
+            409,
+          )
+        }
+        session.networkLocked = true
+        session.networkMode = 'blocked'
+      }
+
       let beforeActionScreenshotDataUrl: string
       let beforeActionTargetDigests: Map<number, string> | null
       try {
@@ -5595,11 +5818,46 @@ export class WrapperProofService {
           ? null
           : await raceWithSessionPolicy(
               session,
-              captureActionTargetDigests(session.cdp, capability.action, acceptedInput),
+              captureActionTargetDigests(session.cdp, capability.action, acceptedInput, false),
               signal,
             )
       } catch (error) {
         if (signal?.aborted || error instanceof WrapperServiceError) throw error
+        let pageDriftedDuringCapture = false
+        if (actionCaptureGuard && actionCaptureBaseline) {
+          try {
+            const currentCaptureState = await raceWithSessionPolicy(
+              session,
+              actionCaptureGuard.snapshot(),
+              signal,
+            )
+            pageDriftedDuringCapture = !actionCaptureStayedStable(
+              actionCaptureBaseline,
+              currentCaptureState,
+            )
+          } catch {
+            pageDriftedDuringCapture = true
+          }
+          if (!pageDriftedDuringCapture) {
+            try {
+              pageDriftedDuringCapture = !await raceWithSessionPolicy(
+                session,
+                actionWouldChange(session.context, session.page, capability.action, acceptedInput),
+                signal,
+              )
+            } catch {
+              pageDriftedDuringCapture = true
+            }
+          }
+        }
+        if (pageDriftedDuringCapture) {
+          throw new WrapperServiceError(
+            'action_failed',
+            'The isolated page changed while the visible action state was captured.',
+            409,
+            { sessionInvalidated: true },
+          )
+        }
         throw preActionError(
           'invalid_action',
           'The isolated page could not establish a visible pre-action state.',
@@ -5607,15 +5865,11 @@ export class WrapperProofService {
         )
       }
 
-      const metrics: ActionNetworkMetrics = { allowed: 0, blocked: 0 }
       session.activeNetworkMetrics = metrics
       actionStarted = true
       if (capability.kind === 'navigation') {
         await raceWithSessionPolicy(session, session.context.setOffline(false), signal)
         session.networkMode = 'navigation'
-      } else {
-        session.networkLocked = true
-        session.networkMode = 'blocked'
       }
       actionPromise = (async () => {
         if (this.actionStartDelayMs > 0) {
@@ -5634,6 +5888,16 @@ export class WrapperProofService {
           ),
           signal,
         )
+        if (actionCaptureGuard && actionCaptureBaseline) {
+          const afterWrite = await raceWithSessionPolicy(
+            session,
+            actionCaptureGuard.snapshot(),
+            signal,
+          )
+          if (!actionCaptureStayedStable(actionCaptureBaseline, afterWrite)) {
+            throw new Error('The isolated page changed outside the native preparation write.')
+          }
+        }
         session.networkMode = 'blocked'
         await raceWithSessionPolicy(session, session.context.setOffline(true), signal)
         await raceWithSessionPolicy(session, waitForNetworkQuiescence(session, signal), signal)
@@ -5664,13 +5928,31 @@ export class WrapperProofService {
       let targetChanged = beforeActionTargetDigests === null
         && analysis.screenshotDataUrl !== beforeActionScreenshotDataUrl
       if (beforeActionTargetDigests !== null) {
+        await raceWithSessionPolicy(
+          session,
+          pausedAnimations?.reassert() ?? Promise.resolve(),
+          signal,
+        )
         const afterActionTargetDigests = await raceWithSessionPolicy(
           session,
-          captureActionTargetDigests(session.cdp, capability.action, acceptedInput),
+          captureActionTargetDigests(session.cdp, capability.action, acceptedInput, true),
           signal,
         )
         targetChanged = [...beforeActionTargetDigests].some(([backendNodeId, beforeDigest]) =>
           afterActionTargetDigests.get(backendNodeId) !== beforeDigest)
+      }
+      if (actionCaptureGuard && actionCaptureBaseline) {
+        const finalCaptureState = await raceWithSessionPolicy(
+          session,
+          actionCaptureGuard.snapshot(),
+          signal,
+        )
+        if (!actionCaptureStayedStable(actionCaptureBaseline, finalCaptureState)) {
+          throw actionVerificationError('The isolated page changed outside the native preparation write.')
+        }
+        await raceWithSessionPolicy(session, actionCaptureGuard.stop(), signal)
+        actionCaptureGuard = null
+        actionCaptureBaseline = null
       }
       if (!targetChanged) {
         throw actionVerificationError('The requested action did not produce a visible page change.')
@@ -5710,11 +5992,16 @@ export class WrapperProofService {
       if (Date.now() >= session.expiresAt) throw sessionExpiredError()
       return result
     } catch (error) {
+      const captureCleanupFailed = actionCaptureGuard
+        ? await actionCaptureGuard.stop().then(() => false, () => true)
+        : false
+      actionCaptureGuard = null
+      actionCaptureBaseline = null
       const animationRestoreFailed = pausedAnimations
         ? await pausedAnimations.restore().then(() => false, () => true)
         : false
       pausedAnimations = null
-      if (animationRestoreFailed) actionStarted = true
+      if (captureCleanupFailed || animationRestoreFailed) actionStarted = true
       const sessionExpired = error instanceof WrapperServiceError && error.code === 'session_expired'
       const explicitlyInvalidated = error instanceof WrapperServiceError && error.sessionInvalidated === true
       if (actionStarted || sessionExpired || explicitlyInvalidated) {
@@ -5736,6 +6023,7 @@ export class WrapperProofService {
       }
       throw error
     } finally {
+      await actionCaptureGuard?.stop().catch(() => undefined)
       await pausedAnimations?.restore().catch(() => undefined)
       resolveQueue()
     }
