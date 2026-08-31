@@ -1561,6 +1561,9 @@ function captureEffectiveInert(
       containsTarget: node === element || contains.call(node, element),
     })
   }
+  const topmostModal = activeModals.length > 0
+    ? activeModals[activeModals.length - 1]
+    : undefined
   const values: string[] = []
   let inert = false
   let retainedLength = 0
@@ -1582,7 +1585,7 @@ function captureEffectiveInert(
     }
     values.push(captured)
     if (raw !== null || nativeInert) inert = true
-    if (activeModals.some(({ node, containsTarget }) => containsTarget && node === current)) {
+    if (topmostModal?.containsTarget && topmostModal.node === current) {
       current = null
       break
     }
@@ -1597,8 +1600,8 @@ function captureEffectiveInert(
       return { inert: true, values, overflow: true }
     }
     values.push(marker)
-    if (!containsTarget) inert = true
   }
+  if (topmostModal && !topmostModal.containsTarget) inert = true
   if (activeModals.length === 0) {
     const marker = 'modal:none'
     retainedLength += JSON.stringify(marker).length + 8

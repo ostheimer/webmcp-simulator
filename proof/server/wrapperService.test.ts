@@ -1142,6 +1142,39 @@ async function startFixture(): Promise<Fixture> {
         <script>document.getElementById('direct-inert-modal').showModal()</script>`)
       return
     }
+    if (requestUrl.startsWith('/stacked-modal-inertness')) {
+      const olderOnly = requestUrl.includes('older-only=1')
+      response.end(`<!doctype html><title>Stacked modal inertness</title>
+        <form>
+          <input type="text" aria-label="Stacked modal background value">
+          <input type="text" aria-label="Stacked modal background detail">
+        </form>
+        <dialog id="older-modal">
+          <form id="older-modal-form">
+            <input id="older-modal-value" type="text" aria-label="Older modal value">
+            <input id="older-modal-detail" type="text" aria-label="Older modal detail">
+          </form>
+          <a href="/about#older-modal">Older modal destination</a>
+        </dialog>
+        <dialog id="topmost-modal">
+          <form id="topmost-modal-form">
+            <input id="topmost-modal-value" type="text" aria-label="Topmost modal value">
+            <input id="topmost-modal-detail" type="text" aria-label="Topmost modal detail">
+          </form>
+          <div inert>
+            <form>
+              <input type="text" aria-label="Topmost inner inert value">
+              <input type="text" aria-label="Topmost inner inert detail">
+            </form>
+          </div>
+          <a href="/about#topmost-modal">Topmost modal destination</a>
+        </dialog>
+        <script>
+          document.getElementById('older-modal').showModal();
+          if (!${olderOnly}) document.getElementById('topmost-modal').showModal();
+        </script>`)
+      return
+    }
     if (requestUrl === '/late-modal-inertness') {
       response.end(`<!doctype html><title>Late modal inertness</title>
         <form id="late-modal-form">
@@ -4098,6 +4131,103 @@ describe('WrapperProofService security boundaries', () => {
       'Direct inert modal value',
       'Direct inert modal destination',
     ]))
+  })
+
+  it('uses only the topmost modal for implicit inertness and revalidates top-layer changes', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/stacked-modal-inertness`)
+    const labels = analysis.domEvidence.map(({ label }) => label)
+
+    expect(labels).toEqual(expect.arrayContaining([
+      'Topmost modal value',
+      'Topmost modal detail',
+      'Topmost modal destination',
+    ]))
+    expect(labels).not.toEqual(expect.arrayContaining([
+      'Stacked modal background value',
+      'Older modal value',
+      'Older modal destination',
+      'Topmost inner inert value',
+    ]))
+    const topmostForm = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Topmost modal value'))!
+    expect(topmostForm).toBeDefined()
+    const page = internalSession(service, analysis.sessionId).page
+    const cdp = await page.context().newCDPSession(page)
+    await cdp.send('DOM.enable')
+    await cdp.send('DOM.getDocument', { depth: 0, pierce: true })
+    const topLayer = await cdp.send('DOM.getTopLayerElements') as { nodeIds?: number[] }
+    const modalOrder: string[] = []
+    for (const nodeId of topLayer.nodeIds ?? []) {
+      const described = await cdp.send('DOM.describeNode', { nodeId }) as {
+        node?: { nodeName?: string, attributes?: string[] }
+      }
+      if (described.node?.nodeName !== 'DIALOG') continue
+      const attributes = described.node.attributes ?? []
+      const idIndex = attributes.indexOf('id')
+      if (idIndex >= 0) modalOrder.push(attributes[idIndex + 1])
+    }
+    await cdp.detach()
+    expect(modalOrder).toEqual(['older-modal', 'topmost-modal'])
+
+    await page.locator('#topmost-modal').evaluate((dialog) => dialog.setAttribute('inert', ''))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      topmostForm.name,
+      topmostForm.sampleInput,
+      undefined,
+      topmostForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#topmost-modal-value').inputValue()).toBe('')
+    expect(await page.locator('#topmost-modal-detail').inputValue()).toBe('')
+    await page.locator('#topmost-modal').evaluate((dialog) => dialog.removeAttribute('inert'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      topmostForm.name,
+      topmostForm.sampleInput,
+      undefined,
+      topmostForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const changingAnalysis = await service.analyze(`${fixture.origin}/stacked-modal-inertness`)
+    const changingForm = changingAnalysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => changingAnalysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Topmost modal value'))!
+    const changingPage = internalSession(service, changingAnalysis.sessionId).page
+    await changingPage.locator('#topmost-modal').evaluate((dialog) => (dialog as HTMLDialogElement).close())
+    await expect(service.execute(
+      changingAnalysis.sessionId,
+      changingAnalysis.sessionToken,
+      changingForm.name,
+      changingForm.sampleInput,
+      undefined,
+      changingForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await changingPage.locator('#topmost-modal-value').inputValue()).toBe('')
+    expect(await changingPage.locator('#topmost-modal-detail').inputValue()).toBe('')
+
+    const olderAnalysis = await service.analyze(`${fixture.origin}/stacked-modal-inertness?older-only=1`)
+    const olderLabels = olderAnalysis.domEvidence.map(({ label }) => label)
+    expect(olderLabels).toEqual(expect.arrayContaining([
+      'Older modal value',
+      'Older modal detail',
+      'Older modal destination',
+    ]))
+    expect(olderLabels).not.toContain('Stacked modal background value')
+    const olderForm = olderAnalysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => olderAnalysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Older modal value'))!
+    await expect(service.execute(
+      olderAnalysis.sessionId,
+      olderAnalysis.sessionToken,
+      olderForm.name,
+      olderForm.sampleInput,
+      undefined,
+      olderForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
   it('revalidates late modal inertness before mutation and allows a fresh analysis after close', async () => {
