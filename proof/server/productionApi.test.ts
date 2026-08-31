@@ -577,12 +577,17 @@ describe('production wrapper API boundaries', () => {
     expect(analyze).toHaveBeenCalledOnce()
   })
 
-  it('closes a late backend result after timeout without retaining the trusted-source slot', async () => {
+  it('retains the trusted-source slot until a timed-out backend result and its cleanup settle', async () => {
     let resolveLate!: (value: { sessionId: string, sessionToken: string }) => void
+    let releaseCleanup!: () => void
     const analyze = vi.fn(async () => new Promise<{ sessionId: string, sessionToken: string }>((resolve) => {
       resolveLate = resolve
     }))
-    const closeSession = vi.fn(async () => true)
+    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve })
+    const closeSession = vi.fn(async () => {
+      await cleanup
+      return true
+    })
     const target = backend({ analyze, closeSession })
     const sourceIp = '198.51.100.98'
     const first = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
@@ -594,21 +599,47 @@ describe('production wrapper API boundaries', () => {
     expect(first.status).toBe(504)
 
     const retryTarget = backend()
-    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+    const overlapping = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
       url: 'https://public.example.at',
     }, {
       clientId: 'late_result_client_00002',
       sourceIp,
-    }), retryTarget, { analysisTimeoutMs: 1_000 })).status).toBe(200)
+    }), retryTarget, { analysisTimeoutMs: 1_000 })
+    expect(overlapping.status).toBe(409)
+    expect(await overlapping.json()).toMatchObject({ code: 'analysis_in_progress' })
+    expect(retryTarget.analyze).not.toHaveBeenCalled()
 
     resolveLate({ sessionId: 'late-session-id', sessionToken: 'late-session-token' })
     await vi.waitFor(() => expect(closeSession).toHaveBeenCalledOnce())
     expect(closeSession).toHaveBeenCalledWith('late-session-id', 'late-session-token')
+
+    const duringCleanup = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'late_result_client_00003',
+      sourceIp,
+    }), retryTarget, { analysisTimeoutMs: 1_000 })
+    expect(duringCleanup.status).toBe(409)
+
+    releaseCleanup()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    const retry = await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'late_result_client_00004',
+      sourceIp,
+    }), retryTarget, { analysisTimeoutMs: 1_000 })
+    expect(retry.status).toBe(200)
   })
 
   it('abandons and closes an analysis when the request is cancelled during response serialization', async () => {
     const controller = new AbortController()
-    const closeSession = vi.fn(async () => true)
+    let releaseCleanup!: () => void
+    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve })
+    const closeSession = vi.fn(async () => {
+      await cleanup
+      return true
+    })
     const sourceIp = '198.51.100.143'
     const target = backend({
       closeSession,
@@ -645,11 +676,25 @@ describe('production wrapper API boundaries', () => {
     }, {
       clientId: 'analysis_response_cancel_2',
       sourceIp,
+    }), backend(), { analysisTimeoutMs: 1_000 })).status).toBe(409)
+
+    releaseCleanup()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'analysis_response_cancel_3',
+      sourceIp,
     }), backend(), { analysisTimeoutMs: 1_000 })).status).toBe(200)
   })
 
   it('abandons and closes an analysis when its deadline expires during response serialization', async () => {
-    const closeSession = vi.fn(async () => true)
+    let releaseCleanup!: () => void
+    const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve })
+    const closeSession = vi.fn(async () => {
+      await cleanup
+      return true
+    })
     const sourceIp = '198.51.100.144'
     const target = backend({
       closeSession,
@@ -685,6 +730,15 @@ describe('production wrapper API boundaries', () => {
       url: 'https://public.example.at',
     }, {
       clientId: 'analysis_response_deadline_2',
+      sourceIp,
+    }), backend(), { analysisTimeoutMs: 1_000 })).status).toBe(409)
+
+    releaseCleanup()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((await handleAnalyzeRequest(request('/api/wrapper/analyze', {
+      url: 'https://public.example.at',
+    }, {
+      clientId: 'analysis_response_deadline_3',
       sourceIp,
     }), backend(), { analysisTimeoutMs: 1_000 })).status).toBe(200)
   })

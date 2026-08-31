@@ -313,7 +313,9 @@ async function startFixture(): Promise<Fixture> {
         ? 'pay'
         : parameters.get('target') === 'beta'
           ? 'payment'
-          : 'purchase'
+          : parameters.get('target') === 'payments'
+            ? 'payments'
+            : 'purchase'
       const resource = kind === 'script'
         ? `<script src="/${target}-resource.js"></script>`
         : kind === 'image'
@@ -376,6 +378,12 @@ async function startFixture(): Promise<Fixture> {
     if (requestUrl === '/initial-consequential-redirect') {
       response.statusCode = 302
       response.setHeader('Location', '/purchase')
+      response.end()
+      return
+    }
+    if (requestUrl === '/initial-plural-redirect') {
+      response.statusCode = 302
+      response.setHeader('Location', '/purchases')
       response.end()
       return
     }
@@ -2485,6 +2493,9 @@ async function startFixture(): Promise<Fixture> {
             <option id="native-transition-default" value="default">Default</option>
             <option id="native-transition-baseline" value="baseline">Baseline</option>
           </select>
+          <button id="native-transition-button" hidden>Hidden action</button>
+          <output id="native-transition-output" hidden>Hidden result</output>
+          <fieldset id="native-transition-fieldset" hidden></fieldset>
         </form>
         <script>
           document.getElementById('native-transition-input').value = 'baseline input';
@@ -6106,6 +6117,12 @@ describe('WrapperProofService security boundaries', () => {
     'form-reset',
     'element-click',
     'dispatch-click',
+    'input-custom-validity',
+    'textarea-custom-validity',
+    'select-custom-validity',
+    'button-custom-validity',
+    'output-custom-validity',
+    'fieldset-custom-validity',
   ])('records a bounded monotone transition for transient %s writes', async (transition) => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -6135,6 +6152,21 @@ describe('WrapperProofService security boundaries', () => {
           if (kind === 'dispatch-click') {
             checkbox.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
           }
+          if (kind === 'input-custom-validity') input.setCustomValidity('temporary invalid input')
+          if (kind === 'textarea-custom-validity') textarea.setCustomValidity('temporary invalid textarea')
+          if (kind === 'select-custom-validity') select.setCustomValidity('temporary invalid select')
+          if (kind === 'button-custom-validity') {
+            document.querySelector<HTMLButtonElement>('#native-transition-button')!
+              .setCustomValidity('temporary invalid button')
+          }
+          if (kind === 'output-custom-validity') {
+            document.querySelector<HTMLOutputElement>('#native-transition-output')!
+              .setCustomValidity('temporary invalid output')
+          }
+          if (kind === 'fieldset-custom-validity') {
+            document.querySelector<HTMLFieldSetElement>('#native-transition-fieldset')!
+              .setCustomValidity('temporary invalid fieldset')
+          }
         }, transition)
       },
       afterAnalysisScreenshot: async (page, attempt) => {
@@ -6145,7 +6177,16 @@ describe('WrapperProofService security boundaries', () => {
           checkbox.checked = false
           checkbox.indeterminate = false
           document.querySelector<HTMLTextAreaElement>('#native-transition-textarea')!.value = 'baseline textarea'
-          document.querySelector<HTMLSelectElement>('#native-transition-select')!.selectedIndex = 1
+          const input = document.querySelector<HTMLInputElement>('#native-transition-input')!
+          const textarea = document.querySelector<HTMLTextAreaElement>('#native-transition-textarea')!
+          const select = document.querySelector<HTMLSelectElement>('#native-transition-select')!
+          input.setCustomValidity('')
+          textarea.setCustomValidity('')
+          select.setCustomValidity('')
+          document.querySelector<HTMLButtonElement>('#native-transition-button')!.setCustomValidity('')
+          document.querySelector<HTMLOutputElement>('#native-transition-output')!.setCustomValidity('')
+          document.querySelector<HTMLFieldSetElement>('#native-transition-fieldset')!.setCustomValidity('')
+          select.selectedIndex = 1
         })
       },
     })
@@ -6169,6 +6210,36 @@ describe('WrapperProofService security boundaries', () => {
       afterActionScreenshot: async (page) => {
         await page.locator('#native-state-checkbox').evaluate((control) => {
           ;(control as HTMLInputElement).checked = false
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/native-control-state-capture`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('fails closed when custom validity changes transiently during an action screenshot', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringActionScreenshot: async (page) => {
+        await page.locator('#native-state-input').evaluate((control) => {
+          ;(control as HTMLInputElement).setCustomValidity('temporary hostile validity')
+        })
+      },
+      afterActionScreenshot: async (page) => {
+        await page.locator('#native-state-input').evaluate((control) => {
+          ;(control as HTMLInputElement).setCustomValidity('')
         })
       },
     })
@@ -10775,6 +10846,33 @@ describe('WrapperProofService security boundaries', () => {
     expect(isConsequentialNavigationUrl('https://example.test/üpaymentö')).toBe(false)
     expect(isConsequentialNavigationUrl('https://example.test/pay')).toBe(true)
     expect(isConsequentialNavigationUrl('https://example.test/payment')).toBe(true)
+    for (const path of [
+      'payments',
+      'orders',
+      'purchases',
+      'reservations',
+      'bookings',
+      'appointments',
+      'carts',
+      'checkouts',
+      'deletions',
+      'zahlungen',
+      'bestellungen',
+      'käufe',
+      'kündigungen',
+      'löschungen',
+      'reservierungen',
+      'subscriptions',
+      'termine',
+      'unsubscriptions',
+      'warenkörbe',
+      'buchungen',
+    ]) {
+      expect(isConsequentialNavigationUrl(`https://example.test/${path}`), path).toBe(true)
+    }
+    for (const path of ['books', 'repayments', 'preorders', 'purchasestream', 'reservationology']) {
+      expect(isConsequentialNavigationUrl(`https://example.test/${path}`), path).toBe(false)
+    }
 
     const analysis = await service.analyze(`${fixture.origin}/navigation-finance-boundaries`)
 
@@ -10787,6 +10885,38 @@ describe('WrapperProofService security boundaries', () => {
     expect(navigation.inputSchema).toMatchObject({
       properties: { linkIndex: { minimum: 0, maximum: 2 } },
     })
+  })
+
+  it('blocks consequential plural routes in initial URLs, redirects, hashes, and static resources', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+
+    for (const path of ['/payments', '/orders', '/about#/reservations', '/konto#/bestellungen']) {
+      const service = createService()
+      services.push(service)
+      const requestsBefore = fixture.requests.length
+      await expect(service.analyze(`${fixture.origin}${path}`)).rejects.toMatchObject({
+        code: 'unsupported_page',
+        status: 422,
+      })
+      expect(fixture.requests.slice(requestsBefore)).toHaveLength(0)
+    }
+
+    const redirectService = createService()
+    services.push(redirectService)
+    await expect(redirectService.analyze(`${fixture.origin}/initial-plural-redirect`)).rejects.toMatchObject({
+      code: 'unsupported_page',
+      status: 422,
+    })
+    expect(fixture.requests).toContain('/initial-plural-redirect')
+    expect(fixture.requests).not.toContain('/purchases')
+
+    const resourceService = createService()
+    services.push(resourceService)
+    await expect(resourceService.analyze(
+      `${fixture.origin}/resource-policy-initial?kind=style&target=payments`,
+    )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+    expect(fixture.requests).not.toContain('/payments-resource.css')
   })
 
   it('publishes no evidence from consequential initial, redirected, or encoded hash destinations', async () => {

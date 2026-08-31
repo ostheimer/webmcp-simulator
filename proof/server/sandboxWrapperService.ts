@@ -564,6 +564,7 @@ export class SandboxWrapperService {
     deadlineTimer.unref?.()
     const deadlineReached = () => deadlineExpired || Date.now() >= deadlineAtMs
     let sandbox: SandboxHandle | undefined
+    let workerAuthenticated = false
     const deleted = new WeakSet<object>()
     const deleteSandboxOnce = async (handle: SandboxHandle | undefined): Promise<void> => {
       if (!handle || deleted.has(handle)) return
@@ -584,7 +585,22 @@ export class SandboxWrapperService {
         sandbox = await raceSandboxOperation(reconnectPromise, operationController.signal)
       } catch (error) {
         if (operationController.signal.aborted) {
-          void reconnectPromise.then(deleteSandboxOnce).catch(() => undefined)
+          // A reconnect locator is not an authorization capability. Until the
+          // worker has authenticated sessionToken, a late provider handle must
+          // not be deleted on behalf of this untrusted caller.
+          void reconnectPromise.catch(() => undefined)
+        }
+        throw error
+      }
+      try {
+        await raceSandboxOperation(
+          this.callWorker(sandbox, sessionToken, 'health', {}, operationController.signal),
+          operationController.signal,
+        )
+        workerAuthenticated = true
+      } catch (error) {
+        if (error instanceof WrapperServiceError && error.code !== 'invalid_capability') {
+          workerAuthenticated = true
         }
         throw error
       }
@@ -663,7 +679,7 @@ export class SandboxWrapperService {
       const nonMutating = !timedOut
         && !externallyAborted
         && isNonMutatingActionRejection(error)
-      if (!nonMutating) {
+      if (!nonMutating && workerAuthenticated) {
         const cleanup = deleteSandboxOnce(sandbox)
         if (!operationController.signal.aborted) {
           await raceSandboxOperation(cleanup, operationController.signal).catch(() => undefined)

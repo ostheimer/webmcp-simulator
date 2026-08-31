@@ -344,17 +344,21 @@ export function handleAnalyzeRequest(
     'analysis_timeout',
   )
   let acceptedSession: { sessionId: string, sessionToken: string } | undefined
-  let cleanupStarted = false
-  const cleanupAnalysisSession = (sessionId: string, sessionToken: string) => {
-    if (cleanupStarted) return
-    cleanupStarted = true
-    void backend.closeSession(sessionId, sessionToken).catch(() => undefined)
+  let reservedSourceId: string | undefined
+  let releaseReservationAfter: Promise<void> | undefined
+  let cleanupPromise: Promise<void> | undefined
+  const cleanupAnalysisSession = (sessionId: string, sessionToken: string): Promise<void> => {
+    if (cleanupPromise) return cleanupPromise
+    cleanupPromise = backend.closeSession(sessionId, sessionToken)
+      .then(() => undefined)
+      .catch(() => undefined)
+    return cleanupPromise
   }
-  const cleanupLateAnalysis = (value: unknown) => {
+  const cleanupLateAnalysis = async (value: unknown): Promise<void> => {
     if (!value || typeof value !== 'object') return
     const result = value as { sessionId?: unknown, sessionToken?: unknown }
     if (typeof result.sessionId !== 'string' || typeof result.sessionToken !== 'string') return
-    cleanupAnalysisSession(result.sessionId, result.sessionToken)
+    await cleanupAnalysisSession(result.sessionId, result.sessionToken)
   }
   const assertAnalysisResponseAllowed = () => {
     if (!deadlineReached() && !request.signal.aborted) return
@@ -374,34 +378,33 @@ export function handleAnalyzeRequest(
         throw new HttpError('Only one website analysis may run for this network source.', 409, 'analysis_in_progress')
       }
       activeAnalyses.add(sourceId)
+      reservedSourceId = sourceId
+      const body = await readJson(request, operationController.signal)
+      if (typeof body.url !== 'string') throw new HttpError('url must be a string.', 400, 'invalid_url')
+      if (deadlineReached()) throw analysisTimeoutError()
+      const analysisPromise = backend.analyze(body.url, operationController.signal)
+      let result: unknown
       try {
-        const body = await readJson(request, operationController.signal)
-        if (typeof body.url !== 'string') throw new HttpError('url must be a string.', 400, 'invalid_url')
-        if (deadlineReached()) throw analysisTimeoutError()
-        const analysisPromise = backend.analyze(body.url, operationController.signal)
-        let result: unknown
-        try {
-          result = await raceRequestOperation(analysisPromise, operationController.signal)
-        } catch (error) {
-          if (operationController.signal.aborted) {
-            void analysisPromise.then(cleanupLateAnalysis).catch(() => undefined)
-          }
-          throw error
+        result = await raceRequestOperation(analysisPromise, operationController.signal)
+      } catch (error) {
+        if (operationController.signal.aborted) {
+          releaseReservationAfter = analysisPromise
+            .then(cleanupLateAnalysis)
+            .catch(() => undefined)
         }
-        if (deadlineReached()) {
-          cleanupLateAnalysis(result)
-          throw analysisTimeoutError()
-        }
-        if (result && typeof result === 'object') {
-          const session = result as { sessionId?: unknown, sessionToken?: unknown }
-          if (typeof session.sessionId === 'string' && typeof session.sessionToken === 'string') {
-            acceptedSession = { sessionId: session.sessionId, sessionToken: session.sessionToken }
-          }
-        }
-        return result
-      } finally {
-        activeAnalyses.delete(sourceId)
+        throw error
       }
+      if (deadlineReached()) {
+        releaseReservationAfter = cleanupLateAnalysis(result)
+        throw analysisTimeoutError()
+      }
+      if (result && typeof result === 'object') {
+        const session = result as { sessionId?: unknown, sessionToken?: unknown }
+        if (typeof session.sessionId === 'string' && typeof session.sessionToken === 'string') {
+          acceptedSession = { sessionId: session.sessionId, sessionToken: session.sessionToken }
+        }
+      }
+      return result
     } catch (error) {
       if (deadlineReached()) throw analysisTimeoutError()
       if (request.signal.aborted) throw requestAbortError()
@@ -410,6 +413,14 @@ export function handleAnalyzeRequest(
   }, assertAnalysisResponseAllowed).finally(() => {
     clearTimeout(deadlineTimer)
     request.signal.removeEventListener('abort', onRequestAbort)
+    const sourceId = reservedSourceId
+    if (!sourceId) return
+    const settlement = releaseReservationAfter ?? cleanupPromise
+    if (settlement) {
+      void settlement.finally(() => activeAnalyses.delete(sourceId))
+    } else {
+      activeAnalyses.delete(sourceId)
+    }
   })
 }
 

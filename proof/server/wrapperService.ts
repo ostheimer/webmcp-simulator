@@ -53,7 +53,7 @@ const MAX_CAPTURE_NATIVE_TRANSITIONS = 4_096
 const SUBFRAME_REMOVAL_ATTEMPTS = 6
 const SUBFRAME_REMOVAL_RETRY_DELAY_MS = 15
 const UNSAFE_FIELD_HINT = /(?:^|\s)(?:(?:api|access|private)\s*keys?|cvc|cvv|otp|pin|pass\s*codes?|one\s*time\s*codes?|verification\s+codes?|date\s+of\s+birth|birth\s+date|birth\s*days?|dob|geburts\s*(?:datum|tag))(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|pay|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
-const UNSAFE_NAVIGATION_HINT = /(?<![\p{L}\p{N}_])(appointment|book|booking|buy|cart|checkout|delete|deletion|logoff|logout|order|ordering|pay|payment|purchase|purchasing|removal|remove|reservation|reserve|signout|subscribe|tokens?|unsubscribe|unsubscription|termin|abmelden|abmeldung|austragen|bestellen|bestellung|buchen|buchung|entfernen|entfernung|kaufen|kasse|kündigen|kündigung|löschen|löschung|reservieren|reservierung|warenkorb)(?![\p{L}\p{N}_])/iu
+const UNSAFE_NAVIGATION_HINT = /(?<![\p{L}\p{N}_])(appointment|appointments|book|booking|bookings|buy|cart|carts|checkout|checkouts|delete|deletion|deletions|logoff|logout|order|orders|ordering|pay|payment|payments|purchase|purchases|purchasing|removal|removals|remove|reservation|reservations|reserve|signout|subscribe|subscriptions|tokens?|unsubscribe|unsubscription|unsubscriptions|termin|termine|abmelden|abmeldung|abmeldungen|austragen|bestellen|bestellung|bestellungen|buchen|buchung|buchungen|entfernen|entfernung|kaufen|käufe|kasse|kündigen|kündigung|kündigungen|löschen|löschung|löschungen|reservieren|reservierung|reservierungen|warenkorb|warenkörbe|zahlung|zahlungen)(?![\p{L}\p{N}_])/iu
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
   'additional-name',
   'address-level1',
@@ -3387,7 +3387,13 @@ async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promis
       wrapMethod(HTMLInputElement.prototype, 'stepUp');
       wrapMethod(HTMLInputElement.prototype, 'stepDown');
       wrapMethod(HTMLInputElement.prototype, 'setRangeText');
+      wrapMethod(HTMLInputElement.prototype, 'setCustomValidity');
       wrapMethod(HTMLTextAreaElement.prototype, 'setRangeText');
+      wrapMethod(HTMLTextAreaElement.prototype, 'setCustomValidity');
+      wrapMethod(HTMLSelectElement.prototype, 'setCustomValidity');
+      wrapMethod(HTMLFieldSetElement.prototype, 'setCustomValidity');
+      wrapMethod(HTMLButtonElement.prototype, 'setCustomValidity');
+      wrapMethod(HTMLOutputElement.prototype, 'setCustomValidity');
       wrapMethod(HTMLFormElement.prototype, 'reset');
       wrapMethod(HTMLElement.prototype, 'click');
       const dispatchDescriptor = getDescriptor(EventTarget.prototype, 'dispatchEvent');

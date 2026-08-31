@@ -85,6 +85,7 @@ class FakeSandbox {
   closeCommandStarted?: () => void
   getGate?: Promise<void>
   actionCommandGate?: Promise<void>
+  healthCommandGate?: Promise<void>
   actionOutputGate?: Promise<void>
   deleteGate?: Promise<void>
   deleteErrors: Error[] = []
@@ -118,8 +119,8 @@ class FakeSandbox {
   }) {
     this.commandCalls += 1
     if (params.detached) return commandResult(0, '')
-    if (this.commandError) throw this.commandError
     const operation = params.env?.WEBMCP_WORKER_OPERATION
+    if (this.commandError && operation !== 'health') throw this.commandError
     const token = params.env?.WEBMCP_SESSION_CAPABILITY
     if (operation === 'close' && this.blockCloseCommandUntilAbort) {
       this.closeCommandStarted?.()
@@ -130,6 +131,7 @@ class FakeSandbox {
       })
     }
     if (operation === 'action' && this.actionCommandGate) await this.actionCommandGate
+    if (operation === 'health' && this.healthCommandGate) await this.healthCommandGate
     if (operation === 'action' && this.delayAction) {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(resolve, 80)
@@ -139,12 +141,16 @@ class FakeSandbox {
         }, { once: true })
       })
     }
-    const status = token === this.expectedToken ? (this.forceError?.status ?? this.forceStatus ?? 200) : 401
-    const body = this.forceError && token === this.expectedToken
+    const forcedError = operation === 'action' ? this.forceError : undefined
+    const forcedStatus = operation === 'action' || operation === 'close' || this.forceStatus === 410
+      ? this.forceStatus
+      : undefined
+    const status = token === this.expectedToken ? (forcedError?.status ?? forcedStatus ?? 200) : 401
+    const body = forcedError && token === this.expectedToken
       ? {
-          error: this.forceError.error,
-          code: this.forceError.code,
-          sessionInvalidated: this.forceError.sessionInvalidated,
+          error: forcedError.error,
+          code: forcedError.code,
+          sessionInvalidated: forcedError.sessionInvalidated,
         }
       : status === 200
       ? operation === 'analyze'
@@ -923,7 +929,8 @@ describe('SandboxWrapperService session boundaries', () => {
     })
     expect(reconnect.sandbox.deleted).toBe(0)
     reconnectGate.resolve()
-    await vi.waitFor(() => expect(reconnect.sandbox.deleted).toBe(1))
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(reconnect.sandbox.deleted).toBe(0)
 
     const command = createHarness(
       { snapshotId: 'snap_reviewed' },
@@ -998,6 +1005,62 @@ describe('SandboxWrapperService session boundaries', () => {
     cleanupGate.resolve()
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(cleanup.sandbox.deleted).toBe(1)
+  })
+
+  it('does not delete a late reconnect that was never authenticated by the worker', async () => {
+    const harness = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      { actionTimeoutMs: 25 },
+    )
+    const analysis = await harness.service.analyze('https://public.example.at')
+    const commandsBefore = harness.sandbox.commandCalls
+    const reconnectGate = deferred<void>()
+    harness.sandbox.getGate = reconnectGate.promise
+
+    await expect(harness.service.execute(
+      analysis.sessionId,
+      createSessionCapability(),
+      'prepare_page_search',
+      { query: 'must not authorize provider deletion' },
+    )).rejects.toMatchObject({
+      code: 'action_timeout',
+      status: 504,
+      sessionInvalidated: true,
+    })
+    expect(harness.sandbox.commandCalls).toBe(commandsBefore)
+    expect(harness.sandbox.deleted).toBe(0)
+
+    reconnectGate.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(harness.sandbox.deleted).toBe(0)
+  })
+
+  it('does not delete an immediate reconnect while worker authentication is still pending', async () => {
+    const harness = createHarness(
+      { snapshotId: 'snap_reviewed' },
+      { actionTimeoutMs: 25 },
+    )
+    const analysis = await harness.service.analyze('https://public.example.at')
+    const commandsBefore = harness.sandbox.commandCalls
+    const authenticationGate = deferred<void>()
+    harness.sandbox.healthCommandGate = authenticationGate.promise
+
+    await expect(harness.service.execute(
+      analysis.sessionId,
+      createSessionCapability(),
+      'prepare_page_search',
+      { query: 'must not authorize provider deletion' },
+    )).rejects.toMatchObject({
+      code: 'action_timeout',
+      status: 504,
+      sessionInvalidated: true,
+    })
+    expect(harness.sandbox.commandCalls).toBe(commandsBefore + 1)
+    expect(harness.sandbox.deleted).toBe(0)
+
+    authenticationGate.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(harness.sandbox.deleted).toBe(0)
   })
 
   it('propagates abort to the command and deletes the partially mutable sandbox', async () => {
