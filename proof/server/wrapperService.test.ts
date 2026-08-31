@@ -1802,6 +1802,48 @@ async function startFixture(): Promise<Fixture> {
         </a>`)
       return
     }
+    if (requestUrl === '/paint-text-state-contract') {
+      response.end(`<!doctype html><title>Painted text state contract</title>
+        <style>
+          .paintless-text-state {
+            appearance:none;color:transparent;caret-color:transparent;
+            background:transparent;border:0;outline:0;box-shadow:none;
+            text-shadow:none;width:220px;height:38px;display:block;margin:12px;
+          }
+          .painted-text-state { color:rgb(20,80,160); }
+          .transparent-option-text option {
+            color:transparent;-webkit-text-fill-color:transparent;
+            text-shadow:none;background:transparent;
+          }
+        </style>
+        <select id="empty-selected-filter" class="paintless-text-state painted-text-state" aria-label="Empty selected filter">
+          <option value="" selected></option>
+          <option value="decoy">Nonselected decoy text</option>
+        </select>
+        <select id="painted-listbox-filter" class="paintless-text-state painted-text-state" size="2" aria-label="Painted listbox filter">
+          <option value="" selected></option>
+          <option value="visible">Visible unselected row</option>
+        </select>
+        <select id="transparent-option-listbox" class="paintless-text-state painted-text-state transparent-option-text" size="2" aria-label="Transparent option listbox">
+          <option value="" selected></option>
+          <option value="invisible">Invisible option row</option>
+        </select>
+        <select id="painted-selected-filter" class="paintless-text-state painted-text-state" aria-label="Painted selected filter">
+          <option value="one" label="" selected>Selected visible text</option>
+          <option value="two">Second visible text</option>
+        </select>
+        <textarea id="empty-current-textarea" class="paintless-text-state painted-text-state" aria-label="Empty current textarea">Stale default text</textarea>
+        <form id="painted-current-form">
+          <textarea id="painted-current-textarea" class="paintless-text-state painted-text-state" aria-label="Painted current textarea">Stale default text</textarea>
+          <input class="paintless-text-state painted-text-state" type="text" aria-label="Painted supporting field" value="Supporting visible text">
+        </form>
+        <script>
+          const valueSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+          valueSetter.call(document.getElementById('empty-current-textarea'), '');
+          valueSetter.call(document.getElementById('painted-current-textarea'), 'Current visible text');
+        </script>`)
+      return
+    }
     if (requestUrl === '/visible-state-web-animation') {
       response.end(`<!doctype html><title>Visible Web Animation contract</title>
         <select id="semantic-web-animation-filter" aria-label="Semantic Web Animation filter">
@@ -7114,6 +7156,42 @@ describe('WrapperProofService security boundaries', () => {
       { query: 'painted control' },
       undefined,
       search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('uses only the selected option and current textarea value as rendered text paint', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/paint-text-state-contract`)
+
+    expect(analysis.domEvidence.map(({ label }) => label)).toEqual([
+      'Painted listbox filter',
+      'Painted selected filter',
+      'Painted current textarea',
+      'Painted supporting field',
+    ])
+
+    const filter = analysis.capabilities.find(({ name }) => name === 'set_page_filter')!
+    const filtered = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      filter.name,
+      filter.sampleInput,
+      undefined,
+      filter.id,
+    )
+    expect(filtered).toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const form = filtered.analysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    await expect(service.execute(
+      filtered.analysis.sessionId,
+      filtered.analysis.sessionToken,
+      form.name,
+      form.sampleInput,
+      undefined,
+      form.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 

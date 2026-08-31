@@ -546,6 +546,7 @@ function isElementScreenshotVisible(
   element: HTMLElement,
   viewportWidth: number,
   viewportHeight: number,
+  maxSelectOptionsInspected: number,
 ): boolean {
   if (!element.isConnected || element.hidden) return false
   const nativeGetComputedStyle = Object.getOwnPropertyDescriptor(window, 'getComputedStyle')?.value
@@ -593,7 +594,58 @@ function isElementScreenshotVisible(
     if (target instanceof HTMLTextAreaElement) {
       const valueGetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
       if (!valueGetter) return false
-      if (/\S/.test(String(valueGetter.call(target) ?? '').slice(0, 4_097))) return true
+      return /\S/.test(String(valueGetter.call(target) ?? '').slice(0, 4_097))
+    }
+    if (target instanceof HTMLSelectElement) {
+      const selectedIndexGetter = Object.getOwnPropertyDescriptor(
+        HTMLSelectElement.prototype,
+        'selectedIndex',
+      )?.get
+      const optionsGetter = Object.getOwnPropertyDescriptor(
+        HTMLSelectElement.prototype,
+        'options',
+      )?.get
+      const sizeGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'size')?.get
+      const multipleGetter = Object.getOwnPropertyDescriptor(
+        HTMLSelectElement.prototype,
+        'multiple',
+      )?.get
+      const item = Object.getOwnPropertyDescriptor(HTMLCollection.prototype, 'item')?.value
+      const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value
+      const textGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'text')?.get
+      if (
+        !selectedIndexGetter
+        || !optionsGetter
+        || !sizeGetter
+        || !multipleGetter
+        || !item
+        || !getAttribute
+        || !textGetter
+      ) return false
+      const renderedLabel = (option: HTMLOptionElement): string => {
+        const labelAttribute = getAttribute.call(option, 'label')
+        return String(labelAttribute ? labelAttribute : textGetter.call(option) ?? '').slice(0, 4_097)
+      }
+      const options = optionsGetter.call(target) as HTMLOptionsCollection
+      const listbox = Boolean(multipleGetter.call(target)) || Number(sizeGetter.call(target)) > 1
+      if (listbox) {
+        if (options.length > maxSelectOptionsInspected) return false
+        for (let index = 0; index < options.length; index += 1) {
+          const option = item.call(options, index)
+          if (
+            option instanceof HTMLOptionElement
+            && isEffectivelyVisibleSelectOption(option)
+            && hasTextPaint(computedStyle(option))
+            && /\S/.test(renderedLabel(option))
+          ) return true
+        }
+        return false
+      }
+      const selectedIndex = Number(selectedIndexGetter.call(target))
+      if (!Number.isInteger(selectedIndex) || selectedIndex < 0) return false
+      const selected = item.call(options, selectedIndex)
+      if (!(selected instanceof HTMLOptionElement)) return false
+      return /\S/.test(renderedLabel(selected))
     }
     const createTreeWalker = Document.prototype.createTreeWalker
     const nextNode = TreeWalker.prototype.nextNode
@@ -2057,7 +2109,12 @@ function classifyDomInIsolatedWorld({
       if (
         controls.length < maxControls
         &&
-        isElementScreenshotVisible(node, viewportWidth, viewportHeight)
+        isElementScreenshotVisible(
+          node,
+          viewportWidth,
+          viewportHeight,
+          maxSelectOptionsInspected,
+        )
         && !matches.call(node, ':disabled')
         && !ariaDisabled.disabled
         && !ariaDisabled.overflow
@@ -3441,7 +3498,12 @@ function readIsolatedControlState(
   if (
     !(this instanceof HTMLElement)
     || !this.isConnected
-    || (requireVisible && !isElementScreenshotVisible(this, viewportWidth, viewportHeight))
+    || (requireVisible && !isElementScreenshotVisible(
+      this,
+      viewportWidth,
+      viewportHeight,
+      maxSelectOptionsInspected,
+    ))
   ) {
     throw new Error('The isolated control is no longer available.')
   }
@@ -3492,7 +3554,15 @@ function writeIsolatedControlState(
   maxSelectOptionsInspected: number,
   maxElementsInspected: number,
 ): void {
-  if (!(this instanceof HTMLElement) || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)) {
+  if (
+    !(this instanceof HTMLElement)
+    || !isElementScreenshotVisible(
+      this,
+      viewportWidth,
+      viewportHeight,
+      maxSelectOptionsInspected,
+    )
+  ) {
     throw new Error('The isolated control is no longer available.')
   }
   if (expectedType === 'select-one' && !(this instanceof HTMLSelectElement)) {
@@ -3593,7 +3663,12 @@ function writeIsolatedRadioGroupState(
     if (
       !(member instanceof HTMLElement)
       || !member.isConnected
-      || !isElementScreenshotVisible(member, viewportWidth, viewportHeight)
+      || !isElementScreenshotVisible(
+        member,
+        viewportWidth,
+        viewportHeight,
+        maxSelectOptionsInspected,
+      )
     ) throw new Error('The isolated radio group member is no longer available.')
     assertIsolatedSafetySnapshot(
       member,
@@ -3719,7 +3794,12 @@ function readIsolatedLinkTarget(
   )
   if (
     !(this instanceof HTMLAnchorElement)
-    || !isElementScreenshotVisible(this, viewportWidth, viewportHeight)
+    || !isElementScreenshotVisible(
+      this,
+      viewportWidth,
+      viewportHeight,
+      maxSelectOptionsInspected,
+    )
     || ariaDisabled.disabled
     || ariaDisabled.overflow
     || effectiveInert.inert
