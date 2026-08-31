@@ -1962,7 +1962,7 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
-    if (requestUrl === '/document-title-payment') {
+    if (requestUrl === '/document-title-sensitive') {
       response.end(`<!doctype html><title>Payment details</title>
         <form id="payment-title-form">
           <input type="text" aria-label="Project reference">
@@ -2430,13 +2430,32 @@ async function startFixture(): Promise<Fixture> {
         <input type="search" aria-label="Overflow state search">
         <script>
           const controls = document.createDocumentFragment();
-          for (let index = 0; index < 12; index += 1) {
+          for (let index = 0; index < 3; index += 1) {
             const input = document.createElement('input');
-            input.type = 'text'; input.hidden = true; input.value = 'x'.repeat(3000);
+            input.type = 'text'; input.hidden = true; input.value = String(index).repeat(400000);
             controls.append(input);
           }
           document.body.append(controls);
         </script>`)
+      return
+    }
+    if (requestUrl === '/native-control-state-hashed') {
+      response.end(`<!doctype html><title>Native control state hashed</title>
+        <input id="hashed-state-search" type="search" aria-label="Hashed state search">
+        <input id="raw-private-state" hidden value="short-private-state">
+        <input id="hashed-private-state" hidden>
+        <script>
+          document.getElementById('hashed-private-state').value = 'private-hash-source-'.repeat(400);
+        </script>`)
+      return
+    }
+    if (requestUrl === '/native-control-xhtml') {
+      response.setHeader('Content-Type', 'application/xhtml+xml; charset=utf-8')
+      response.end(`<?xml version="1.0" encoding="UTF-8"?>
+        <html xmlns="http://www.w3.org/1999/xhtml">
+          <head><title>XHTML native control</title></head>
+          <body><input id="xhtml-search" type="search" aria-label="XHTML state search" /></body>
+        </html>`)
       return
     }
     if (requestUrl === '/native-control-shadow-capture') {
@@ -5973,6 +5992,65 @@ describe('WrapperProofService security boundaries', () => {
     expect(JSON.stringify(analysis)).not.toContain('opaque-native-capture-secret')
   })
 
+  it('keeps short private state raw and large private state bounded-hashed while detecting either drift', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const originalHashedValue = 'private-hash-source-'.repeat(400)
+    const service = createService({
+      beforeAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          document.querySelector<HTMLInputElement>('#hashed-private-state')!.value = 'changed-hashed-state'.repeat(400)
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate((value) => {
+          document.querySelector<HTMLInputElement>('#hashed-private-state')!.value = value
+        }, originalHashedValue)
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/native-control-state-hashed`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    expect(captureCalls).toBe(2)
+    expect(search).toBeDefined()
+    expect(JSON.stringify(analysis)).not.toContain('short-private-state')
+    expect(JSON.stringify(analysis)).not.toContain('private-hash-source-')
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('retains XHTML native controls whose CDP node names are lowercase', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/native-control-xhtml`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    expect(search).toBeDefined()
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
   it('revalidates closed-shadow native control state after the screenshot', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -6062,7 +6140,7 @@ describe('WrapperProofService security boundaries', () => {
     injectPaintState = false
   })
 
-  it('fails closed when the private native-control state signature exceeds its aggregate budget', async () => {
+  it('fails closed when cumulative private native-control hash input exceeds one MiB', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     const service = createService()
@@ -6708,7 +6786,7 @@ describe('WrapperProofService security boundaries', () => {
 
     const paymentService = createService()
     services.push(paymentService)
-    const paymentAnalysis = await paymentService.analyze(`${fixture.origin}/document-title-payment`)
+    const paymentAnalysis = await paymentService.analyze(`${fixture.origin}/document-title-sensitive`)
     expect(paymentAnalysis.domEvidence.filter(({ tag }) => tag === 'input')).toEqual([
       expect.objectContaining({ label: 'Project reference', sensitive: true }),
       expect.objectContaining({ label: 'Project note', sensitive: true }),

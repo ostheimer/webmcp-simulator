@@ -46,6 +46,8 @@ const MAX_ANALYSIS_SCROLL_NODES = 512
 const MAX_ANALYSIS_WATCH_NODES = 2_048
 const MAX_ACTIVE_TOP_LAYER_ELEMENTS = 32
 const MAX_CAPTURE_NATIVE_CONTROLS = 256
+const MAX_CAPTURE_NATIVE_HASH_INPUT_LENGTH = 1024 * 1_024
+const MAX_CAPTURE_NATIVE_HASH_THRESHOLD = 256
 const MAX_CAPTURE_NATIVE_STATE_LENGTH = 32_768
 const SUBFRAME_REMOVAL_ATTEMPTS = 6
 const SUBFRAME_REMOVAL_RETRY_DELAY_MS = 15
@@ -3524,9 +3526,11 @@ function captureNativeControlStateSignature(
   nativeStateControls: Element[],
   ignoredControls: Element[],
   maxControls: number,
-  maxEvidenceLength: number,
+  maxEntryLength: number,
   maxTotalLength: number,
   maxSelectOptionsInspected: number,
+  maxHashInputLength: number,
+  hashThreshold: number,
 ): { signature: string, overflow: boolean } {
   const inputTypeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
   const inputValueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
@@ -3541,9 +3545,18 @@ function captureNativeControlStateSignature(
     HTMLTextAreaElement.prototype,
     'validity',
   )?.get
-  const selectOptionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
+  const selectMultipleGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple')?.get
+  const selectSelectedIndexGetter = Object.getOwnPropertyDescriptor(
+    HTMLSelectElement.prototype,
+    'selectedIndex',
+  )?.get
+  const selectSelectedOptionsGetter = Object.getOwnPropertyDescriptor(
+    HTMLSelectElement.prototype,
+    'selectedOptions',
+  )?.get
+  const selectValueGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.get
   const selectValidityGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'validity')?.get
-  const optionSelectedGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected')?.get
+  const optionIndexGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'index')?.get
   const item = Object.getOwnPropertyDescriptor(HTMLCollection.prototype, 'item')?.value
   const validityFields = [
     'badInput',
@@ -3560,6 +3573,11 @@ function captureNativeControlStateSignature(
   ] as const
   const validityGetters = validityFields.map((field) =>
     Object.getOwnPropertyDescriptor(ValidityState.prototype, field)?.get)
+  const textEncoder = typeof TextEncoder === 'function' ? new TextEncoder() : undefined
+  const textEncoderPrototype = textEncoder ? Object.getPrototypeOf(textEncoder) : undefined
+  const encode = textEncoderPrototype
+    ? Object.getOwnPropertyDescriptor(textEncoderPrototype, 'encode')?.value
+    : undefined
   if (
     !Array.isArray(nativeStateControls)
     || nativeStateControls.length > maxControls
@@ -3570,10 +3588,15 @@ function captureNativeControlStateSignature(
     || !inputValidityGetter
     || !textAreaValueGetter
     || !textAreaValidityGetter
-    || !selectOptionsGetter
+    || !selectMultipleGetter
+    || !selectSelectedIndexGetter
+    || !selectSelectedOptionsGetter
+    || !selectValueGetter
     || !selectValidityGetter
-    || !optionSelectedGetter
+    || !optionIndexGetter
     || !item
+    || !textEncoder
+    || typeof encode !== 'function'
     || validityGetters.some((getter) => !getter)
   ) return { signature: '', overflow: true }
 
@@ -3582,7 +3605,102 @@ function captureNativeControlStateSignature(
     .join('')
   const parts: string[] = []
   let totalLength = 0
+  let totalHashInputLength = 0
   let controls = 0
+  const sha256Hex = (bytes: Uint8Array): string => {
+    const constants = [
+      0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+      0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+      0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+      0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+      0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+      0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+      0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+      0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+      0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+      0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+      0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    ]
+    const words = new Uint32Array(64)
+    const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64
+    const message = new Uint8Array(paddedLength)
+    message.set(bytes)
+    message[bytes.length] = 0x80
+    const bitLength = bytes.length * 8
+    const bitLengthHigh = Math.floor(bitLength / 0x1_0000_0000)
+    const bitLengthLow = bitLength >>> 0
+    const lengthOffset = paddedLength - 8
+    message[lengthOffset] = bitLengthHigh >>> 24
+    message[lengthOffset + 1] = bitLengthHigh >>> 16
+    message[lengthOffset + 2] = bitLengthHigh >>> 8
+    message[lengthOffset + 3] = bitLengthHigh
+    message[lengthOffset + 4] = bitLengthLow >>> 24
+    message[lengthOffset + 5] = bitLengthLow >>> 16
+    message[lengthOffset + 6] = bitLengthLow >>> 8
+    message[lengthOffset + 7] = bitLengthLow
+    const state = [
+      0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+      0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ]
+    const rotateRight = (value: number, shift: number): number => (
+      (value >>> shift) | (value << (32 - shift))
+    ) >>> 0
+    for (let offset = 0; offset < paddedLength; offset += 64) {
+      for (let index = 0; index < 16; index += 1) {
+        const byteOffset = offset + index * 4
+        words[index] = (
+          (message[byteOffset] << 24)
+          | (message[byteOffset + 1] << 16)
+          | (message[byteOffset + 2] << 8)
+          | message[byteOffset + 3]
+        ) >>> 0
+      }
+      for (let index = 16; index < 64; index += 1) {
+        const left = words[index - 15]
+        const right = words[index - 2]
+        const sigma0 = rotateRight(left, 7) ^ rotateRight(left, 18) ^ (left >>> 3)
+        const sigma1 = rotateRight(right, 17) ^ rotateRight(right, 19) ^ (right >>> 10)
+        words[index] = (words[index - 16] + sigma0 + words[index - 7] + sigma1) >>> 0
+      }
+      let [a, b, c, d, e, f, g, h] = state
+      for (let index = 0; index < 64; index += 1) {
+        const sum1 = rotateRight(e, 6) ^ rotateRight(e, 11) ^ rotateRight(e, 25)
+        const choice = (e & f) ^ (~e & g)
+        const temporary1 = (h + sum1 + choice + constants[index] + words[index]) >>> 0
+        const sum0 = rotateRight(a, 2) ^ rotateRight(a, 13) ^ rotateRight(a, 22)
+        const majority = (a & b) ^ (a & c) ^ (b & c)
+        const temporary2 = (sum0 + majority) >>> 0
+        h = g
+        g = f
+        f = e
+        e = (d + temporary1) >>> 0
+        d = c
+        c = b
+        b = a
+        a = (temporary1 + temporary2) >>> 0
+      }
+      state[0] = (state[0] + a) >>> 0
+      state[1] = (state[1] + b) >>> 0
+      state[2] = (state[2] + c) >>> 0
+      state[3] = (state[3] + d) >>> 0
+      state[4] = (state[4] + e) >>> 0
+      state[5] = (state[5] + f) >>> 0
+      state[6] = (state[6] + g) >>> 0
+      state[7] = (state[7] + h) >>> 0
+    }
+    return state.map((word) => word.toString(16).padStart(8, '0')).join('')
+  }
+  const privateValueSignature = (value: string): unknown[] | undefined => {
+    try {
+      const bytes = encode.call(textEncoder, value) as Uint8Array
+      totalHashInputLength += bytes.byteLength
+      if (totalHashInputLength > maxHashInputLength) return undefined
+      if (bytes.byteLength <= hashThreshold) return ['raw', value]
+      return ['sha256', sha256Hex(bytes), bytes.byteLength]
+    } catch {
+      return undefined
+    }
+  }
   for (const candidate of nativeStateControls) {
     if (
       !(candidate instanceof HTMLInputElement)
@@ -3597,27 +3715,44 @@ function captureNativeControlStateSignature(
       state = ['ignored']
     } else if (candidate instanceof HTMLInputElement) {
       const value = String(inputValueGetter.call(candidate) ?? '')
-      if (value.length > maxEvidenceLength) return { signature: '', overflow: true }
+      const valueSignature = privateValueSignature(value)
+      if (!valueSignature) return { signature: '', overflow: true }
       state = [
-        value,
+        valueSignature,
         Boolean(inputCheckedGetter.call(candidate)),
         Boolean(inputIndeterminateGetter.call(candidate)),
         validitySignature(inputValidityGetter.call(candidate) as ValidityState),
       ]
     } else if (candidate instanceof HTMLTextAreaElement) {
       const value = String(textAreaValueGetter.call(candidate) ?? '')
-      if (value.length > maxEvidenceLength) return { signature: '', overflow: true }
-      state = [value, validitySignature(textAreaValidityGetter.call(candidate) as ValidityState)]
+      const valueSignature = privateValueSignature(value)
+      if (!valueSignature) return { signature: '', overflow: true }
+      state = [valueSignature, validitySignature(textAreaValidityGetter.call(candidate) as ValidityState)]
     } else {
-      const options = selectOptionsGetter.call(candidate) as HTMLOptionsCollection
-      if (options.length > maxSelectOptionsInspected) return { signature: '', overflow: true }
-      let selected = ''
-      for (let index = 0; index < options.length; index += 1) {
-        const option = item.call(options, index)
-        if (!(option instanceof HTMLOptionElement)) return { signature: '', overflow: true }
-        selected += optionSelectedGetter.call(option) ? '1' : '0'
+      const selectedOptions = selectSelectedOptionsGetter.call(candidate) as HTMLCollection
+      if (selectedOptions.length > maxSelectOptionsInspected) {
+        return { signature: '', overflow: true }
       }
-      state = [selected, validitySignature(selectValidityGetter.call(candidate) as ValidityState)]
+      const selectedIndices: number[] = []
+      for (let index = 0; index < selectedOptions.length; index += 1) {
+        const option = item.call(selectedOptions, index)
+        if (!(option instanceof HTMLOptionElement)) return { signature: '', overflow: true }
+        const optionIndex = Number(optionIndexGetter.call(option))
+        if (!Number.isInteger(optionIndex) || optionIndex < 0) {
+          return { signature: '', overflow: true }
+        }
+        selectedIndices.push(optionIndex)
+      }
+      const value = String(selectValueGetter.call(candidate) ?? '')
+      const valueSignature = privateValueSignature(value)
+      if (!valueSignature) return { signature: '', overflow: true }
+      state = [
+        Boolean(selectMultipleGetter.call(candidate)),
+        Number(selectSelectedIndexGetter.call(candidate)),
+        valueSignature,
+        selectedIndices,
+        validitySignature(selectValidityGetter.call(candidate) as ValidityState),
+      ]
     }
     const type = candidate instanceof HTMLInputElement
       ? String(inputTypeGetter.call(candidate))
@@ -3626,7 +3761,7 @@ function captureNativeControlStateSignature(
         : 'select'
     const encoded = JSON.stringify([controls, type, ...state])
     if (
-      encoded.length > maxEvidenceLength
+      encoded.length > maxEntryLength
       || totalLength + encoded.length > maxTotalLength
     ) return { signature: '', overflow: true }
     parts.push(encoded)
@@ -3657,10 +3792,14 @@ interface AnalysisCaptureGuardSnapshot {
 function actionCaptureStayedStable(
   before: AnalysisCaptureGuardSnapshot,
   after: AnalysisCaptureGuardSnapshot,
+  watchDocumentIdMutations = true,
 ): boolean {
   return !after.overflow
     && !after.topLayerOverflow
-    && after.documentIdMutationCount === before.documentIdMutationCount
+    && (
+      !watchDocumentIdMutations
+      || after.documentIdMutationCount === before.documentIdMutationCount
+    )
     && after.focusChangeCount === before.focusChangeCount
     && after.mutationCount === before.mutationCount
     && !after.nativeControlStateOverflow
@@ -3868,12 +4007,31 @@ async function createAnalysisCaptureGuard(
       if (!Array.isArray(results.nodeIds) || results.nodeIds.length !== safeResultCount) {
         throw new Error('The isolated native-control search returned an incomplete result.')
       }
+      const backendNodeIds: number[] = []
       for (const nodeId of results.nodeIds) {
         if (!Number.isInteger(nodeId) || nodeId <= 0) {
           throw new Error('The isolated native-control identity is unavailable.')
         }
-        const resolved = await cdp.send('DOM.resolveNode', {
+        const described = await cdp.send('DOM.describeNode', {
           nodeId,
+          depth: 0,
+          pierce: true,
+        }) as { node?: { backendNodeId?: number, nodeName?: string } }
+        const backendNodeId = described.node?.backendNodeId
+        const nodeName = described.node?.nodeName
+        if (
+          !Number.isInteger(backendNodeId)
+          || backendNodeId! <= 0
+          || typeof nodeName !== 'string'
+          || !['INPUT', 'TEXTAREA', 'SELECT'].includes(nodeName.toUpperCase())
+          || backendNodeIds.includes(backendNodeId!)
+        ) throw new Error('The isolated native-control search returned an invalid identity.')
+        backendNodeIds.push(backendNodeId!)
+      }
+      backendNodeIds.sort((left, right) => left - right)
+      for (const backendNodeId of backendNodeIds) {
+        const resolved = await cdp.send('DOM.resolveNode', {
+          backendNodeId,
           executionContextId,
           objectGroup,
         }) as { object?: { objectId?: string } }
@@ -3917,57 +4075,63 @@ async function createAnalysisCaptureGuard(
       const topLayerNodeIds = Array.isArray(topLayer.nodeIds) ? topLayer.nodeIds : []
       const topLayerOverflow = topLayerNodeIds.length > MAX_ACTIVE_TOP_LAYER_ELEMENTS
       const captured = await cdp.send('Runtime.evaluate', {
-        expression: `new Promise((resolve) => queueMicrotask(() => {
-          const state = globalThis[${JSON.stringify(storageKey)}];
-          const focusState = globalThis[${JSON.stringify(FOCUS_CHANGE_STATE_KEY)}];
-          const rawUrl = String(location.href ?? '');
-          const rawTitle = String(document.title ?? '');
-          const scrollLeftGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')?.get;
-          const scrollTopGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')?.get;
-          const isConnectedGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected')?.get;
-          const scrollStateMismatch = !state
-            || !Array.isArray(state.scrollBaselines)
-            || !scrollLeftGetter
-            || !scrollTopGetter
-            || !isConnectedGetter
-            || state.scrollBaselines.some(([node, left, top]) => {
-              if (!(node instanceof Element) || !isConnectedGetter.call(node)) return true;
-              try {
-                return Number(scrollLeftGetter.call(node)) !== left
-                  || Number(scrollTopGetter.call(node)) !== top;
-              } catch {
-                return true;
-              }
+        expression: `new Promise((resolve, reject) => queueMicrotask(() => {
+          try {
+            const state = globalThis[${JSON.stringify(storageKey)}];
+            const focusState = globalThis[${JSON.stringify(FOCUS_CHANGE_STATE_KEY)}];
+            const rawUrl = String(location.href ?? '');
+            const rawTitle = String(document.title ?? '');
+            const scrollLeftGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollLeft')?.get;
+            const scrollTopGetter = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTop')?.get;
+            const isConnectedGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'isConnected')?.get;
+            const scrollStateMismatch = !state
+              || !Array.isArray(state.scrollBaselines)
+              || !scrollLeftGetter
+              || !scrollTopGetter
+              || !isConnectedGetter
+              || state.scrollBaselines.some(([node, left, top]) => {
+                if (!(node instanceof Element) || !isConnectedGetter.call(node)) return true;
+                try {
+                  return Number(scrollLeftGetter.call(node)) !== left
+                    || Number(scrollTopGetter.call(node)) !== top;
+                } catch {
+                  return true;
+                }
+              });
+            const focusStateMismatch = focusState?.version !== 1
+              || !Number.isSafeInteger(focusState.count)
+              || !Number.isSafeInteger(state?.focusStartCount)
+              || focusState.count < state.focusStartCount
+              || focusState.count >= Number.MAX_SAFE_INTEGER;
+            const nativeControlState = (${captureNativeControlStateSignature.toString()})(
+              Array.isArray(state?.nativeStateControls) ? state.nativeStateControls : [],
+              Array.isArray(state?.ignoredNativeStateControls) ? state.ignoredNativeStateControls : [],
+              ${MAX_CAPTURE_NATIVE_CONTROLS},
+              ${MAX_SAFETY_EVIDENCE_LENGTH},
+              ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
+              ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+              ${MAX_CAPTURE_NATIVE_HASH_INPUT_LENGTH},
+              ${MAX_CAPTURE_NATIVE_HASH_THRESHOLD},
+            );
+            resolve({
+              documentIdMutationCount: Number(state?.documentIdMutationCount ?? -1),
+              focusChangeCount: focusStateMismatch
+                ? -1
+                : Number(focusState.count - state.focusStartCount),
+              mutationCount: Number(state?.mutationCount ?? -1),
+              nativeControlStateOverflow: Boolean(state?.nativeStateControlsOverflow)
+                || nativeControlState.overflow,
+              nativeControlStateSignature: nativeControlState.signature,
+              scrollChanged: Boolean(state?.scrollChanged),
+              scrollOverflow: Boolean(state?.scrollOverflow),
+              scrollStateMismatch,
+              url: rawUrl.slice(0, 4097),
+              title: rawTitle.slice(0, 4097),
+              overflow: rawUrl.length > 4096 || rawTitle.length > 4096 || focusStateMismatch,
             });
-          const focusStateMismatch = focusState?.version !== 1
-            || !Number.isSafeInteger(focusState.count)
-            || !Number.isSafeInteger(state?.focusStartCount)
-            || focusState.count < state.focusStartCount
-            || focusState.count >= Number.MAX_SAFE_INTEGER;
-          const nativeControlState = (${captureNativeControlStateSignature.toString()})(
-            Array.isArray(state?.nativeStateControls) ? state.nativeStateControls : [],
-            Array.isArray(state?.ignoredNativeStateControls) ? state.ignoredNativeStateControls : [],
-            ${MAX_CAPTURE_NATIVE_CONTROLS},
-            ${MAX_SAFETY_EVIDENCE_LENGTH},
-            ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
-            ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
-          );
-          resolve({
-            documentIdMutationCount: Number(state?.documentIdMutationCount ?? -1),
-            focusChangeCount: focusStateMismatch
-              ? -1
-              : Number(focusState.count - state.focusStartCount),
-            mutationCount: Number(state?.mutationCount ?? -1),
-            nativeControlStateOverflow: Boolean(state?.nativeStateControlsOverflow)
-              || nativeControlState.overflow,
-            nativeControlStateSignature: nativeControlState.signature,
-            scrollChanged: Boolean(state?.scrollChanged),
-            scrollOverflow: Boolean(state?.scrollOverflow),
-            scrollStateMismatch,
-            url: rawUrl.slice(0, 4097),
-            title: rawTitle.slice(0, 4097),
-            overflow: rawUrl.length > 4096 || rawTitle.length > 4096 || focusStateMismatch,
-          });
+          } catch (error) {
+            reject(error);
+          }
         }))`,
         contextId: executionContextId,
         awaitPromise: true,
@@ -4140,6 +4304,8 @@ async function createAnalysisCaptureGuard(
             ${MAX_SAFETY_EVIDENCE_LENGTH},
             ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
             ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+            ${MAX_CAPTURE_NATIVE_HASH_INPUT_LENGTH},
+            ${MAX_CAPTURE_NATIVE_HASH_THRESHOLD},
           );
           if (full.overflow || full.signature !== ${JSON.stringify(expectedFullSignature)}) {
             return { ok: false };
@@ -4152,6 +4318,8 @@ async function createAnalysisCaptureGuard(
             ${MAX_SAFETY_EVIDENCE_LENGTH},
             ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
             ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+            ${MAX_CAPTURE_NATIVE_HASH_INPUT_LENGTH},
+            ${MAX_CAPTURE_NATIVE_HASH_THRESHOLD},
           );
           return { ok: !result.overflow, signature: result.signature };
         })()`,
@@ -4188,6 +4356,8 @@ async function createAnalysisCaptureGuard(
             ${MAX_SAFETY_EVIDENCE_LENGTH},
             ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
             ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+            ${MAX_CAPTURE_NATIVE_HASH_INPUT_LENGTH},
+            ${MAX_CAPTURE_NATIVE_HASH_THRESHOLD},
           );
           if (masked.overflow || masked.signature !== ${JSON.stringify(expectedMaskedSignature)}) {
             return { ok: false };
@@ -4200,6 +4370,8 @@ async function createAnalysisCaptureGuard(
             ${MAX_SAFETY_EVIDENCE_LENGTH},
             ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
             ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+            ${MAX_CAPTURE_NATIVE_HASH_INPUT_LENGTH},
+            ${MAX_CAPTURE_NATIVE_HASH_THRESHOLD},
           );
           return { ok: !full.overflow, signature: full.signature };
         })()`,
@@ -6078,15 +6250,24 @@ export class WrapperProofService {
         )
         await this.beforeAnalysisScreenshot?.(session.page, attempt)
         const beforeScreenshot = await guard.snapshot()
-        if (!actionCaptureStayedStable(before, beforeScreenshot)) {
-          throw new Error('The isolated page changed before its screenshot was captured.')
-        }
+        const captureStableBeforeScreenshot = actionCaptureStayedStable(
+          before,
+          beforeScreenshot,
+          collectedDomEvidence.usesDocumentIdReferences,
+        )
         await session.cdp.send('Page.getFrameTree')
         await waitForNetworkQuiescence(session)
         const candidateScreenshot = await guard.screenshot()
         await this.afterAnalysisScreenshot?.(session.page, attempt)
         const afterScreenshot = await guard.snapshot()
-        if (!actionCaptureStayedStable(before, afterScreenshot)) {
+        if (
+          !captureStableBeforeScreenshot
+          || !actionCaptureStayedStable(
+            before,
+            afterScreenshot,
+            collectedDomEvidence.usesDocumentIdReferences,
+          )
+        ) {
           throw new Error('The isolated page changed while its screenshot was captured.')
         }
         const candidateAxEvidence = await collectAxEvidence(
