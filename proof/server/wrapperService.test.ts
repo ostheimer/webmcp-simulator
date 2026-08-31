@@ -307,16 +307,31 @@ async function startFixture(): Promise<Fixture> {
       return
     }
     if (requestUrl.startsWith('/resource-policy-initial?')) {
-      const kind = new URL(requestUrl, 'http://fixture.invalid').searchParams.get('kind')
+      const parameters = new URL(requestUrl, 'http://fixture.invalid').searchParams
+      const kind = parameters.get('kind')
+      const target = parameters.get('target') === 'alpha'
+        ? 'pay'
+        : parameters.get('target') === 'beta'
+          ? 'payment'
+          : 'purchase'
       const resource = kind === 'script'
-        ? '<script src="/purchase-resource.js"></script>'
+        ? `<script src="/${target}-resource.js"></script>`
         : kind === 'image'
-          ? '<img src="/purchase-resource.svg" alt="Decorative proof">'
+          ? `<img src="/${target}-resource.svg" alt="Decorative proof">`
           : kind === 'style'
-            ? '<link rel="stylesheet" href="/purchase-resource.css">'
-            : '<style>@font-face{font-family:proof-font;src:url("/purchase-resource.woff2")}body{font-family:proof-font}</style><span>Font proof</span>'
+            ? `<link rel="stylesheet" href="/${target}-resource.css">`
+            : `<style>@font-face{font-family:proof-font;src:url("/${target}-resource.woff2")}body{font-family:proof-font}</style><span>Font proof</span>`
       response.end(`<!doctype html><title>Consequential resource policy</title>
         ${resource}<input type="search" aria-label="Resource policy search">`)
+      return
+    }
+    if (requestUrl === '/navigation-finance-boundaries') {
+      response.end(`<!doctype html><title>Payment navigation boundaries</title>
+        <a href="/pay">Pay destination</a>
+        <a href="/payment">Payment destination</a>
+        <a href="/repayment">Repayment overview</a>
+        <a href="/payload">Payload overview</a>
+        <a href="/paymentology">Paymentology overview</a>`)
       return
     }
     if (requestUrl === '/resource-policy-safe') {
@@ -1732,12 +1747,19 @@ async function startFixture(): Promise<Fixture> {
           <input id="sensitive-otp" type="text" name="reference_two" aria-label="O&#x200B;TP" value="opaque-beta-222">
           <input id="sensitive-verification-code" type="text" name="verificationCode" aria-label="Project reference" value="opaque-gamma-333">
           <input id="sensitive-verification-codes" type="text" name="reference_four" aria-label="Verification_codes" value="opaque-delta-444">
+          <input id="sensitive-passcode" type="text" name="reference_five" aria-label="Pass&#x200B;code" value="opaque-epsilon-555">
+          <input id="sensitive-pass-code" type="text" name="passCode" aria-label="Project access" value="opaque-zeta-666">
+          <input id="sensitive-one-time-code" type="text" name="oneTimeCode" aria-label="Project token" value="opaque-eta-777">
+          <input id="sensitive-one-time-codes" type="text" name="reference_eight" aria-label="One-time_codes" value="opaque-theta-888">
         </form>
         <form id="neutral-code-boundary-form">
           <input id="neutral-spin" type="text" name="spin_setting" aria-label="Spin setting">
           <input id="neutral-pinot" type="text" name="pinot_note" aria-label="Pinot note">
           <input id="neutral-verification-status" type="text" name="verification_status" aria-label="Verification status">
           <input id="neutral-code-review" type="text" name="code_review" aria-label="Code review">
+          <input id="neutral-compass-code" type="text" name="compass_code" aria-label="Compass code">
+          <input id="neutral-pass-coding" type="text" name="pass_coding" aria-label="Pass coding">
+          <input id="neutral-one-time-estimate" type="text" name="one_time_estimate" aria-label="One time estimate">
         </form>
         <form id="late-code-form">
           <input id="late-code-one" type="text" name="project_reference" aria-label="Late project reference">
@@ -2385,6 +2407,46 @@ async function startFixture(): Promise<Fixture> {
         <script>
           addEventListener('focusin', (event) => event.stopImmediatePropagation(), true);
           addEventListener('focusout', (event) => event.stopImmediatePropagation(), true);
+        </script>`)
+      return
+    }
+    if (requestUrl === '/native-control-state-capture') {
+      response.end(`<!doctype html><title>Native control state capture</title>
+        <style>
+          #native-state-search { width:220px;height:36px;color:transparent;caret-color:transparent;background:white; }
+          body:has(#native-state-checkbox:checked) #native-state-search { background:rgb(220, 38, 38); }
+        </style>
+        <input id="native-state-search" type="search" aria-label="Native state search">
+        <input id="native-state-input" type="text" aria-label="Native state note" value="opaque-native-capture-secret">
+        <input id="native-state-checkbox" type="checkbox" aria-label="Native state toggle">
+        <textarea id="native-state-textarea" aria-label="Native state details"></textarea>
+        <select id="native-state-select" aria-label="Native state filter" required>
+          <option value="">Choose</option><option value="safe">Safe</option>
+        </select>`)
+      return
+    }
+    if (requestUrl === '/native-control-state-overflow') {
+      response.end(`<!doctype html><title>Native control state overflow</title>
+        <input type="search" aria-label="Overflow state search">
+        <script>
+          const controls = document.createDocumentFragment();
+          for (let index = 0; index < 12; index += 1) {
+            const input = document.createElement('input');
+            input.type = 'text'; input.hidden = true; input.value = 'x'.repeat(3000);
+            controls.append(input);
+          }
+          document.body.append(controls);
+        </script>`)
+      return
+    }
+    if (requestUrl === '/native-control-shadow-capture') {
+      response.end(`<!doctype html><title>Native shadow control capture</title>
+        <input type="search" aria-label="Shadow state search">
+        <div id="native-shadow-host"></div>
+        <script>
+          const root = document.getElementById('native-shadow-host').attachShadow({ mode: 'closed' });
+          root.innerHTML = '<style>input:checked{appearance:none;width:80px;height:40px;background:red}</style><input type="checkbox">';
+          globalThis.__nativeShadowCheckboxForTest = root.querySelector('input');
         </script>`)
       return
     }
@@ -5861,6 +5923,157 @@ describe('WrapperProofService security boundaries', () => {
     expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
   })
 
+  it('retries analysis when private native control state changes across the screenshot boundary', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      beforeAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          const input = document.querySelector<HTMLInputElement>('#native-state-input')!
+          const checkbox = document.querySelector<HTMLInputElement>('#native-state-checkbox')!
+          const textarea = document.querySelector<HTMLTextAreaElement>('#native-state-textarea')!
+          const select = document.querySelector<HTMLSelectElement>('#native-state-select')!
+          input.value = 'temporary native value'
+          input.setCustomValidity('temporary invalid input')
+          checkbox.checked = true
+          checkbox.indeterminate = true
+          checkbox.setCustomValidity('temporary invalid checkbox')
+          textarea.value = 'temporary textarea value'
+          textarea.setCustomValidity('temporary invalid textarea')
+          select.selectedIndex = 1
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          const input = document.querySelector<HTMLInputElement>('#native-state-input')!
+          const checkbox = document.querySelector<HTMLInputElement>('#native-state-checkbox')!
+          const textarea = document.querySelector<HTMLTextAreaElement>('#native-state-textarea')!
+          const select = document.querySelector<HTMLSelectElement>('#native-state-select')!
+          input.value = 'opaque-native-capture-secret'
+          input.setCustomValidity('')
+          checkbox.checked = false
+          checkbox.indeterminate = false
+          checkbox.setCustomValidity('')
+          textarea.value = ''
+          textarea.setCustomValidity('')
+          select.selectedIndex = 0
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/native-control-state-capture`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+    expect(JSON.stringify(analysis)).not.toContain('opaque-native-capture-secret')
+  })
+
+  it('revalidates closed-shadow native control state after the screenshot', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      afterAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          setTimeout(() => {
+            ;(globalThis as typeof globalThis & {
+              __nativeShadowCheckboxForTest: HTMLInputElement
+            }).__nativeShadowCheckboxForTest.checked = true
+          }, 0)
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/native-control-shadow-capture`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    expect(captureCalls).toBe(2)
+    expect(await page.evaluate(() => (
+      globalThis as typeof globalThis & { __nativeShadowCheckboxForTest: HTMLInputElement }
+    ).__nativeShadowCheckboxForTest.checked)).toBe(true)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it('does not mask a requested control before its pre-action screenshot', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      beforeActionStateCapture: async (page) => {
+        await page.locator('#native-state-search').evaluate((control) => {
+          ;(control as HTMLInputElement).value = 'page-authored temporary target value'
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/native-control-state-capture`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'wrapper target value' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('does not verify an action from an unrelated native control paint change', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let injectPaintState = true
+    const service = createService({
+      beforeActionStateCapture: async (page) => {
+        if (!injectPaintState) return
+        await page.locator('#native-state-checkbox').evaluate((control) => {
+          ;(control as HTMLInputElement).checked = true
+        })
+      },
+      afterActionRecapture: async (page) => {
+        if (!injectPaintState) return
+        await page.locator('#native-state-checkbox').evaluate((control) => {
+          ;(control as HTMLInputElement).checked = false
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/native-control-state-capture`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      { query: 'visually hidden target text' },
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+    injectPaintState = false
+  })
+
+  it('fails closed when the private native-control state signature exceeds its aggregate budget', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+
+    await expect(service.analyze(
+      `${fixture.origin}/native-control-state-overflow`,
+    )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
   it('rejects a focus-only action-capture transition before any native write', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -6929,17 +7142,34 @@ describe('WrapperProofService security boundaries', () => {
     let analysis = await service.analyze(`${fixture.origin}/credential-code-safety`)
     const page = internalSession(service, analysis.sessionId).page
 
-    for (const label of ['P\u200bIN', 'O\u200bTP', 'Project reference', 'Verification_codes']) {
+    for (const label of [
+      'P\u200bIN',
+      'O\u200bTP',
+      'Project reference',
+      'Verification_codes',
+      'Pass\u200bcode',
+      'Project access',
+      'Project token',
+      'One-time_codes',
+    ]) {
       expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
     }
-    for (const label of ['Spin setting', 'Pinot note', 'Verification status', 'Code review']) {
+    for (const label of [
+      'Spin setting',
+      'Pinot note',
+      'Verification status',
+      'Code review',
+      'Compass code',
+      'Pass coding',
+      'One time estimate',
+    ]) {
       expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: false })
     }
     expect(JSON.stringify({
       capabilities: analysis.capabilities,
       domEvidence: analysis.domEvidence,
       axEvidence: analysis.axEvidence,
-    })).not.toMatch(/opaque-(?:alpha-111|beta-222|gamma-333|delta-444)/)
+    })).not.toMatch(/opaque-(?:alpha-111|beta-222|gamma-333|delta-444|epsilon-555|zeta-666|eta-777|theta-888)/)
 
     const neutralEvidence = analysis.domEvidence.find(({ label }) => label === 'Spin setting')!
     const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidence.id))!
@@ -6957,13 +7187,13 @@ describe('WrapperProofService security boundaries', () => {
     const lateEvidence = analysis.domEvidence.find(({ label }) => label === 'Late project reference')!
     const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidence.id))!
     await page.locator('#late-code-one').evaluate((input) => {
-      input.setAttribute('aria-label', 'P\u200bIN')
+      input.setAttribute('aria-label', 'Pass\u200bcode')
     })
     await page.locator('#late-code-two').evaluate((input) => {
-      input.setAttribute('name', 'verificationCodes')
+      input.setAttribute('name', 'oneTimeCode')
     })
     await page.locator('#late-code-label').evaluate((label) => {
-      label.firstChild!.textContent = 'Verification code'
+      label.firstChild!.textContent = 'One-time codes'
     })
     await expect(service.execute(
       analysis.sessionId,
@@ -9956,6 +10186,16 @@ describe('WrapperProofService security boundaries', () => {
       expect(fixture.requests.slice(before), kind).not.toContain(resourcePath)
       expect(internalServiceState(service), kind).toEqual({ sessions: 0, reservations: 0 })
     }
+    for (const [selector, target] of [['alpha', 'pay'], ['beta', 'payment']] as const) {
+      const service = createService()
+      services.push(service)
+      const before = fixture.requests.length
+      await expect(service.analyze(
+        `${fixture.origin}/resource-policy-initial?kind=style&target=${selector}`,
+      )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+      expect(fixture.requests.slice(before), target).not.toContain(`/${target}-resource.css`)
+      expect(internalServiceState(service), target).toEqual({ sessions: 0, reservations: 0 })
+    }
 
     const safeService = createService()
     services.push(safeService)
@@ -10005,11 +10245,37 @@ describe('WrapperProofService security boundaries', () => {
     expect(internalServiceState(delayedActionService)).toEqual({ sessions: 0, reservations: 0 })
   }, 60_000)
 
+  it('blocks pay and payment navigation terms without rejecting neutral containing words', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+
+    expect(isConsequentialNavigationUrl('https://example.test/üpayö')).toBe(false)
+    expect(isConsequentialNavigationUrl('https://example.test/üpaymentö')).toBe(false)
+    expect(isConsequentialNavigationUrl('https://example.test/pay')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://example.test/payment')).toBe(true)
+
+    const analysis = await service.analyze(`${fixture.origin}/navigation-finance-boundaries`)
+
+    expect(analysis.domEvidence.find(({ label }) => label === 'Pay destination')).toMatchObject({ sensitive: true })
+    expect(analysis.domEvidence.find(({ label }) => label === 'Payment destination')).toMatchObject({ sensitive: true })
+    for (const label of ['Repayment overview', 'Payload overview', 'Paymentology overview']) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: false })
+    }
+    const navigation = analysis.capabilities.find(({ name }) => name === 'open_page_link')!
+    expect(navigation.inputSchema).toMatchObject({
+      properties: { linkIndex: { minimum: 0, maximum: 2 } },
+    })
+  })
+
   it('publishes no evidence from consequential initial, redirected, or encoded hash destinations', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     for (const path of [
       '/purchase',
+      '/pay',
+      '/payment',
       '/initial-consequential-redirect',
       '/initial-consequential-hash',
       '/about#/%63heckout',

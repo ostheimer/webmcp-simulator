@@ -45,10 +45,12 @@ const FOCUS_CHANGE_STATE_KEY = '__webmcp_proof_focus_changes__'
 const MAX_ANALYSIS_SCROLL_NODES = 512
 const MAX_ANALYSIS_WATCH_NODES = 2_048
 const MAX_ACTIVE_TOP_LAYER_ELEMENTS = 32
+const MAX_CAPTURE_NATIVE_CONTROLS = 256
+const MAX_CAPTURE_NATIVE_STATE_LENGTH = 32_768
 const SUBFRAME_REMOVAL_ATTEMPTS = 6
 const SUBFRAME_REMOVAL_RETRY_DELAY_MS = 15
-const UNSAFE_FIELD_HINT = /(?:^|\s)(?:(?:api|access|private)\s*keys?|cvc|cvv|otp|pin|verification\s+codes?)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|pay|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
-const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|delete|deletion|logoff|logout|order|ordering|purchase|purchasing|removal|remove|reservation|reserve|signout|subscribe|tokens?|unsubscribe|unsubscription|termin|abmelden|abmeldung|austragen|bestellen|bestellung|buchen|buchung|entfernen|entfernung|kaufen|kasse|kündigen|kündigung|löschen|löschung|reservieren|reservierung|warenkorb)\b/i
+const UNSAFE_FIELD_HINT = /(?:^|\s)(?:(?:api|access|private)\s*keys?|cvc|cvv|otp|pin|pass\s*codes?|one\s*time\s*codes?|verification\s+codes?)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|pay|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
+const UNSAFE_NAVIGATION_HINT = /(?<![\p{L}\p{N}_])(appointment|book|booking|buy|cart|checkout|delete|deletion|logoff|logout|order|ordering|pay|payment|purchase|purchasing|removal|remove|reservation|reserve|signout|subscribe|tokens?|unsubscribe|unsubscription|termin|abmelden|abmeldung|austragen|bestellen|bestellung|buchen|buchung|entfernen|entfernung|kaufen|kasse|kündigen|kündigung|löschen|löschung|reservieren|reservierung|warenkorb)(?![\p{L}\p{N}_])/iu
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
   'additional-name',
   'address-level1',
@@ -2528,7 +2530,7 @@ function classifyDomInIsolatedWorld({
   usesDocumentIdReferences: boolean
 } {
     const unsafePattern = new RegExp(unsafePatternSource, 'i')
-    const unsafeNavigationPattern = new RegExp(unsafeNavigationPatternSource, 'i')
+    const unsafeNavigationPattern = new RegExp(unsafeNavigationPatternSource, 'iu')
     const sensitiveAutocomplete = new Set<string>(sensitiveAutocompleteTokens)
     const captureSourceState = {
       elements: [] as Element[],
@@ -3518,10 +3520,127 @@ async function collectDomEvidence(
   }
 }
 
+function captureNativeControlStateSignature(
+  nativeStateControls: Element[],
+  ignoredControls: Element[],
+  maxControls: number,
+  maxEvidenceLength: number,
+  maxTotalLength: number,
+  maxSelectOptionsInspected: number,
+): { signature: string, overflow: boolean } {
+  const inputTypeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
+  const inputValueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+  const inputCheckedGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.get
+  const inputIndeterminateGetter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'indeterminate',
+  )?.get
+  const inputValidityGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'validity')?.get
+  const textAreaValueGetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
+  const textAreaValidityGetter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    'validity',
+  )?.get
+  const selectOptionsGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options')?.get
+  const selectValidityGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'validity')?.get
+  const optionSelectedGetter = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected')?.get
+  const item = Object.getOwnPropertyDescriptor(HTMLCollection.prototype, 'item')?.value
+  const validityFields = [
+    'badInput',
+    'customError',
+    'patternMismatch',
+    'rangeOverflow',
+    'rangeUnderflow',
+    'stepMismatch',
+    'tooLong',
+    'tooShort',
+    'typeMismatch',
+    'valid',
+    'valueMissing',
+  ] as const
+  const validityGetters = validityFields.map((field) =>
+    Object.getOwnPropertyDescriptor(ValidityState.prototype, field)?.get)
+  if (
+    !Array.isArray(nativeStateControls)
+    || nativeStateControls.length > maxControls
+    || !inputTypeGetter
+    || !inputValueGetter
+    || !inputCheckedGetter
+    || !inputIndeterminateGetter
+    || !inputValidityGetter
+    || !textAreaValueGetter
+    || !textAreaValidityGetter
+    || !selectOptionsGetter
+    || !selectValidityGetter
+    || !optionSelectedGetter
+    || !item
+    || validityGetters.some((getter) => !getter)
+  ) return { signature: '', overflow: true }
+
+  const validitySignature = (validity: ValidityState): string => validityGetters
+    .map((getter) => getter!.call(validity) ? '1' : '0')
+    .join('')
+  const parts: string[] = []
+  let totalLength = 0
+  let controls = 0
+  for (const candidate of nativeStateControls) {
+    if (
+      !(candidate instanceof HTMLInputElement)
+      && !(candidate instanceof HTMLTextAreaElement)
+      && !(candidate instanceof HTMLSelectElement)
+    ) continue
+    controls += 1
+    if (controls > maxControls) return { signature: '', overflow: true }
+
+    let state: unknown[]
+    if (ignoredControls.includes(candidate)) {
+      state = ['ignored']
+    } else if (candidate instanceof HTMLInputElement) {
+      const value = String(inputValueGetter.call(candidate) ?? '')
+      if (value.length > maxEvidenceLength) return { signature: '', overflow: true }
+      state = [
+        value,
+        Boolean(inputCheckedGetter.call(candidate)),
+        Boolean(inputIndeterminateGetter.call(candidate)),
+        validitySignature(inputValidityGetter.call(candidate) as ValidityState),
+      ]
+    } else if (candidate instanceof HTMLTextAreaElement) {
+      const value = String(textAreaValueGetter.call(candidate) ?? '')
+      if (value.length > maxEvidenceLength) return { signature: '', overflow: true }
+      state = [value, validitySignature(textAreaValidityGetter.call(candidate) as ValidityState)]
+    } else {
+      const options = selectOptionsGetter.call(candidate) as HTMLOptionsCollection
+      if (options.length > maxSelectOptionsInspected) return { signature: '', overflow: true }
+      let selected = ''
+      for (let index = 0; index < options.length; index += 1) {
+        const option = item.call(options, index)
+        if (!(option instanceof HTMLOptionElement)) return { signature: '', overflow: true }
+        selected += optionSelectedGetter.call(option) ? '1' : '0'
+      }
+      state = [selected, validitySignature(selectValidityGetter.call(candidate) as ValidityState)]
+    }
+    const type = candidate instanceof HTMLInputElement
+      ? String(inputTypeGetter.call(candidate))
+      : candidate instanceof HTMLTextAreaElement
+        ? 'textarea'
+        : 'select'
+    const encoded = JSON.stringify([controls, type, ...state])
+    if (
+      encoded.length > maxEvidenceLength
+      || totalLength + encoded.length > maxTotalLength
+    ) return { signature: '', overflow: true }
+    parts.push(encoded)
+    totalLength += encoded.length
+  }
+  return { signature: parts.join('\n'), overflow: false }
+}
+
 interface AnalysisCaptureGuardSnapshot {
   documentIdMutationCount: number
   focusChangeCount: number
   mutationCount: number
+  nativeControlStateOverflow: boolean
+  nativeControlStateSignature: string
   navigationCount: number
   scrollChanged: boolean
   scrollOverflow: boolean
@@ -3544,6 +3663,8 @@ function actionCaptureStayedStable(
     && after.documentIdMutationCount === before.documentIdMutationCount
     && after.focusChangeCount === before.focusChangeCount
     && after.mutationCount === before.mutationCount
+    && !after.nativeControlStateOverflow
+    && after.nativeControlStateSignature === before.nativeControlStateSignature
     && after.navigationCount === before.navigationCount
     && !after.scrollChanged
     && !after.scrollOverflow
@@ -3561,6 +3682,7 @@ function actionCaptureStartedClean(snapshot: AnalysisCaptureGuardSnapshot): bool
     && snapshot.documentIdMutationCount === 0
     && snapshot.focusChangeCount === 0
     && snapshot.mutationCount === 0
+    && !snapshot.nativeControlStateOverflow
     && snapshot.navigationCount === 0
     && !snapshot.scrollChanged
     && !snapshot.scrollOverflow
@@ -3580,6 +3702,8 @@ async function createAnalysisCaptureGuard(
     watchWholeDocument?: boolean,
     duringArm?: () => Promise<void>,
   ) => Promise<void>
+  maskBoundControlStates: (expectedFullSignature: string) => Promise<string>
+  rebaseBoundControlStates: (expectedMaskedSignature: string) => Promise<string>
   screenshot: () => Promise<Buffer>
   stop: () => Promise<void>
 }> {
@@ -3621,6 +3745,9 @@ async function createAnalysisCaptureGuard(
         watched: [],
         watchOverflow: false,
         controls: [],
+        ignoredNativeStateControls: [],
+        nativeStateControls: [],
+        nativeStateControlsOverflow: false,
         scrollNodes: [],
         scrollBaselines: [],
         pendingScrollTargets: [],
@@ -3706,8 +3833,86 @@ async function createAnalysisCaptureGuard(
     throw new Error('The isolated analysis mutation guard could not be created.')
   }
 
+  const refreshNativeStateControls = async () => {
+    const search = await cdp.send('DOM.performSearch', {
+      query: 'input, textarea, select',
+      includeUserAgentShadowDOM: true,
+    }) as { searchId?: string, resultCount?: number }
+    const searchId = search.searchId
+    const resultCount = search.resultCount
+    if (!searchId || !Number.isInteger(resultCount) || resultCount! < 0) {
+      throw new Error('The isolated native-control search became unavailable.')
+    }
+    const safeResultCount = Number(resultCount)
+    try {
+      const reset = await cdp.send('Runtime.evaluate', {
+        expression: `(() => {
+          const state = globalThis[${JSON.stringify(storageKey)}];
+          if (!state) return false;
+          state.nativeStateControls = [];
+          state.nativeStateControlsOverflow = ${safeResultCount > MAX_CAPTURE_NATIVE_CONTROLS};
+          return true;
+        })()`,
+        contextId: executionContextId,
+        returnByValue: true,
+      }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
+      if (reset.exceptionDetails || reset.result?.value !== true) {
+        throw new Error('The isolated native-control state could not be reset.')
+      }
+      if (safeResultCount > MAX_CAPTURE_NATIVE_CONTROLS || safeResultCount === 0) return
+      const results = await cdp.send('DOM.getSearchResults', {
+        searchId,
+        fromIndex: 0,
+        toIndex: safeResultCount,
+      }) as { nodeIds?: number[] }
+      if (!Array.isArray(results.nodeIds) || results.nodeIds.length !== safeResultCount) {
+        throw new Error('The isolated native-control search returned an incomplete result.')
+      }
+      for (const nodeId of results.nodeIds) {
+        if (!Number.isInteger(nodeId) || nodeId <= 0) {
+          throw new Error('The isolated native-control identity is unavailable.')
+        }
+        const resolved = await cdp.send('DOM.resolveNode', {
+          nodeId,
+          executionContextId,
+          objectGroup,
+        }) as { object?: { objectId?: string } }
+        const objectId = resolved.object?.objectId
+        if (!objectId) throw new Error('The isolated native-control identity expired during capture.')
+        const retained = await cdp.send('Runtime.callFunctionOn', {
+          functionDeclaration: `function(maxControls) {
+            const state = globalThis[${JSON.stringify(storageKey)}];
+            if (
+              !state
+              || !Array.isArray(state.nativeStateControls)
+              || !(
+                this instanceof HTMLInputElement
+                || this instanceof HTMLTextAreaElement
+                || this instanceof HTMLSelectElement
+              )
+              || state.nativeStateControls.includes(this)
+              || state.nativeStateControls.length >= maxControls
+            ) return false;
+            state.nativeStateControls.push(this);
+            return true;
+          }`,
+          objectId,
+          arguments: [{ value: MAX_CAPTURE_NATIVE_CONTROLS }],
+          objectGroup,
+          returnByValue: true,
+        }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
+        if (retained.exceptionDetails || retained.result?.value !== true) {
+          throw new Error('The isolated native-control identity could not be retained.')
+        }
+      }
+    } finally {
+      await cdp.send('DOM.discardSearchResults', { searchId }).catch(() => undefined)
+    }
+  }
+
   return {
     snapshot: async () => {
+      await refreshNativeStateControls()
       const topLayer = await cdp.send('DOM.getTopLayerElements') as { nodeIds?: number[] }
       const topLayerNodeIds = Array.isArray(topLayer.nodeIds) ? topLayer.nodeIds : []
       const topLayerOverflow = topLayerNodeIds.length > MAX_ACTIVE_TOP_LAYER_ELEMENTS
@@ -3739,12 +3944,23 @@ async function createAnalysisCaptureGuard(
             || !Number.isSafeInteger(state?.focusStartCount)
             || focusState.count < state.focusStartCount
             || focusState.count >= Number.MAX_SAFE_INTEGER;
+          const nativeControlState = (${captureNativeControlStateSignature.toString()})(
+            Array.isArray(state?.nativeStateControls) ? state.nativeStateControls : [],
+            Array.isArray(state?.ignoredNativeStateControls) ? state.ignoredNativeStateControls : [],
+            ${MAX_CAPTURE_NATIVE_CONTROLS},
+            ${MAX_SAFETY_EVIDENCE_LENGTH},
+            ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
+            ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+          );
           resolve({
             documentIdMutationCount: Number(state?.documentIdMutationCount ?? -1),
             focusChangeCount: focusStateMismatch
               ? -1
               : Number(focusState.count - state.focusStartCount),
             mutationCount: Number(state?.mutationCount ?? -1),
+            nativeControlStateOverflow: Boolean(state?.nativeStateControlsOverflow)
+              || nativeControlState.overflow,
+            nativeControlStateSignature: nativeControlState.signature,
             scrollChanged: Boolean(state?.scrollChanged),
             scrollOverflow: Boolean(state?.scrollOverflow),
             scrollStateMismatch,
@@ -3772,7 +3988,12 @@ async function createAnalysisCaptureGuard(
         topLayerOverflow,
       }
     },
-    arm: async (controlBackendNodeIds, watchBackendNodeIds, watchWholeDocument = false, duringArm) => {
+    arm: async (
+      controlBackendNodeIds,
+      watchBackendNodeIds,
+      watchWholeDocument = false,
+      duringArm,
+    ) => {
       if (watchWholeDocument) {
         const documentWatched = await cdp.send('Runtime.evaluate', {
           expression: `(() => {
@@ -3881,6 +4102,7 @@ async function createAnalysisCaptureGuard(
           )) state.scrollChanged = true;
           state.pendingScrollTargets = [];
           state.scrollArmed = true;
+          state.ignoredNativeStateControls = [];
           if (state.watchOverflow) return false;
           if (state.mutationCount === 0) {
             state.observer.observe(document.documentElement, {
@@ -3898,6 +4120,102 @@ async function createAnalysisCaptureGuard(
       if (armed.exceptionDetails || armed.result?.value !== true) {
         throw new Error('The isolated analysis mutation guard could not be armed.')
       }
+    },
+    maskBoundControlStates: async (expectedFullSignature) => {
+      await refreshNativeStateControls()
+      const masked = await cdp.send('Runtime.evaluate', {
+        expression: `(() => {
+          const state = globalThis[${JSON.stringify(storageKey)}];
+          if (
+            !state
+            || state.nativeStateControlsOverflow
+            || !Array.isArray(state.nativeStateControls)
+            || !Array.isArray(state.ignoredNativeStateControls)
+          ) return { ok: false };
+          const capture = (${captureNativeControlStateSignature.toString()});
+          const full = capture(
+            state.nativeStateControls,
+            [],
+            ${MAX_CAPTURE_NATIVE_CONTROLS},
+            ${MAX_SAFETY_EVIDENCE_LENGTH},
+            ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
+            ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+          );
+          if (full.overflow || full.signature !== ${JSON.stringify(expectedFullSignature)}) {
+            return { ok: false };
+          }
+          state.ignoredNativeStateControls = state.controls.slice();
+          const result = capture(
+            state.nativeStateControls,
+            state.ignoredNativeStateControls,
+            ${MAX_CAPTURE_NATIVE_CONTROLS},
+            ${MAX_SAFETY_EVIDENCE_LENGTH},
+            ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
+            ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+          );
+          return { ok: !result.overflow, signature: result.signature };
+        })()`,
+        contextId: executionContextId,
+        returnByValue: true,
+      }) as {
+        result?: { value?: { ok?: boolean, signature?: string } }
+        exceptionDetails?: unknown
+      }
+      const result = masked.result?.value
+      if (
+        masked.exceptionDetails
+        || result?.ok !== true
+        || typeof result.signature !== 'string'
+      ) throw new Error('The isolated native-control state changed before the preparation write.')
+      return result.signature
+    },
+    rebaseBoundControlStates: async (expectedMaskedSignature) => {
+      await refreshNativeStateControls()
+      const rebased = await cdp.send('Runtime.evaluate', {
+        expression: `(() => {
+          const state = globalThis[${JSON.stringify(storageKey)}];
+          if (
+            !state
+            || state.nativeStateControlsOverflow
+            || !Array.isArray(state.nativeStateControls)
+            || !Array.isArray(state.ignoredNativeStateControls)
+          ) return { ok: false };
+          const capture = (${captureNativeControlStateSignature.toString()});
+          const masked = capture(
+            state.nativeStateControls,
+            state.ignoredNativeStateControls,
+            ${MAX_CAPTURE_NATIVE_CONTROLS},
+            ${MAX_SAFETY_EVIDENCE_LENGTH},
+            ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
+            ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+          );
+          if (masked.overflow || masked.signature !== ${JSON.stringify(expectedMaskedSignature)}) {
+            return { ok: false };
+          }
+          state.ignoredNativeStateControls = [];
+          const full = capture(
+            state.nativeStateControls,
+            [],
+            ${MAX_CAPTURE_NATIVE_CONTROLS},
+            ${MAX_SAFETY_EVIDENCE_LENGTH},
+            ${MAX_CAPTURE_NATIVE_STATE_LENGTH},
+            ${WRAPPER_MAX_SELECT_OPTIONS_INSPECTED},
+          );
+          return { ok: !full.overflow, signature: full.signature };
+        })()`,
+        contextId: executionContextId,
+        returnByValue: true,
+      }) as {
+        result?: { value?: { ok?: boolean, signature?: string } }
+        exceptionDetails?: unknown
+      }
+      const result = rebased.result?.value
+      if (
+        rebased.exceptionDetails
+        || result?.ok !== true
+        || typeof result.signature !== 'string'
+      ) throw new Error('The isolated native-control state changed outside the preparation target.')
+      return result.signature
     },
     screenshot: async () => {
       return captureViewportScreenshot(cdp)
@@ -5759,10 +6077,18 @@ export class WrapperProofService {
           collectedDomEvidence.watchBackendNodeIds,
         )
         await this.beforeAnalysisScreenshot?.(session.page, attempt)
+        const beforeScreenshot = await guard.snapshot()
+        if (!actionCaptureStayedStable(before, beforeScreenshot)) {
+          throw new Error('The isolated page changed before its screenshot was captured.')
+        }
         await session.cdp.send('Page.getFrameTree')
         await waitForNetworkQuiescence(session)
         const candidateScreenshot = await guard.screenshot()
         await this.afterAnalysisScreenshot?.(session.page, attempt)
+        const afterScreenshot = await guard.snapshot()
+        if (!actionCaptureStayedStable(before, afterScreenshot)) {
+          throw new Error('The isolated page changed while its screenshot was captured.')
+        }
         const candidateAxEvidence = await collectAxEvidence(
           session.context,
           session.page,
@@ -5787,6 +6113,8 @@ export class WrapperProofService {
           || after.topLayerSignature !== before.topLayerSignature
           || after.focusChangeCount !== before.focusChangeCount
           || after.mutationCount !== 0
+          || after.nativeControlStateOverflow
+          || after.nativeControlStateSignature !== before.nativeControlStateSignature
           || (
             collectedDomEvidence.usesDocumentIdReferences
             && after.documentIdMutationCount !== before.documentIdMutationCount
@@ -6391,6 +6719,16 @@ export class WrapperProofService {
               .catch(() => this.destroySession(sessionId))
             throw error
           }
+          if (actionCaptureGuard && actionCaptureBaseline) {
+            const beforeCapture = await raceWithSessionPolicy(
+              session,
+              actionCaptureGuard.snapshot(),
+              signal,
+            )
+            if (!actionCaptureStayedStable(actionCaptureBaseline, beforeCapture)) {
+              throw new Error('The isolated page changed before its visible action state was captured.')
+            }
+          }
         }
         beforeActionScreenshotDataUrl = screenshotDataUrl(await raceWithSessionPolicy(
           session,
@@ -6404,6 +6742,16 @@ export class WrapperProofService {
               captureActionTargetDigests(session.cdp, capability.action, acceptedInput, false),
               signal,
             )
+        if (actionCaptureGuard && actionCaptureBaseline) {
+          const afterCapture = await raceWithSessionPolicy(
+            session,
+            actionCaptureGuard.snapshot(),
+            signal,
+          )
+          if (!actionCaptureStayedStable(actionCaptureBaseline, afterCapture)) {
+            throw new Error('The isolated page changed while its visible action state was captured.')
+          }
+        }
       } catch (error) {
         if (signal?.aborted || error instanceof WrapperServiceError) throw error
         let pageDriftedDuringCapture = false
@@ -6459,6 +6807,19 @@ export class WrapperProofService {
           await raceWithSessionPolicy(session, waitFor(this.actionStartDelayMs), signal)
         }
         throwIfAborted(signal)
+        if (actionCaptureGuard && actionCaptureBaseline) {
+          const maskedNativeSignature = await raceWithSessionPolicy(
+            session,
+            actionCaptureGuard.maskBoundControlStates(
+              actionCaptureBaseline.nativeControlStateSignature,
+            ),
+            signal,
+          )
+          actionCaptureBaseline = {
+            ...actionCaptureBaseline,
+            nativeControlStateSignature: maskedNativeSignature,
+          }
+        }
         const evidence = await raceWithSessionPolicy(
           session,
           applyAction(
@@ -6480,6 +6841,23 @@ export class WrapperProofService {
           if (!actionCaptureStayedStable(actionCaptureBaseline, afterWrite)) {
             throw new Error('The isolated page changed outside the native preparation write.')
           }
+          const rebasedNativeSignature = await raceWithSessionPolicy(
+            session,
+            actionCaptureGuard.rebaseBoundControlStates(afterWrite.nativeControlStateSignature),
+            signal,
+          )
+          const fullAfterWrite = await raceWithSessionPolicy(
+            session,
+            actionCaptureGuard.snapshot(),
+            signal,
+          )
+          if (!actionCaptureStayedStable({
+            ...actionCaptureBaseline,
+            nativeControlStateSignature: rebasedNativeSignature,
+          }, fullAfterWrite)) {
+            throw new Error('The isolated page changed while native preparation state was rebound.')
+          }
+          actionCaptureBaseline = fullAfterWrite
         }
         session.networkMode = 'blocked'
         await raceWithSessionPolicy(session, session.context.setOffline(true), signal)
