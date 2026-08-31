@@ -1903,6 +1903,23 @@ async function startFixture(): Promise<Fixture> {
         </select>`)
       return
     }
+    if (requestUrl === '/id-paint-action-contract') {
+      response.end(`<!doctype html><title>ID paint action contract</title>
+        <style>
+          .id-paint-stack { position:relative;width:220px;height:36px }
+          #id-paint-target { appearance:none;position:absolute;inset:0;width:220px;height:36px }
+          #idle-id-paint { display:none }
+          #armed-id-paint { display:block;position:absolute;inset:0;z-index:2;pointer-events:none;background:rgb(255,0,0) }
+        </style>
+        <div class="id-paint-stack">
+          <select id="id-paint-target" aria-label="ID paint filter">
+            <option value="one" selected>Same visible label</option>
+            <option value="two">Same visible label</option>
+          </select>
+          <div id="idle-id-paint" aria-hidden="true"></div>
+        </div>`)
+      return
+    }
     if (requestUrl === '/dynamic-render-contract') {
       const animatedSvg = encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="220" height="36"><rect width="220" height="36" fill="red"><animate attributeName="fill" values="red;blue;red" dur="0.08s" repeatCount="indefinite"/></rect></svg>`)
       response.end(`<!doctype html><title>Dynamic render contract</title>
@@ -7164,6 +7181,28 @@ describe('WrapperProofService security boundaries', () => {
       )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
       expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
     }
+
+    const idPaintService = createService({
+      beforeControlWrite: async (page) => {
+        await page.locator('#idle-id-paint').evaluate((node) => {
+          node.id = 'armed-id-paint'
+        })
+      },
+    })
+    services.push(idPaintService)
+    const idPaintAnalysis = await idPaintService.analyze(`${fixture.origin}/id-paint-action-contract`)
+    const idPaintEvidence = idPaintAnalysis.domEvidence.find(({ label }) => label === 'ID paint filter')!
+    const idPaintCapability = idPaintAnalysis.capabilities.find(({ evidenceIds }) =>
+      evidenceIds.includes(idPaintEvidence.id))!
+    await expect(idPaintService.execute(
+      idPaintAnalysis.sessionId,
+      idPaintAnalysis.sessionToken,
+      idPaintCapability.name,
+      idPaintCapability.sampleInput,
+      undefined,
+      idPaintCapability.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(idPaintService)).toEqual({ sessions: 0, reservations: 0 })
   }, 15_000)
 
   it('rejects intersecting dynamic paint while preserving unrelated visible actions', async () => {
@@ -8067,16 +8106,21 @@ describe('WrapperProofService security boundaries', () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
     let referencedCaptureCalls = 0
+    let referencedRetargetConsumed = false
+    let referencedRetargetActive = false
     const referenced = createService({
       beforeAnalysisScreenshot: async (page, attempt) => {
         referencedCaptureCalls += 1
-        if (attempt !== 0) return
+        if (attempt !== 0 || referencedRetargetConsumed) return
+        referencedRetargetConsumed = true
+        referencedRetargetActive = true
         await page.locator('#watch-id-retarget-decoy').evaluate((node) => {
           node.id = 'watch-form-reference'
         })
       },
-      afterAnalysisScreenshot: async (page, attempt) => {
-        if (attempt !== 0) return
+      afterAnalysisScreenshot: async (page) => {
+        if (!referencedRetargetActive) return
+        referencedRetargetActive = false
         await page.locator('span').filter({ hasText: 'Credit card number' }).evaluate((node) => {
           node.id = 'watch-id-retarget-decoy'
         })

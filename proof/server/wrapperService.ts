@@ -3170,6 +3170,7 @@ function actionCaptureStayedStable(
 ): boolean {
   return !after.overflow
     && !after.topLayerOverflow
+    && after.documentIdMutationCount === before.documentIdMutationCount
     && after.mutationCount === before.mutationCount
     && after.navigationCount === before.navigationCount
     && !after.scrollChanged
