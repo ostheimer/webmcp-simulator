@@ -1104,6 +1104,44 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/modal-ancestor-inertness') {
+      response.end(`<!doctype html><title>Modal ancestor inertness</title>
+        <form>
+          <input type="text" aria-label="Modal ancestor background value">
+          <input type="text" aria-label="Modal ancestor background detail">
+        </form>
+        <section inert>
+          <dialog id="ancestor-inert-modal">
+            <form id="ancestor-inert-modal-form">
+              <input id="ancestor-inert-modal-value" type="text" aria-label="Escaped modal value">
+              <input id="ancestor-inert-modal-detail" type="text" aria-label="Escaped modal detail">
+              <label><input id="ancestor-inert-radio-a" type="radio" name="modal-choice" checked> Modal choice A</label>
+              <label><input id="ancestor-inert-radio-b" type="radio" name="modal-choice"> Modal choice B</label>
+            </form>
+            <div inert>
+              <form>
+                <input type="text" aria-label="Inner inert modal value">
+                <input type="text" aria-label="Inner inert modal detail">
+              </form>
+            </div>
+            <a href="/about#escaped-modal">Escaped modal destination</a>
+          </dialog>
+        </section>
+        <script>document.getElementById('ancestor-inert-modal').showModal()</script>`)
+      return
+    }
+    if (requestUrl === '/direct-inert-modal') {
+      response.end(`<!doctype html><title>Direct inert modal</title>
+        <dialog inert id="direct-inert-modal">
+          <form>
+            <input type="text" aria-label="Direct inert modal value">
+            <input type="text" aria-label="Direct inert modal detail">
+          </form>
+          <a href="/about#direct-inert-modal">Direct inert modal destination</a>
+        </dialog>
+        <script>document.getElementById('direct-inert-modal').showModal()</script>`)
+      return
+    }
     if (requestUrl === '/late-modal-inertness') {
       response.end(`<!doctype html><title>Late modal inertness</title>
         <form id="late-modal-form">
@@ -3997,6 +4035,69 @@ describe('WrapperProofService security boundaries', () => {
       'Shadow background destination',
     ]))
     expect(JSON.stringify(shadowAnalysis)).not.toMatch(/modal:(?:none|\d+:)/)
+  })
+
+  it('lets an active modal escape inherited inertness while preserving direct and inner inert state', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/modal-ancestor-inertness`)
+    const labels = analysis.domEvidence.map(({ label }) => label)
+
+    expect(labels).toEqual(expect.arrayContaining([
+      'Escaped modal value',
+      'Escaped modal detail',
+      'Modal choice A',
+      'Modal choice B',
+      'Escaped modal destination',
+    ]))
+    expect(labels).not.toEqual(expect.arrayContaining([
+      'Modal ancestor background value',
+      'Inner inert modal value',
+    ]))
+    expect(JSON.stringify(analysis)).not.toMatch(/modal:(?:none|\d+:)/)
+
+    const form = analysis.capabilities.find(({ kind, evidenceIds }) => kind === 'prepare_form'
+      && evidenceIds.some((id) => analysis.domEvidence.find((evidence) => evidence.id === id)?.label === 'Escaped modal value'))!
+    expect(form).toBeDefined()
+    const radioFieldKey = Object.entries(
+      form.inputSchema.properties as Record<string, Record<string, unknown>>,
+    ).find(([, schema]) => schema.type === 'integer')?.[0]
+    expect(radioFieldKey).toBeDefined()
+    const executableInput = { ...form.sampleInput, [radioFieldKey!]: 1 }
+    const page = internalSession(service, analysis.sessionId).page
+    await page.locator('#ancestor-inert-modal').evaluate((dialog) => dialog.setAttribute('inert', ''))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      executableInput,
+      undefined,
+      form.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#ancestor-inert-modal-value').inputValue()).toBe('')
+    expect(await page.locator('#ancestor-inert-modal-detail').inputValue()).toBe('')
+    expect(await page.locator('#ancestor-inert-radio-a').isChecked()).toBe(true)
+    expect(await page.locator('#ancestor-inert-radio-b').isChecked()).toBe(false)
+
+    await page.locator('#ancestor-inert-modal').evaluate((dialog) => dialog.removeAttribute('inert'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      form.name,
+      executableInput,
+      undefined,
+      form.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+    expect(await page.locator('#ancestor-inert-modal-value').inputValue()).not.toBe('')
+    expect(await page.locator('#ancestor-inert-radio-b').isChecked()).toBe(true)
+
+    const directAnalysis = await service.analyze(`${fixture.origin}/direct-inert-modal`)
+    expect(directAnalysis.domEvidence.map(({ label }) => label)).not.toEqual(expect.arrayContaining([
+      'Direct inert modal value',
+      'Direct inert modal destination',
+    ]))
   })
 
   it('revalidates late modal inertness before mutation and allows a fresh analysis after close', async () => {

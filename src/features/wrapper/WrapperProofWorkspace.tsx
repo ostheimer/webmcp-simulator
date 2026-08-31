@@ -209,10 +209,12 @@ export function WrapperProofWorkspace({ analysis, onBack }: WrapperProofWorkspac
     const tools = createWrapperTools(currentAnalysis, { execute: runCapability })
     registerTools(tools, { controller })
       .then((result) => {
-        if (active) setRegistration(result.supported ? 'connected' : 'unavailable')
+        if (!active) return
+        setRegistrationError('')
+        setRegistration(result.supported ? 'connected' : 'unavailable')
       })
       .catch((error: unknown) => {
-        if (!active || controller.signal.aborted) return
+        if (!active) return
         setRegistrationError(error instanceof Error ? error.message : 'Tool registration failed.')
         setRegistration('error')
       })

@@ -330,6 +330,55 @@ describe('WrapperProofWorkspace invalidation lifecycle', () => {
     expect(closeWrapperSession).toHaveBeenCalledOnce()
   })
 
+  it('clears a stale registration error after reconnecting and shows a later failure', async () => {
+    const refreshedAnalysis = {
+      ...analysis,
+      title: 'Refreshed after registration recovery',
+      createdAt: '2026-08-30T10:01:00.000Z',
+    }
+    const failedAgainAnalysis = {
+      ...analysis,
+      title: 'Refreshed before registration fails again',
+      createdAt: '2026-08-30T10:02:00.000Z',
+    }
+    executeWrapperAction
+      .mockResolvedValueOnce(actionResult(refreshedAnalysis))
+      .mockResolvedValueOnce(actionResult(failedAgainAnalysis))
+    const registerTool = vi.fn(async (tool: WebMcpTool, options: { signal: AbortSignal }) => {
+      registeredTool = tool
+      registrationSignal = options.signal
+      const attempt = registerTool.mock.calls.length
+      if (attempt === 1) throw new Error('Initial registration failed.')
+      if (attempt === 3) throw new Error('Later registration failed.')
+    })
+    Object.defineProperty(document, 'modelContext', {
+      configurable: true,
+      value: { registerTool },
+    })
+    render(<WrapperProofWorkspace analysis={analysis} onBack={vi.fn()} />)
+
+    await screen.findByText('Initial registration failed.')
+    expect(screen.getByText('REGISTRATION ERROR')).toBeTruthy()
+    expect(screen.getByText('Registration failed')).toBeTruthy()
+
+    await act(async () => {
+      screen.getByRole('button', { name: /Invoke as agent/ }).click()
+    })
+    await screen.findByText('Refreshed after registration recovery')
+    await screen.findByText('WEBMCP CONNECTED')
+    expect(screen.queryByText('Registration failed')).toBeNull()
+    expect(screen.queryByText('Initial registration failed.')).toBeNull()
+
+    await act(async () => {
+      screen.getByRole('button', { name: /Invoke as agent/ }).click()
+    })
+    await screen.findByText('Refreshed before registration fails again')
+    await screen.findByText('Later registration failed.')
+    expect(screen.getByText('REGISTRATION ERROR')).toBeTruthy()
+    expect(screen.getByText('Registration failed')).toBeTruthy()
+    expect(registerTool).toHaveBeenCalledTimes(3)
+  })
+
   it.each([
     ['malformed', 'not-a-deadline'],
     ['already expired', '2026-08-30T09:59:59.000Z'],

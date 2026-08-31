@@ -1540,6 +1540,27 @@ function captureEffectiveInert(
     || !contains
     || !matches
   ) return { inert: true, values: [], overflow: true }
+  if (
+    !modalState
+    || !Array.isArray(modalState.elements)
+    || modalState.overflow
+    || !Number.isInteger(modalState.limit)
+    || modalState.limit < 1
+    || modalState.elements.length > modalState.limit
+  ) {
+    return { inert: true, values: [], overflow: true }
+  }
+  const activeModals: Array<{ node: Element, index: number, containsTarget: boolean }> = []
+  for (let index = 0; index < modalState.elements.length; index += 1) {
+    const node = modalState.elements[index]
+    if (!(node instanceof Element)) return { inert: true, values: [], overflow: true }
+    if (!(node instanceof HTMLDialogElement) || !matches.call(node, ':modal')) continue
+    activeModals.push({
+      node,
+      index,
+      containsTarget: node === element || contains.call(node, element),
+    })
+  }
   const values: string[] = []
   let inert = false
   let retainedLength = 0
@@ -1561,28 +1582,15 @@ function captureEffectiveInert(
     }
     values.push(captured)
     if (raw !== null || nativeInert) inert = true
+    if (activeModals.some(({ node, containsTarget }) => containsTarget && node === current)) {
+      current = null
+      break
+    }
     current = parentElementGetter.call(current) as Element | null
     inspected += 1
   }
   if (current !== null) return { inert: true, values, overflow: true }
-
-  if (
-    !modalState
-    || !Array.isArray(modalState.elements)
-    || modalState.overflow
-    || !Number.isInteger(modalState.limit)
-    || modalState.limit < 1
-    || modalState.elements.length > modalState.limit
-  ) {
-    return { inert: true, values, overflow: true }
-  }
-  let modalCount = 0
-  for (let index = 0; index < modalState.elements.length; index += 1) {
-    const node = modalState.elements[index]
-    if (!(node instanceof Element)) return { inert: true, values, overflow: true }
-    if (!(node instanceof HTMLDialogElement) || !matches.call(node, ':modal')) continue
-    modalCount += 1
-    const containsTarget = node === element || contains.call(node, element)
+  for (const { index, containsTarget } of activeModals) {
     const marker = `modal:${index}:${containsTarget ? 'inside' : 'outside'}`
     retainedLength += JSON.stringify(marker).length + 8
     if (retainedLength > maxTotalSafetyEvidenceLength) {
@@ -1591,7 +1599,7 @@ function captureEffectiveInert(
     values.push(marker)
     if (!containsTarget) inert = true
   }
-  if (modalCount === 0) {
+  if (activeModals.length === 0) {
     const marker = 'modal:none'
     retainedLength += JSON.stringify(marker).length + 8
     if (retainedLength > maxTotalSafetyEvidenceLength) {
@@ -2303,6 +2311,7 @@ async function createIsolatedModalState(
   storageKey?: string,
 ): Promise<string> {
   await cdp.send('DOM.enable')
+  await cdp.send('DOM.getDocument', { depth: 0, pierce: true })
   const topLayer = await cdp.send('DOM.getTopLayerElements') as { nodeIds?: number[] }
   const nodeIds = Array.isArray(topLayer.nodeIds) ? topLayer.nodeIds : []
   const overflow = nodeIds.length > MAX_ACTIVE_TOP_LAYER_ELEMENTS
@@ -2527,6 +2536,7 @@ async function createAnalysisCaptureGuard(
 }> {
   const cdp = await context.newCDPSession(page)
   await cdp.send('DOM.enable')
+  await cdp.send('DOM.getDocument', { depth: 0, pierce: true })
   await cdp.send('CSS.enable')
   const storageKey = `__webmcp_capture_guard_${randomUUID().replaceAll('-', '')}`
   const objectGroup = `webmcp-capture-watch-${randomUUID()}`
