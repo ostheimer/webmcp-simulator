@@ -43,7 +43,7 @@ const MAX_ANALYSIS_CAPTURE_ATTEMPTS = 2
 const MAX_ANALYSIS_SCROLL_NODES = 512
 const MAX_ANALYSIS_WATCH_NODES = 2_048
 const MAX_ACTIVE_TOP_LAYER_ELEMENTS = 32
-const UNSAFE_FIELD_HINT = /(?:^|\s)(?:(?:api|access|private)\s*key|cvc|cvv)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
+const UNSAFE_FIELD_HINT = /(?:^|\s)(?:(?:api|access|private)\s*keys?|cvc|cvv)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|pay|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|delete|deletion|logoff|logout|order|ordering|purchase|purchasing|removal|remove|reservation|reserve|signout|subscribe|tokens?|unsubscribe|unsubscription|termin|abmelden|abmeldung|austragen|bestellen|bestellung|buchen|buchung|entfernen|entfernung|kaufen|kasse|kündigen|kündigung|löschen|löschung|reservieren|reservierung|warenkorb)\b/i
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
   'additional-name',
@@ -1003,6 +1003,7 @@ function captureIsolatedSafetyEvidence(
   maxSafetyEvidenceLength: number,
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
+  maxElementsInspected: number,
   modalState: { elements: Element[], overflow: boolean, limit: number },
   captureSourceState?: {
     elements: Element[]
@@ -1020,13 +1021,14 @@ function captureIsolatedSafetyEvidence(
     value: string
     accessibleEvidence: string[]
   }>
-  labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, title: string, generatedContent: string[], descendantAccessibleEntries: Array<Array<[string, string]>>, descendantAccessibleEvidence: string[], referenceEvidence: string[], referenceSnapshot: string }>
-  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[], descendantAccessibleEvidence: string[] }>
-  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[], descendantAccessibleEvidence: string[] }>
+  labelEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaPlaceholder: string, title: string, generatedContent: string[], descendantAccessibleEntries: Array<Array<[string, string]>>, descendantAccessibleEvidence: string[], referenceEvidence: string[], referenceSnapshot: string }>
+  ariaLabelledEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaPlaceholder: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[], descendantAccessibleEvidence: string[] }>
+  ariaDescribedEntries: Array<{ text: string, imageAlts: string[], ariaLabel: string, ariaDescription: string, ariaPlaceholder: string, ariaLabelledBy: string, ariaDescribedBy: string, title: string, generatedContent: string[], nativeControlKind: string, nativeControlValue: string, nativeControlAlt: string, nativeControlAccessibleValues: string[], descendantAccessibleEvidence: string[] }>
   anchorImageAlts: string[]
   generatedContent: string[]
   ownerContextEvidence: string[]
   ownerActionEvidence: string[]
+  composedEvidence: string[]
   targetNativeControlValue: string
   documentTitle: string
   effectiveRequired: boolean
@@ -1035,6 +1037,8 @@ function captureIsolatedSafetyEvidence(
   const matches = Element.prototype.matches
   const createTreeWalker = Document.prototype.createTreeWalker
   const nextNode = TreeWalker.prototype.nextNode
+  const maxOwnerSubmitters = 16
+  const maxOwnerAssociatedControls = 256
   let retainedEvidenceLength = 0
   let aggregateOverflow = Boolean(captureSourceState?.overflow)
   const retainCaptureSource = (source: Element | null) => {
@@ -1202,7 +1206,13 @@ function captureIsolatedSafetyEvidence(
       const candidate = getAttribute.call(node, attribute)
       if (candidate !== null) retainAccessibleValue(candidate)
     }
-    if (node instanceof HTMLInputElement) {
+    if (node instanceof HTMLButtonElement) {
+      recognized = true
+      const typeGetter = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'type')?.get
+      const valueGetter = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'value')?.get
+      kind = typeGetter ? bounded(typeGetter.call(node)) : bounded('', true)
+      value = valueGetter ? bounded(valueGetter.call(node)) : bounded('', true)
+    } else if (node instanceof HTMLInputElement) {
       recognized = true
       const typeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
       if (!typeGetter) {
@@ -1295,10 +1305,12 @@ function captureIsolatedSafetyEvidence(
 
       const rawAriaLabel = getAttribute.call(node, 'aria-label')
       const rawAriaDescription = getAttribute.call(node, 'aria-description')
+      const rawAriaPlaceholder = getAttribute.call(node, 'aria-placeholder')
       const rawTitle = getAttribute.call(node, 'title')
       const rawAriaLabelledBy = getAttribute.call(node, 'aria-labelledby')
       const rawAriaDescribedBy = getAttribute.call(node, 'aria-describedby')
-      const possibleNativeControl = node instanceof HTMLInputElement
+      const possibleNativeControl = node instanceof HTMLButtonElement
+        || node instanceof HTMLInputElement
         || node instanceof HTMLTextAreaElement
         || node instanceof HTMLSelectElement
         || Boolean(getAttribute.call(node, 'role'))
@@ -1307,6 +1319,7 @@ function captureIsolatedSafetyEvidence(
         : undefined
       const hasSource = rawAriaLabel !== null
         || rawAriaDescription !== null
+        || rawAriaPlaceholder !== null
         || rawTitle !== null
         || rawAriaLabelledBy !== null
         || rawAriaDescribedBy !== null
@@ -1326,6 +1339,7 @@ function captureIsolatedSafetyEvidence(
       }
       if (rawAriaLabel !== null) retain('aria-label', rawAriaLabel)
       if (rawAriaDescription !== null) retain('aria-description', rawAriaDescription)
+      if (rawAriaPlaceholder !== null) retain('aria-placeholder', rawAriaPlaceholder)
       if (rawTitle !== null) retain('title', rawTitle)
       if (rawAriaLabelledBy !== null) {
         retain('aria-labelledby', rawAriaLabelledBy)
@@ -1385,6 +1399,7 @@ function captureIsolatedSafetyEvidence(
       imageAlts: string[]
       ariaLabel: { value: string, overflow: boolean }
       ariaDescription: { value: string, overflow: boolean }
+      ariaPlaceholder: { value: string, overflow: boolean }
       ariaLabelledBy: { value: string, overflow: boolean }
       ariaDescribedBy: { value: string, overflow: boolean }
       title: { value: string, overflow: boolean }
@@ -1408,6 +1423,7 @@ function captureIsolatedSafetyEvidence(
         : { values: [] as string[], overflow: false }
       const ariaLabel = bounded(node instanceof Element ? getAttribute.call(node, 'aria-label') ?? '' : '')
       const ariaDescription = bounded(node instanceof Element ? getAttribute.call(node, 'aria-description') ?? '' : '')
+      const ariaPlaceholder = bounded(node instanceof Element ? getAttribute.call(node, 'aria-placeholder') ?? '' : '')
       const ariaLabelledBy = bounded(node instanceof Element ? getAttribute.call(node, 'aria-labelledby') ?? '' : '')
       const ariaDescribedBy = bounded(node instanceof Element ? getAttribute.call(node, 'aria-describedby') ?? '' : '')
       const title = bounded(node instanceof Element ? getAttribute.call(node, 'title') ?? '' : '')
@@ -1425,6 +1441,7 @@ function captureIsolatedSafetyEvidence(
         imageAlts: imageAlts.values,
         ariaLabel,
         ariaDescription,
+        ariaPlaceholder,
         ariaLabelledBy,
         ariaDescribedBy,
         title,
@@ -1440,6 +1457,7 @@ function captureIsolatedSafetyEvidence(
           || imageAlts.overflow
           || ariaLabel.overflow
           || ariaDescription.overflow
+          || ariaPlaceholder.overflow
           || ariaLabelledBy.overflow
           || ariaDescribedBy.overflow
           || title.overflow
@@ -1455,13 +1473,46 @@ function captureIsolatedSafetyEvidence(
       overflow: aggregateOverflow || overflow || entries.some((entry) => entry.overflow),
     }
   }
+  const composeBoundedEvidence = (parts: unknown[]) => {
+    const value = parts
+      .map((part) => String(part ?? '').trim())
+      .filter(Boolean)
+      .join(' ')
+    return bounded(value)
+  }
+  const composedReferenceEvidence = (reference: ReturnType<typeof referenced>) => {
+    const values: string[] = []
+    let overflow = reference.overflow
+    for (const entry of reference.entries) {
+      const composed = composeBoundedEvidence(entry.ariaLabel.value
+        ? [entry.ariaLabel.value]
+        : [
+            entry.text.value,
+            ...entry.imageAlts,
+            ...entry.generatedContent,
+            entry.nativeControlValue.value,
+            entry.nativeControlAlt.value,
+            ...entry.nativeControlAccessibleValues,
+            ...entry.descendantAccessibleEvidence,
+          ])
+      if (composed.value) values.push(composed.value)
+      overflow ||= composed.overflow
+    }
+    if (values.length > 1) {
+      const overall = composeBoundedEvidence(values)
+      if (overall.value) values.push(overall.value)
+      overflow ||= overall.overflow
+    }
+    return { values, overflow: aggregateOverflow || overflow }
+  }
   const ownerContextEvidence: string[] = []
   const ownerActionEvidence: string[] = []
+  const ownerComposedEvidence: string[] = []
   const ownerContextSnapshots: Array<{ kind: string, values: string[] }> = []
   let ownerContextOverflow = false
   const captureOwnerContextNode = (
     root: Element,
-    kind: 'form' | 'fieldset' | 'legend',
+    kind: 'form' | 'fieldset' | 'legend' | 'submit',
     includeText: boolean,
   ) => {
     retainCaptureSource(root)
@@ -1478,16 +1529,21 @@ function captureIsolatedSafetyEvidence(
       retainExisting(slot, captured.value)
       ownerContextOverflow ||= captured.overflow
     }
+    const directAccessiblePieces: string[] = []
     for (const name of [
       'aria-label',
       'aria-description',
+      'aria-placeholder',
       'aria-labelledby',
       'aria-describedby',
       'title',
       'name',
       'id',
       'role',
-    ]) retain(`attribute:${name}`, getAttribute.call(root, name) ?? '')
+    ]) {
+      const value = getAttribute.call(root, name) ?? ''
+      retain(`attribute:${name}`, value)
+    }
     if (kind === 'form') {
       const formActionGetter = root instanceof HTMLFormElement
         ? Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action')?.get
@@ -1535,6 +1591,7 @@ function captureIsolatedSafetyEvidence(
           retainExisting(`${attribute}:image:${index}:${altIndex}`, alt))
         retainExisting(`${attribute}:aria-label:${index}`, entry.ariaLabel.value)
         retainExisting(`${attribute}:aria-description:${index}`, entry.ariaDescription.value)
+        retainExisting(`${attribute}:aria-placeholder:${index}`, entry.ariaPlaceholder.value)
         retainExisting(`${attribute}:aria-labelledby:${index}`, entry.ariaLabelledBy.value)
         retainExisting(`${attribute}:aria-describedby:${index}`, entry.ariaDescribedBy.value)
         retainExisting(`${attribute}:title:${index}`, entry.title.value)
@@ -1555,17 +1612,104 @@ function captureIsolatedSafetyEvidence(
         || entry.nativeControlKind.value,
       ))
       ownerContextOverflow ||= reference.overflow
+      const composedReference = composedReferenceEvidence(reference)
+      composedReference.values.forEach((value, index) => {
+        retainExisting(`${attribute}:composed:${index}`, value)
+        ownerComposedEvidence.push(value)
+      })
+      ownerContextOverflow ||= composedReference.overflow
     }
     if (includeText) {
       const text = boundedNodeText(root)
       retainExisting('text', text.value)
+      directAccessiblePieces.push(text.value)
       const imageAlts = boundedDescendantImageAlts(root)
-      imageAlts.values.forEach((alt, index) => retainExisting(`image:${index}`, alt))
+      imageAlts.values.forEach((alt, index) => {
+        retainExisting(`image:${index}`, alt)
+        directAccessiblePieces.push(alt)
+      })
       ownerContextOverflow ||= text.overflow || imageAlts.overflow
     }
     const generatedContent = boundedGeneratedContent(root)
-    generatedContent.values.forEach((content, index) => retainExisting(`generated:${index}`, content))
+    generatedContent.values.forEach((content, index) => {
+      retainExisting(`generated:${index}`, content)
+      directAccessiblePieces.push(content)
+    })
     ownerContextOverflow ||= generatedContent.overflow
+    if (kind === 'submit') {
+      for (const name of [
+        'alt',
+        'value',
+        'type',
+        'formaction',
+        'formmethod',
+        'formenctype',
+        'formtarget',
+        'formnovalidate',
+        'form',
+        'disabled',
+      ]) {
+        const captured = bounded(getAttribute.call(root, name) ?? '')
+        retainExisting(`attribute:${name}`, captured.value)
+        ownerContextOverflow ||= captured.overflow
+        if (name === 'form' && captured.value.trim() && captureSourceState) {
+          captureSourceState.usesDocumentIdReferences = true
+        }
+      }
+      const nativeControl = captureNativeControl(root)
+      retainExisting('native:kind', nativeControl.kind.value)
+      retainExisting('native:value', nativeControl.value.value)
+      retainExisting('native:alt', nativeControl.alt.value)
+      directAccessiblePieces.push(nativeControl.value.value, nativeControl.alt.value)
+      nativeControl.accessibleValues.forEach((value, index) => {
+        retainExisting(`native:accessible:${index}`, value)
+        directAccessiblePieces.push(value)
+      })
+      ownerContextOverflow ||= nativeControl.overflow
+
+      const rawActionSource = getAttribute.call(root, 'formaction')
+      retainSnapshotOnly('attribute:formaction-present', rawActionSource === null ? 'false' : 'true')
+      if (!ownerContextOverflow && rawActionSource !== null && rawActionSource.trim()) {
+        const prototype = root instanceof HTMLButtonElement
+          ? HTMLButtonElement.prototype
+          : root instanceof HTMLInputElement
+            ? HTMLInputElement.prototype
+            : undefined
+        const formActionGetter = prototype
+          ? Object.getOwnPropertyDescriptor(prototype, 'formAction')?.get
+          : undefined
+        if (!formActionGetter) {
+          ownerContextOverflow = true
+        } else {
+          const resolvedAction = bounded(formActionGetter.call(root))
+          retainSnapshotOnly('native:formaction', resolvedAction.value)
+          ownerContextOverflow ||= resolvedAction.overflow
+          if (!ownerContextOverflow) {
+            try {
+              const actionUrl = new URL(resolvedAction.value)
+              if (!['http:', 'https:'].includes(actionUrl.protocol) || actionUrl.origin !== location.origin) {
+                ownerContextOverflow = true
+              } else {
+                const decodedComponents = [actionUrl.pathname, actionUrl.search, actionUrl.hash]
+                  .map((component) => decodeURIComponent(component))
+                const actionEvidence = bounded(decodedComponents.join(''))
+                retainSnapshotOnly('native:formaction-evidence', actionEvidence.value)
+                ownerActionEvidence.push(actionEvidence.value)
+                ownerContextOverflow ||= actionEvidence.overflow
+              }
+            } catch {
+              ownerContextOverflow = true
+            }
+          }
+        }
+      }
+    }
+    const directComposed = composeBoundedEvidence(directAccessiblePieces)
+    if (directComposed.value) {
+      retainExisting('composed', directComposed.value)
+      ownerComposedEvidence.push(directComposed.value)
+    }
+    ownerContextOverflow ||= directComposed.overflow
     ownerContextSnapshots.push({ kind, values })
   }
   let ownerForm: HTMLFormElement | null = null
@@ -1591,7 +1735,84 @@ function captureIsolatedSafetyEvidence(
     }
   }
   if (explicitFormReference && !ownerForm) ownerContextOverflow = true
-  if (ownerForm) captureOwnerContextNode(ownerForm, 'form', false)
+  if (ownerForm) {
+    captureOwnerContextNode(ownerForm, 'form', false)
+    const elementsGetter = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'elements')?.get
+    const collectionLengthGetter = Object.getOwnPropertyDescriptor(HTMLCollection.prototype, 'length')?.get
+    const collectionItem = HTMLCollection.prototype.item
+    const inputTypeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
+    const inputFormGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'form')?.get
+    const buttonTypeGetter = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'type')?.get
+    const submitters: Element[] = []
+    const retainSubmitter = (candidate: Element) => {
+      if (submitters.includes(candidate)) return
+      if (submitters.length >= maxOwnerSubmitters) {
+        ownerContextOverflow = true
+        return
+      }
+      submitters.push(candidate)
+    }
+    if (
+      !elementsGetter
+      || !collectionLengthGetter
+      || !collectionItem
+      || !inputTypeGetter
+      || !inputFormGetter
+      || !buttonTypeGetter
+    ) {
+      ownerContextOverflow = true
+    } else {
+      const formElements = elementsGetter.call(ownerForm) as HTMLFormControlsCollection
+      const formElementCount = Number(collectionLengthGetter.call(formElements))
+      if (
+        !Number.isInteger(formElementCount)
+        || formElementCount < 0
+        || formElementCount > maxOwnerAssociatedControls
+      ) {
+        ownerContextOverflow = true
+      } else {
+        for (let index = 0; index < formElementCount && !ownerContextOverflow; index += 1) {
+          const candidate = collectionItem.call(formElements, index)
+          if (candidate instanceof HTMLButtonElement && buttonTypeGetter.call(candidate) === 'submit') {
+            retainSubmitter(candidate)
+          } else if (
+            candidate instanceof HTMLInputElement
+            && inputTypeGetter.call(candidate) === 'submit'
+          ) {
+            retainSubmitter(candidate)
+          }
+        }
+      }
+
+      const imageWalker = createTreeWalker.call(document, document.documentElement, NodeFilter.SHOW_ELEMENT)
+      let imageNodesInspected = 0
+      let imageTraversalComplete = false
+      while (!ownerContextOverflow && imageNodesInspected < maxElementsInspected) {
+        const candidate = nextNode.call(imageWalker) as Element | null
+        if (!candidate) {
+          imageTraversalComplete = true
+          break
+        }
+        imageNodesInspected += 1
+        if (
+          candidate instanceof HTMLInputElement
+          && inputTypeGetter.call(candidate) === 'image'
+          && inputFormGetter.call(candidate) === ownerForm
+        ) retainSubmitter(candidate)
+      }
+      if (!imageTraversalComplete && !ownerContextOverflow && nextNode.call(imageWalker)) {
+        ownerContextOverflow = true
+      }
+    }
+    ownerContextSnapshots.push({
+      kind: 'submit-collection',
+      values: ['count', String(submitters.length)],
+    })
+    for (const submitter of submitters) {
+      if (ownerContextOverflow) break
+      captureOwnerContextNode(submitter, 'submit', true)
+    }
+  }
 
   const parentElementGetter = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get
   if (!parentElementGetter) {
@@ -1652,6 +1873,7 @@ function captureIsolatedSafetyEvidence(
     'aria-labelledby',
     'aria-describedby',
     'aria-description',
+    'aria-placeholder',
     'aria-disabled',
     'aria-readonly',
     'aria-required',
@@ -1693,6 +1915,7 @@ function captureIsolatedSafetyEvidence(
       ...entry.imageAlts,
       entry.ariaLabel.value,
       entry.ariaDescription.value,
+      entry.ariaPlaceholder.value,
       entry.ariaLabelledBy.value,
       entry.ariaDescribedBy.value,
       entry.title.value,
@@ -1714,6 +1937,8 @@ function captureIsolatedSafetyEvidence(
     text: { value: string, overflow: boolean }
     imageAlts: string[]
     ariaLabel: { value: string, overflow: boolean }
+    ariaDescription: { value: string, overflow: boolean }
+    ariaPlaceholder: { value: string, overflow: boolean }
     title: { value: string, overflow: boolean }
     generatedContent: string[]
     descendantAccessibleEntries: Array<Array<[string, string]>>
@@ -1746,6 +1971,8 @@ function captureIsolatedSafetyEvidence(
         const text = boundedNodeText(label)
         const imageAlts = boundedDescendantImageAlts(label)
         const ariaLabel = bounded(getAttribute.call(label, 'aria-label') ?? '')
+        const ariaDescription = bounded(getAttribute.call(label, 'aria-description') ?? '')
+        const ariaPlaceholder = bounded(getAttribute.call(label, 'aria-placeholder') ?? '')
         const title = bounded(getAttribute.call(label, 'title') ?? '')
         const generatedContent = boundedGeneratedContent(label)
         const descendantAccessible = captureDescendantAccessibleSources(label, element)
@@ -1759,6 +1986,8 @@ function captureIsolatedSafetyEvidence(
           text,
           imageAlts: imageAlts.values,
           ariaLabel,
+          ariaDescription,
+          ariaPlaceholder,
           title,
           generatedContent: generatedContent.values,
           descendantAccessibleEntries: descendantAccessible.entries,
@@ -1771,6 +2000,8 @@ function captureIsolatedSafetyEvidence(
           overflow: text.overflow
             || imageAlts.overflow
             || ariaLabel.overflow
+            || ariaDescription.overflow
+            || ariaPlaceholder.overflow
             || title.overflow
             || generatedContent.overflow
             || descendantAccessible.overflow
@@ -1874,6 +2105,7 @@ function captureIsolatedSafetyEvidence(
         const labelAttribute = bounded(getAttribute.call(option, 'label') ?? '')
         const ariaLabel = bounded(getAttribute.call(option, 'aria-label') ?? '')
         const ariaDescription = bounded(getAttribute.call(option, 'aria-description') ?? '')
+        const ariaPlaceholder = bounded(getAttribute.call(option, 'aria-placeholder') ?? '')
         const title = bounded(getAttribute.call(option, 'title') ?? '')
         const ariaLabelled = referenced(option, 'aria-labelledby')
         const ariaDescribed = referenced(option, 'aria-describedby')
@@ -1882,6 +2114,7 @@ function captureIsolatedSafetyEvidence(
         const accessibleEvidence = [
           ariaLabel.value,
           ariaDescription.value,
+          ariaPlaceholder.value,
           title.value,
           ...optionAriaDisabled.values,
           ...imageAlts.values,
@@ -1893,6 +2126,7 @@ function captureIsolatedSafetyEvidence(
             ...entry.imageAlts,
             entry.ariaLabel.value,
             entry.ariaDescription.value,
+            entry.ariaPlaceholder.value,
             entry.ariaLabelledBy.value,
             entry.ariaDescribedBy.value,
             entry.title.value,
@@ -1910,6 +2144,7 @@ function captureIsolatedSafetyEvidence(
             ...entry.imageAlts,
             entry.ariaLabel.value,
             entry.ariaDescription.value,
+            entry.ariaPlaceholder.value,
             entry.ariaLabelledBy.value,
             entry.ariaDescribedBy.value,
             entry.title.value,
@@ -1926,6 +2161,7 @@ function captureIsolatedSafetyEvidence(
           || labelAttribute.overflow
           || ariaLabel.overflow
           || ariaDescription.overflow
+          || ariaPlaceholder.overflow
           || title.overflow
           || ariaLabelled.overflow
           || ariaLabelled.entries.some((entry) => !entry.found)
@@ -1948,6 +2184,44 @@ function captureIsolatedSafetyEvidence(
       }
     }
   }
+  const composedEvidence = [...ownerComposedEvidence]
+  let composedOverflow = false
+  const retainComposedEvidence = (parts: unknown[]) => {
+    const composed = composeBoundedEvidence(parts)
+    if (composed.value) composedEvidence.push(composed.value)
+    composedOverflow ||= composed.overflow
+  }
+  for (const reference of [ariaLabelled, ariaDescribed]) {
+    const composed = composedReferenceEvidence(reference)
+    composed.values.forEach((value) => composedEvidence.push(value))
+    composedOverflow ||= composed.overflow
+  }
+  const composedLabels: string[] = []
+  for (const label of labels) {
+    const composed = composeBoundedEvidence([
+      label.text.value,
+      ...label.imageAlts,
+      ...label.generatedContent,
+      ...label.descendantAccessibleEvidence,
+    ])
+    if (composed.value) {
+      composedEvidence.push(composed.value)
+      composedLabels.push(composed.value)
+    }
+    composedOverflow ||= composed.overflow
+  }
+  if (composedLabels.length > 1) {
+    retainComposedEvidence([
+      ...composedLabels,
+    ])
+  }
+  if (element instanceof HTMLAnchorElement) {
+    retainComposedEvidence([
+      anchorText.value,
+      ...anchorImageAlts.values,
+      ...generatedContent.values,
+    ])
+  }
   const overflow = aggregateOverflow
     || attributes.some((attribute) => attribute.overflow)
     || ariaLabelled.overflow
@@ -1965,6 +2239,7 @@ function captureIsolatedSafetyEvidence(
     || targetNativeControlValue.overflow
     || documentTitle.overflow
     || directAriaRequired.overflow
+    || composedOverflow
   if (overflow) {
     return {
       snapshot: '',
@@ -1977,15 +2252,18 @@ function captureIsolatedSafetyEvidence(
       generatedContent: [],
       ownerContextEvidence: [],
       ownerActionEvidence: [],
+      composedEvidence: [],
       targetNativeControlValue: '',
       documentTitle: '',
       effectiveRequired: false,
     }
   }
-  const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title, generatedContent, descendantAccessibleEntries, descendantAccessibleEvidence, referenceEvidence, referenceSnapshot }) => ({
+  const labelEntries = labels.map(({ text, imageAlts, ariaLabel, ariaDescription, ariaPlaceholder, title, generatedContent, descendantAccessibleEntries, descendantAccessibleEvidence, referenceEvidence, referenceSnapshot }) => ({
     text: text.value,
     imageAlts,
     ariaLabel: ariaLabel.value,
+    ariaDescription: ariaDescription.value,
+    ariaPlaceholder: ariaPlaceholder.value,
     title: title.value,
     generatedContent,
     descendantAccessibleEntries,
@@ -1994,11 +2272,12 @@ function captureIsolatedSafetyEvidence(
     referenceSnapshot,
   }))
   const ariaLabelledEntries = ariaLabelled.entries
-    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => ({
+    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaPlaceholder, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
       ariaDescription: ariaDescription.value,
+      ariaPlaceholder: ariaPlaceholder.value,
       ariaLabelledBy: ariaLabelledBy.value,
       ariaDescribedBy: ariaDescribedBy.value,
       title: title.value,
@@ -2010,11 +2289,12 @@ function captureIsolatedSafetyEvidence(
       descendantAccessibleEvidence,
     }))
   const ariaDescribedEntries = ariaDescribed.entries
-    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => ({
+    .map(({ text, imageAlts, ariaLabel, ariaDescription, ariaPlaceholder, ariaLabelledBy, ariaDescribedBy, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => ({
       text: text.value,
       imageAlts,
       ariaLabel: ariaLabel.value,
       ariaDescription: ariaDescription.value,
+      ariaPlaceholder: ariaPlaceholder.value,
       ariaLabelledBy: ariaLabelledBy.value,
       ariaDescribedBy: ariaDescribedBy.value,
       title: title.value,
@@ -2039,6 +2319,7 @@ function captureIsolatedSafetyEvidence(
       generatedContent: generatedContent.values,
       optionEntries,
       ownerContext: ownerContextSnapshots,
+      composedEvidence,
       ariaDisabledAncestors,
       inertAncestors,
       overflow,
@@ -2055,6 +2336,7 @@ function captureIsolatedSafetyEvidence(
       generatedContent: [],
       ownerContextEvidence: [],
       ownerActionEvidence: [],
+      composedEvidence: [],
       targetNativeControlValue: '',
       documentTitle: '',
       effectiveRequired: false,
@@ -2071,6 +2353,7 @@ function captureIsolatedSafetyEvidence(
     generatedContent: generatedContent.values,
     ownerContextEvidence,
     ownerActionEvidence,
+    composedEvidence,
     targetNativeControlValue: targetNativeControlValue.value,
     documentTitle: documentTitle.value,
     effectiveRequired,
@@ -2335,6 +2618,7 @@ function classifyDomInIsolatedWorld({
       if (node instanceof HTMLInputElement) {
         const key = radioGroupKey(node)
         if (key) radioGroupCounts.set(key, (radioGroupCounts.get(key) ?? 0) + 1)
+        if (!inputTypeGetter || ['submit', 'image'].includes(inputTypeGetter.call(node))) continue
       }
       if (
         !(node instanceof HTMLInputElement)
@@ -2399,6 +2683,7 @@ function classifyDomInIsolatedWorld({
         maxSafetyEvidenceLength,
         maxTotalSafetyEvidenceLength,
         maxSelectOptionsInspected,
+        maxElementsInspected,
         modalState,
         captureSourceState,
       )
@@ -2768,15 +3053,17 @@ function classifyDomInIsolatedWorld({
       const safetyEvidenceSources = [
         element.getAttribute('aria-label') ?? '',
         element.getAttribute('aria-description') ?? '',
+        element.getAttribute('aria-placeholder') ?? '',
         element.getAttribute('aria-valuenow') ?? '',
         element.getAttribute('aria-valuetext') ?? '',
         ariaLabelled.raw,
         ...ariaLabelled.ids,
         ...ariaLabelled.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => [
+        ...safetyCapture.ariaLabelledEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, ariaPlaceholder, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => [
           ...imageAlts,
           ariaLabel,
           ariaDescription,
+          ariaPlaceholder,
           title,
           nativeControlKind,
           nativeControlValue,
@@ -2788,10 +3075,11 @@ function classifyDomInIsolatedWorld({
         ariaDescribed.raw,
         ...ariaDescribed.ids,
         ...ariaDescribed.nodes.map(accessibleNodeText),
-        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => [
+        ...safetyCapture.ariaDescribedEntries.flatMap(({ imageAlts, ariaLabel, ariaDescription, ariaPlaceholder, title, generatedContent, nativeControlKind, nativeControlValue, nativeControlAlt, nativeControlAccessibleValues, descendantAccessibleEvidence }) => [
           ...imageAlts,
           ariaLabel,
           ariaDescription,
+          ariaPlaceholder,
           title,
           nativeControlKind,
           nativeControlValue,
@@ -2800,10 +3088,12 @@ function classifyDomInIsolatedWorld({
           ...descendantAccessibleEvidence,
           ...generatedContent,
         ]),
-        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, title, generatedContent, descendantAccessibleEvidence, referenceEvidence }) => [
+        ...safetyCapture.labelEntries.flatMap(({ text: labelText, imageAlts, ariaLabel, ariaDescription, ariaPlaceholder, title, generatedContent, descendantAccessibleEvidence, referenceEvidence }) => [
           labelText,
           ...imageAlts,
           ariaLabel,
+          ariaDescription,
+          ariaPlaceholder,
           title,
           ...generatedContent,
           ...descendantAccessibleEvidence,
@@ -2820,6 +3110,7 @@ function classifyDomInIsolatedWorld({
         decodedLinkPath,
         ...optionSafetySources,
         ...safetyCapture.ownerContextEvidence,
+        ...safetyCapture.composedEvidence,
         safetyCapture.documentTitle,
         safetyCapture.targetNativeControlValue,
         analysisState ?? '',
@@ -3592,6 +3883,7 @@ function assertIsolatedSafetySnapshot(
   maxSafetyEvidenceLength: number,
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
+  maxElementsInspected: number,
   modalState: { elements: Element[], overflow: boolean, limit: number },
 ): void {
   const current = captureIsolatedSafetyEvidence(
@@ -3599,6 +3891,7 @@ function assertIsolatedSafetySnapshot(
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
+    maxElementsInspected,
     modalState,
   )
   if (!expectedSnapshot || current.overflow || current.snapshot !== expectedSnapshot) {
@@ -3861,6 +4154,7 @@ function readIsolatedControlState(
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
+    maxElementsInspected,
     modalState,
   )
   assertIsolatedControlOperable(
@@ -3932,6 +4226,7 @@ function writeIsolatedControlState(
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
+    maxElementsInspected,
     modalState,
   )
   assertIsolatedControlOperable(
@@ -4057,6 +4352,7 @@ function writeIsolatedRadioGroupState(
       maxSafetyEvidenceLength,
       maxTotalSafetyEvidenceLength,
       maxSelectOptionsInspected,
+      maxElementsInspected,
       modalState,
     )
     assertIsolatedControlOperable(
@@ -4172,6 +4468,7 @@ function readIsolatedLinkTarget(
   maxSafetyEvidenceLength: number,
   maxTotalSafetyEvidenceLength: number,
   maxSelectOptionsInspected: number,
+  maxElementsInspected: number,
 ): string {
   const ariaDisabled = captureEffectiveAriaDisabled(
     this,
@@ -4206,6 +4503,7 @@ function readIsolatedLinkTarget(
     maxSafetyEvidenceLength,
     maxTotalSafetyEvidenceLength,
     maxSelectOptionsInspected,
+    maxElementsInspected,
     modalState,
   )
   return this.href
@@ -4491,6 +4789,7 @@ function readLinkTarget(
       MAX_SAFETY_EVIDENCE_LENGTH,
       MAX_TOTAL_SAFETY_EVIDENCE_LENGTH,
       WRAPPER_MAX_SELECT_OPTIONS_INSPECTED,
+      WRAPPER_MAX_DOM_ELEMENTS_INSPECTED,
     ],
     existingCdp,
   )

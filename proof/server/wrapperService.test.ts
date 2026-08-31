@@ -903,7 +903,7 @@ async function startFixture(): Promise<Fixture> {
           <input type="text" aria-label="Overflow attribute detail">
         </form>
         <script>
-          for (let index = 0; index < 7; index += 1) {
+          for (let index = 0; index < 2; index += 1) {
             const reference = document.createElement('span');
             reference.id = 'overflow-reference-' + index;
             reference.setAttribute('aria-label', 'x'.repeat(4000));
@@ -1696,15 +1696,216 @@ async function startFixture(): Promise<Fixture> {
           <input id="credential-aria" type="text" name="reference_four" aria-label="privatekey" value="opaque-aria-secret">
           <input id="credential-title" type="text" name="reference_five" aria-label="Project identifier" title="API-key" value="opaque-title-secret">
         </form>
+        <form id="plural-reference-form">
+          <input id="credential-api-keys" type="text" name="reference_six" aria-label="API keys" value="opaque-api-keys-secret">
+          <input id="credential-access-keys" type="text" name="reference_seven" aria-label="Access_keys" value="opaque-access-keys-secret">
+          <input id="credential-private-keys" type="text" name="reference_eight" aria-label="privateKeys" value="opaque-private-keys-secret">
+        </form>
         <form id="neutral-key-boundary-form">
           <input id="keynote-topic" type="text" name="keynote_topic" aria-label="Keynote topic">
           <input id="private-parking" type="text" name="private_parking" aria-label="Private parking note">
           <input id="accessibility-setting" type="text" name="accessibility_setting" aria-label="Accessibility setting">
+          <input id="monkey-keys" type="text" name="monkey_keys" aria-label="Monkey keys">
+          <input id="private-donkeys" type="text" name="private_donkeys" aria-label="Private donkeys">
         </form>
         <form id="late-project-form">
           <input id="late-project-one" type="text" name="project_reference" aria-label="Project reference">
           <input id="late-project-two" type="text" name="project_note" aria-label="Project note">
         </form>`)
+      return
+    }
+    if (requestUrl === '/composed-accessible-safety') {
+      response.end(`<!doctype html><title>Composed safety evidence</title>
+        <span id="composed-api">API</span><span id="composed-keys">keys</span>
+        <form id="sensitive-composed-reference-form">
+          <input type="text" name="reference" aria-label="Composed reference field" aria-labelledby="composed-api composed-keys">
+          <input type="text" aria-label="Sensitive composed reference detail">
+        </form>
+        <form id="sensitive-composed-label-form">
+          <label for="composed-label-target">API <img alt="keys"></label>
+          <input id="composed-label-target" type="text" name="reference" aria-label="Composed label field">
+          <input type="text" aria-label="Sensitive composed label detail">
+        </form>
+        <form id="sensitive-composed-images-form">
+          <label for="composed-images-target"><img alt="Bank"><img alt="account"></label>
+          <input id="composed-images-target" type="text" name="reference" aria-label="Composed image field">
+          <input type="text" aria-label="Sensitive composed image detail">
+        </form>
+        <form id="sensitive-composed-labels-form">
+          <label for="composed-labels-target">Bank</label>
+          <label for="composed-labels-target">account</label>
+          <input id="composed-labels-target" type="text" name="reference" aria-label="Composed labels field">
+          <input type="text" aria-label="Sensitive composed labels detail">
+        </form>
+        <form id="neutral-composed-boundary-form">
+          <label for="neutral-monkey">Monkey <img alt="business"></label>
+          <input id="neutral-monkey" type="text" name="monkey_business">
+          <input type="text" name="private_donkeys" aria-label="Private donkeys pasture">
+        </form>
+        <span id="late-composed-first">Project</span><span id="late-composed-second">reference</span>
+        <form id="late-composed-form">
+          <input id="late-composed-input" type="text" name="reference" aria-label="Late composed field" aria-labelledby="late-composed-first late-composed-second">
+          <input id="late-composed-detail" type="text" aria-label="Late composed detail">
+        </form>
+        <form id="overflow-composed-form">
+          <input id="overflow-composed-input" type="text" aria-label="Overflow composed field">
+          <input type="text" aria-label="Overflow composed detail">
+        </form>
+        <script>
+          const overflow = document.getElementById('overflow-composed-input');
+          const ids = [];
+          for (let index = 0; index < 7; index += 1) {
+            const source = document.createElement('span');
+            source.id = 'overflow-composed-' + index;
+            source.textContent = 'x'.repeat(2100);
+            document.body.append(source);
+            ids.push(source.id);
+          }
+          overflow.setAttribute('aria-labelledby', ids.join(' '));
+        </script>`)
+      return
+    }
+    if (requestUrl === '/aria-placeholder-safety') {
+      response.end(`<!doctype html><title>ARIA placeholder safety</title>
+        <form id="sensitive-direct-placeholder-form">
+          <input type="text" aria-label="Direct placeholder field" aria-placeholder="API keys">
+          <input type="text" aria-label="Sensitive direct placeholder detail">
+        </form>
+        <span id="placeholder-reference" aria-placeholder="Password">Reference placeholder field</span>
+        <form id="sensitive-reference-placeholder-form">
+          <input type="text" name="reference" aria-labelledby="placeholder-reference">
+          <input type="text" aria-label="Sensitive reference placeholder detail">
+        </form>
+        <form id="sensitive-owner-placeholder-form" aria-placeholder="Payment">
+          <input type="text" aria-label="Owner placeholder reference">
+          <input type="text" aria-label="Owner placeholder detail">
+        </form>
+        <form id="neutral-placeholder-form">
+          <input id="neutral-placeholder-input" type="text" aria-label="Neutral placeholder reference" aria-placeholder="Helpful hint">
+          <input type="text" aria-label="Neutral placeholder detail">
+        </form>
+        <form id="late-placeholder-form">
+          <input id="late-placeholder-input" type="text" aria-label="Late placeholder reference" aria-placeholder="Helpful hint">
+          <input id="late-placeholder-detail" type="text" aria-label="Late placeholder detail">
+        </form>
+        <span id="late-reference-placeholder-source" aria-placeholder="Helpful hint">Late referenced source</span>
+        <form id="late-reference-placeholder-form">
+          <input id="late-reference-placeholder-input" type="text" aria-label="Late referenced placeholder reference" aria-labelledby="late-reference-placeholder-source">
+          <input id="late-reference-placeholder-detail" type="text" aria-label="Late referenced placeholder detail">
+        </form>
+        <form id="late-owner-placeholder-form" aria-placeholder="Helpful hint">
+          <input id="late-owner-placeholder-input" type="text" aria-label="Late owner placeholder reference">
+          <input id="late-owner-placeholder-detail" type="text" aria-label="Late owner placeholder detail">
+        </form>
+        <form id="overflow-placeholder-form">
+          <input id="overflow-placeholder-input" type="text" aria-label="Overflow placeholder reference">
+          <input type="text" aria-label="Overflow placeholder detail">
+        </form>
+        <script>document.getElementById('overflow-placeholder-input').setAttribute('aria-placeholder', 'x'.repeat(4097))</script>`)
+      return
+    }
+    if (requestUrl === '/submit-context-safety') {
+      response.end(`<!doctype html><title>Submit context safety</title>
+        <form id="sensitive-button-submit-form">
+          <input type="text" aria-label="Button submit reference">
+          <input type="text" aria-label="Button submit detail">
+          <button>Pay</button>
+        </form>
+        <form id="sensitive-input-submit-form">
+          <input type="text" aria-label="Input submit reference">
+          <input type="text" aria-label="Input submit detail">
+          <input type="submit" value="Pay">
+        </form>
+        <form id="sensitive-image-submit-form">
+          <input type="text" aria-label="Image submit reference">
+          <input type="text" aria-label="Image submit detail">
+          <input type="image" alt="Checkout">
+        </form>
+        <form id="sensitive-external-submit-form">
+          <input type="text" aria-label="External submit reference">
+          <input type="text" aria-label="External submit detail">
+        </form>
+        <button type="submit" form="sensitive-external-submit-form" aria-label="Payment">Preview</button>
+        <form id="sensitive-external-image-form">
+          <input type="text" aria-label="External image reference">
+          <input type="text" aria-label="External image detail">
+        </form>
+        <input type="image" form="sensitive-external-image-form" alt="Checkout">
+        <form id="sensitive-external-input-submit-form">
+          <input type="text" aria-label="External input submit reference">
+          <input type="text" aria-label="External input submit detail">
+        </form>
+        <input type="submit" form="sensitive-external-input-submit-form" value="Pay">
+        <form id="sensitive-button-value-form">
+          <input type="text" aria-label="Button value reference">
+          <input type="text" aria-label="Button value detail">
+          <button type="submit" value="Payment">Preview</button>
+        </form>
+        <form id="sensitive-submit-title-form">
+          <input type="text" aria-label="Submit title reference">
+          <input type="text" aria-label="Submit title detail">
+          <button type="submit" title="Payment">Preview</button>
+        </form>
+        <form id="sensitive-submit-generated-form">
+          <input type="text" aria-label="Submit generated reference">
+          <input type="text" aria-label="Submit generated detail">
+          <button class="generated-submit" type="submit">Preview</button>
+        </form>
+        <form id="sensitive-submit-image-form">
+          <input type="text" aria-label="Submit descendant image reference">
+          <input type="text" aria-label="Submit descendant image detail">
+          <button type="submit"><img alt="Payment"></button>
+        </form>
+        <span id="submit-reference-label">Payment</span>
+        <form id="sensitive-submit-reference-form">
+          <input type="text" aria-label="Submit ARIA reference">
+          <input type="text" aria-label="Submit ARIA detail">
+          <button type="submit" aria-labelledby="submit-reference-label">Preview</button>
+        </form>
+        <form id="sensitive-submit-action-form">
+          <input type="text" aria-label="Submit action reference">
+          <input type="text" aria-label="Submit action detail">
+          <button type="submit" formaction="/checkout">Preview</button>
+        </form>
+        <form id="neutral-submit-form">
+          <input id="neutral-submit-input" type="text" aria-label="Neutral submit reference">
+          <input type="text" aria-label="Neutral submit detail">
+          <button type="submit">Preview</button>
+          <button type="button">Pay</button>
+          <button type="reset">Payment</button>
+        </form>
+        <form id="late-submit-form">
+          <input id="late-submit-input" type="text" aria-label="Late submit reference">
+          <input id="late-submit-detail" type="text" aria-label="Late submit detail">
+          <button id="late-submit-button" type="submit">Preview</button>
+        </form>
+        <form id="late-submit-action-form">
+          <input id="late-submit-action-input" type="text" aria-label="Late submit action reference">
+          <input id="late-submit-action-detail" type="text" aria-label="Late submit action detail">
+          <button id="late-submit-action-button" type="submit" formaction="/about">Preview</button>
+        </form>
+        <form id="late-external-submit-form">
+          <input id="late-external-submit-input" type="text" aria-label="Late external submit reference">
+          <input id="late-external-submit-detail" type="text" aria-label="Late external submit detail">
+        </form>
+        <form id="late-external-submit-decoy-form"></form>
+        <button id="late-external-submit-button" type="submit" form="late-external-submit-form">Preview</button>
+        <form id="overflow-submit-form">
+          <input type="text" aria-label="Overflow submit reference">
+          <input type="text" aria-label="Overflow submit detail">
+        </form>
+        <script>
+          const style = document.createElement('style');
+          style.textContent = '.generated-submit::after { content: " Payment"; }';
+          document.head.append(style);
+          const overflowForm = document.getElementById('overflow-submit-form');
+          for (let index = 0; index < 17; index += 1) {
+            const button = document.createElement('button');
+            button.type = 'submit';
+            button.textContent = 'Preview ' + index;
+            overflowForm.append(button);
+          }
+        </script>`)
       return
     }
     if (requestUrl === '/document-title-payment') {
@@ -6213,10 +6414,19 @@ describe('WrapperProofService security boundaries', () => {
       'Project code',
       'privatekey',
       'Project identifier',
+      'API keys',
+      'Access_keys',
+      'privateKeys',
     ]) {
       expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
     }
-    for (const label of ['Keynote topic', 'Private parking note', 'Accessibility setting']) {
+    for (const label of [
+      'Keynote topic',
+      'Private parking note',
+      'Accessibility setting',
+      'Monkey keys',
+      'Private donkeys',
+    ]) {
       expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: false })
     }
     const publicPayload = JSON.stringify({
@@ -6224,7 +6434,7 @@ describe('WrapperProofService security boundaries', () => {
       domEvidence: analysis.domEvidence,
       axEvidence: analysis.axEvidence,
     })
-    expect(publicPayload).not.toMatch(/opaque-(?:label|name|id|aria|title)-secret/)
+    expect(publicPayload).not.toMatch(/opaque-(?:label|name|id|aria|title|api-keys|access-keys|private-keys)-secret/)
 
     const neutralEvidence = analysis.domEvidence.find(({ label }) => label === 'Keynote topic')!
     const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidence.id))!
@@ -6241,11 +6451,11 @@ describe('WrapperProofService security boundaries', () => {
 
     const lateForm = analysis.capabilities.find(({ name }) => name === 'prepare_visible_form_2')!
     await page.locator('#late-project-one').evaluate((input) => {
-      input.setAttribute('aria-label', 'api\u200bkey')
-      input.setAttribute('title', 'accesskey')
+      input.setAttribute('aria-label', 'api\u200bkeys')
+      input.setAttribute('title', 'access_keys')
     })
     await page.locator('#late-project-two').evaluate((input) => {
-      input.setAttribute('name', 'privateKey')
+      input.setAttribute('name', 'privateKeys')
     })
     await expect(service.execute(
       analysis.sessionId,
@@ -6273,6 +6483,295 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       lateForm.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('classifies bounded composed accessible-name evidence and revalidates it before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/composed-accessible-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    for (const label of [
+      'Composed reference field',
+      'Composed label field',
+      'Composed image field',
+      'Composed labels field',
+      'Overflow composed field',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
+    }
+    for (const label of ['Monkey', 'Private donkeys pasture']) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: false })
+    }
+
+    const neutralEvidence = analysis.domEvidence.find(({ label }) => label === 'Monkey')!
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidence.id))!
+    const neutralResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )
+    expect(neutralResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = neutralResult.analysis
+
+    const lateEvidence = analysis.domEvidence.find(({ label }) => label === 'Late composed field')!
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidence.id))!
+    await page.locator('#late-composed-first').evaluate((node) => { node.textContent = 'API' })
+    await page.locator('#late-composed-second').evaluate((node) => { node.textContent = 'keys' })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-composed-input').inputValue()).toBe('')
+    expect(await page.locator('#late-composed-detail').inputValue()).toBe('')
+
+    await page.locator('#late-composed-first').evaluate((node) => { node.textContent = 'Project' })
+    await page.locator('#late-composed-second').evaluate((node) => { node.textContent = 'reference' })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('binds aria-placeholder through direct, referenced, and owner safety evidence', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/aria-placeholder-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    for (const label of [
+      'Direct placeholder field',
+      'Reference placeholder field',
+      'Owner placeholder reference',
+      'Owner placeholder detail',
+      'Overflow placeholder reference',
+    ]) {
+      expect(analysis.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
+    }
+    expect(analysis.domEvidence.find(({ label }) => label === 'Neutral placeholder reference'))
+      .toMatchObject({ sensitive: false })
+
+    const neutralEvidence = analysis.domEvidence.find(({ label }) => label === 'Neutral placeholder reference')!
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidence.id))!
+    const neutralResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )
+    analysis = neutralResult.analysis
+
+    const lateEvidence = analysis.domEvidence.find(({ label }) => label === 'Late placeholder reference')!
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidence.id))!
+    await page.locator('#late-placeholder-input').evaluate((input) =>
+      input.setAttribute('aria-placeholder', 'API keys'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-placeholder-input').inputValue()).toBe('')
+    expect(await page.locator('#late-placeholder-detail').inputValue()).toBe('')
+
+    await page.locator('#late-placeholder-input').evaluate((input) =>
+      input.setAttribute('aria-placeholder', 'Helpful hint'))
+
+    const referencedEvidence = analysis.domEvidence
+      .find(({ label }) => label === 'Late referenced placeholder reference')!
+    const referencedForm = analysis.capabilities
+      .find(({ evidenceIds }) => evidenceIds.includes(referencedEvidence.id))!
+    await page.locator('#late-reference-placeholder-source').evaluate((node) =>
+      node.setAttribute('aria-placeholder', 'Password'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      referencedForm.name,
+      referencedForm.sampleInput,
+      undefined,
+      referencedForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-reference-placeholder-input').inputValue()).toBe('')
+    expect(await page.locator('#late-reference-placeholder-detail').inputValue()).toBe('')
+
+    await page.locator('#late-reference-placeholder-source').evaluate((node) =>
+      node.setAttribute('aria-placeholder', 'Helpful hint'))
+
+    const ownerEvidence = analysis.domEvidence
+      .find(({ label }) => label === 'Late owner placeholder reference')!
+    const ownerForm = analysis.capabilities
+      .find(({ evidenceIds }) => evidenceIds.includes(ownerEvidence.id))!
+    await page.locator('#late-owner-placeholder-form').evaluate((form) =>
+      form.setAttribute('aria-placeholder', 'API keys'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      ownerForm.name,
+      ownerForm.sampleInput,
+      undefined,
+      ownerForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-owner-placeholder-input').inputValue()).toBe('')
+    expect(await page.locator('#late-owner-placeholder-detail').inputValue()).toBe('')
+
+    await page.locator('#late-owner-placeholder-form').evaluate((form) =>
+      form.setAttribute('aria-placeholder', 'Helpful hint'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      ownerForm.name,
+      ownerForm.sampleInput,
+      undefined,
+      ownerForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  })
+
+  it('classifies and revalidates bounded owning-form submit controls without public leakage', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    let analysis = await service.analyze(`${fixture.origin}/submit-context-safety`)
+    const page = internalSession(service, analysis.sessionId).page
+
+    for (const label of [
+      'Button submit reference',
+      'Input submit reference',
+      'Image submit reference',
+      'External submit reference',
+      'External image reference',
+      'External input submit reference',
+      'Button value reference',
+      'Submit title reference',
+      'Submit generated reference',
+      'Submit descendant image reference',
+      'Submit ARIA reference',
+      'Submit action reference',
+      'Overflow submit reference',
+    ]) {
+      const evidence = analysis.domEvidence.find((item) => item.label === label)!
+      expect(evidence.sensitive).toBe(true)
+      expect(analysis.capabilities.some(({ evidenceIds }) => evidenceIds.includes(evidence.id))).toBe(false)
+    }
+    expect(JSON.stringify(analysis.capabilities)).not.toMatch(/Pay|Payment|Checkout/)
+    expect(analysis.domEvidence.some(({ type }) => ['submit', 'image'].includes(type))).toBe(false)
+
+    const neutralEvidence = analysis.domEvidence.find(({ label }) => label === 'Neutral submit reference')!
+    const neutralForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(neutralEvidence.id))!
+    const neutralResult = await service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutralForm.name,
+      neutralForm.sampleInput,
+      undefined,
+      neutralForm.id,
+    )
+    expect(neutralResult.structuredContent.targetStateVerified).toBe(true)
+    analysis = neutralResult.analysis
+
+    const lateEvidence = analysis.domEvidence.find(({ label }) => label === 'Late submit reference')!
+    const lateForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(lateEvidence.id))!
+    await page.locator('#late-submit-button').evaluate((button) => { button.textContent = 'Pay' })
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      lateForm.name,
+      lateForm.sampleInput,
+      undefined,
+      lateForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-submit-input').inputValue()).toBe('')
+    expect(await page.locator('#late-submit-detail').inputValue()).toBe('')
+
+    const actionEvidence = analysis.domEvidence.find(({ label }) => label === 'Late submit action reference')!
+    const actionForm = analysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(actionEvidence.id))!
+    await page.locator('#late-submit-action-button').evaluate((button) =>
+      button.setAttribute('formaction', '/checkout'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      actionForm.name,
+      actionForm.sampleInput,
+      undefined,
+      actionForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-submit-action-input').inputValue()).toBe('')
+    expect(await page.locator('#late-submit-action-detail').inputValue()).toBe('')
+
+    const externalEvidence = analysis.domEvidence
+      .find(({ label }) => label === 'Late external submit reference')!
+    const externalForm = analysis.capabilities
+      .find(({ evidenceIds }) => evidenceIds.includes(externalEvidence.id))!
+    await page.locator('#late-external-submit-button').evaluate((button) =>
+      button.setAttribute('form', 'late-external-submit-decoy-form'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      externalForm.name,
+      externalForm.sampleInput,
+      undefined,
+      externalForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await page.locator('#late-external-submit-input').inputValue()).toBe('')
+    expect(await page.locator('#late-external-submit-detail').inputValue()).toBe('')
+
+    await page.locator('#late-external-submit-button').evaluate((button) =>
+      button.setAttribute('form', 'late-external-submit-form'))
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      externalForm.name,
+      externalForm.sampleInput,
+      undefined,
+      externalForm.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    let raceValuesBeforeWrite: string[] = []
+    const raceService = createService({
+      beforeControlWrite: async (racePage) => {
+        await racePage.locator('#late-submit-button').evaluate((button) => {
+          button.textContent = 'Pay'
+        })
+        raceValuesBeforeWrite = await racePage
+          .locator('#late-submit-input, #late-submit-detail')
+          .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value))
+      },
+    })
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/submit-context-safety`)
+    const raceEvidence = raceAnalysis.domEvidence
+      .find(({ label }) => label === 'Late submit reference')!
+    const raceForm = raceAnalysis.capabilities
+      .find(({ evidenceIds }) => evidenceIds.includes(raceEvidence.id))!
+    await expect(raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceForm.name,
+      raceForm.sampleInput,
+      undefined,
+      raceForm.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(raceValuesBeforeWrite).toEqual(['', ''])
+    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('classifies normalized card-verification tokens without matching neutral word substrings', async () => {
