@@ -49,6 +49,7 @@ const MAX_CAPTURE_NATIVE_CONTROLS = 256
 const MAX_CAPTURE_NATIVE_HASH_INPUT_LENGTH = 1024 * 1_024
 const MAX_CAPTURE_NATIVE_HASH_THRESHOLD = 256
 const MAX_CAPTURE_NATIVE_STATE_LENGTH = 32_768
+const MAX_CAPTURE_NATIVE_TRANSITIONS = 4_096
 const SUBFRAME_REMOVAL_ATTEMPTS = 6
 const SUBFRAME_REMOVAL_RETRY_DELAY_MS = 15
 const UNSAFE_FIELD_HINT = /(?:^|\s)(?:(?:api|access|private)\s*keys?|cvc|cvv|otp|pin|pass\s*codes?|one\s*time\s*codes?|verification\s+codes?)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|pay|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
@@ -133,6 +134,7 @@ interface ProofSession {
   resolveTargetTrafficFailure: (error: WrapperServiceError) => void
   navigationPolicyError: WrapperServiceError | null
   mainFrameId: string
+  nativeStateTransitionKey: string
   pendingSubframeBlocks: Set<Promise<void>>
   subframeBoundaryCount: number
 }
@@ -158,6 +160,8 @@ export interface WrapperProofServiceOptions {
   beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   /** Test-only hook for deterministic DOM drift at the capture boundary. */
   beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
+  /** Test-only hook for deterministic native-state drift after the pre-screenshot snapshot. */
+  duringAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   /** Test-only hook for deterministic viewport drift after screenshot capture. */
   afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   /** Test-only hook for deterministic radio-group drift immediately before the atomic write. */
@@ -170,6 +174,10 @@ export interface WrapperProofServiceOptions {
   duringActionCaptureArm?: (page: Page) => Promise<void>
   /** Test-only hook for deterministic failure after the preparation network lock is acquired. */
   beforeActionStateCapture?: (page: Page) => Promise<void>
+  /** Test-only hook for deterministic native-state drift after the pre-action snapshot. */
+  duringActionScreenshot?: (page: Page) => Promise<void>
+  /** Test-only hook for restoring deterministic native-state drift after the action screenshot. */
+  afterActionScreenshot?: (page: Page) => Promise<void>
   /** Test-only hook for deterministic frame-owner availability races. */
   beforeSubframeOwnerLookup?: (page: Page, frameId: string, attempt: number) => Promise<void>
 }
@@ -3266,6 +3274,182 @@ async function installEarlyFocusChangeCounter(cdp: CDPSession): Promise<void> {
   }
 }
 
+async function installEarlyNativeStateTransitionCounter(cdp: CDPSession): Promise<string> {
+  const stateKey = `__webmcp_native_transitions_${randomUUID().replaceAll('-', '')}`
+  const recordKey = `__webmcp_native_record_${randomUUID().replaceAll('-', '')}`
+  const installed = await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
+    runImmediately: true,
+    source: `(() => {
+      const stateKey = ${JSON.stringify(stateKey)};
+      const recordKey = ${JSON.stringify(recordKey)};
+      if (Object.prototype.hasOwnProperty.call(globalThis, stateKey)) return;
+      const getDescriptor = Object.getOwnPropertyDescriptor;
+      const defineProperty = Object.defineProperty;
+      const apply = Reflect.apply;
+      const isConnectedGetter = getDescriptor(Node.prototype, 'isConnected')?.get;
+      const ownerDocumentGetter = getDescriptor(Node.prototype, 'ownerDocument')?.get;
+      const defaultViewGetter = getDescriptor(Document.prototype, 'defaultView')?.get;
+      const maxTransitions = ${MAX_CAPTURE_NATIVE_TRANSITIONS};
+      let count = 0;
+      let overflow = false;
+      const bindings = [];
+      const record = () => {
+        if (count >= maxTransitions) {
+          overflow = true;
+          return;
+        }
+        count += 1;
+      };
+      const recordLocalConnected = (target) => {
+        if (!isConnectedGetter) {
+          overflow = true;
+          return;
+        }
+        try {
+          if (apply(isConnectedGetter, target, [])) record();
+        } catch {
+          overflow = true;
+        }
+      };
+      try {
+        defineProperty(globalThis, recordKey, {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: recordLocalConnected,
+        });
+      } catch {
+        overflow = true;
+      }
+      const recordConnected = (target) => {
+        if (!ownerDocumentGetter || !defaultViewGetter) {
+          overflow = true;
+          return;
+        }
+        try {
+          const ownerDocument = apply(ownerDocumentGetter, target, []);
+          const targetWindow = ownerDocument && apply(defaultViewGetter, ownerDocument, []);
+          const targetRecorder = targetWindow?.[recordKey];
+          if (typeof targetRecorder !== 'function') {
+            overflow = true;
+            return;
+          }
+          apply(targetRecorder, targetWindow, [target]);
+        } catch {
+          overflow = true;
+        }
+      };
+      const wrapSetter = (prototype, property) => {
+        const descriptor = getDescriptor(prototype, property);
+        if (!descriptor || typeof descriptor.set !== 'function') {
+          overflow = true;
+          return;
+        }
+        const original = descriptor.set;
+        const wrapped = function(value) {
+          recordConnected(this);
+          return apply(original, this, [value]);
+        };
+        try {
+          defineProperty(prototype, property, { ...descriptor, configurable: false, set: wrapped });
+          bindings.push([prototype, property, 'set', wrapped]);
+        } catch {
+          overflow = true;
+        }
+      };
+      const wrapMethod = (prototype, property) => {
+        const descriptor = getDescriptor(prototype, property);
+        if (!descriptor || typeof descriptor.value !== 'function') {
+          overflow = true;
+          return;
+        }
+        const original = descriptor.value;
+        const wrapped = function(...args) {
+          recordConnected(this);
+          return apply(original, this, args);
+        };
+        try {
+          defineProperty(prototype, property, { ...descriptor, configurable: false, value: wrapped });
+          bindings.push([prototype, property, 'value', wrapped]);
+        } catch {
+          overflow = true;
+        }
+      };
+      wrapSetter(HTMLInputElement.prototype, 'value');
+      wrapSetter(HTMLInputElement.prototype, 'checked');
+      wrapSetter(HTMLInputElement.prototype, 'indeterminate');
+      wrapSetter(HTMLInputElement.prototype, 'valueAsDate');
+      wrapSetter(HTMLInputElement.prototype, 'valueAsNumber');
+      wrapSetter(HTMLTextAreaElement.prototype, 'value');
+      wrapSetter(HTMLSelectElement.prototype, 'value');
+      wrapSetter(HTMLSelectElement.prototype, 'selectedIndex');
+      wrapSetter(HTMLOptionElement.prototype, 'selected');
+      wrapMethod(HTMLInputElement.prototype, 'stepUp');
+      wrapMethod(HTMLInputElement.prototype, 'stepDown');
+      wrapMethod(HTMLInputElement.prototype, 'setRangeText');
+      wrapMethod(HTMLTextAreaElement.prototype, 'setRangeText');
+      wrapMethod(HTMLFormElement.prototype, 'reset');
+      wrapMethod(HTMLElement.prototype, 'click');
+      const dispatchDescriptor = getDescriptor(EventTarget.prototype, 'dispatchEvent');
+      const eventTypeGetter = getDescriptor(Event.prototype, 'type')?.get;
+      if (!dispatchDescriptor || typeof dispatchDescriptor.value !== 'function' || !eventTypeGetter) {
+        overflow = true;
+      } else {
+        const originalDispatch = dispatchDescriptor.value;
+        const wrappedDispatch = function(event) {
+          let eventType = '';
+          try {
+            eventType = apply(eventTypeGetter, event, []);
+          } catch {
+            overflow = true;
+          }
+          if (eventType === 'click' || eventType === 'reset') recordConnected(this);
+          return apply(originalDispatch, this, [event]);
+        };
+        try {
+          defineProperty(EventTarget.prototype, 'dispatchEvent', {
+            ...dispatchDescriptor,
+            configurable: false,
+            value: wrappedDispatch,
+          });
+          bindings.push([EventTarget.prototype, 'dispatchEvent', 'value', wrappedDispatch]);
+        } catch {
+          overflow = true;
+        }
+      }
+      const intact = () => {
+        for (let index = 0; index < bindings.length; index += 1) {
+          const binding = bindings[index];
+          const descriptor = getDescriptor(binding[0], binding[1]);
+          if (descriptor?.[binding[2]] !== binding[3]) return false;
+        }
+        return true;
+      };
+      defineProperty(globalThis, stateKey, {
+        configurable: false,
+        enumerable: false,
+        get() {
+          return { version: 1, count, overflow, integrity: intact() };
+        },
+      });
+      const requestFrame = globalThis.requestAnimationFrame;
+      if (typeof requestFrame !== 'function') {
+        overflow = true;
+        return;
+      }
+      const audit = () => {
+        if (!intact()) overflow = true;
+        apply(requestFrame, globalThis, [audit]);
+      };
+      apply(requestFrame, globalThis, [audit]);
+    })()`,
+  }) as { identifier?: string }
+  if (!installed.identifier) {
+    throw new Error('The native-state transition guard could not be installed.')
+  }
+  return stateKey
+}
+
 async function createIsolatedModalState(
   cdp: CDPSession,
   executionContextId: number,
@@ -3776,6 +3960,8 @@ interface AnalysisCaptureGuardSnapshot {
   mutationCount: number
   nativeControlStateOverflow: boolean
   nativeControlStateSignature: string
+  nativeStateTransitionCount: number
+  nativeStateTransitionOverflow: boolean
   navigationCount: number
   scrollChanged: boolean
   scrollOverflow: boolean
@@ -3804,6 +3990,8 @@ function actionCaptureStayedStable(
     && after.mutationCount === before.mutationCount
     && !after.nativeControlStateOverflow
     && after.nativeControlStateSignature === before.nativeControlStateSignature
+    && !after.nativeStateTransitionOverflow
+    && after.nativeStateTransitionCount === before.nativeStateTransitionCount
     && after.navigationCount === before.navigationCount
     && !after.scrollChanged
     && !after.scrollOverflow
@@ -3822,6 +4010,8 @@ function actionCaptureStartedClean(snapshot: AnalysisCaptureGuardSnapshot): bool
     && snapshot.focusChangeCount === 0
     && snapshot.mutationCount === 0
     && !snapshot.nativeControlStateOverflow
+    && snapshot.nativeStateTransitionCount === 0
+    && !snapshot.nativeStateTransitionOverflow
     && snapshot.navigationCount === 0
     && !snapshot.scrollChanged
     && !snapshot.scrollOverflow
@@ -3833,6 +4023,7 @@ function actionCaptureStartedClean(snapshot: AnalysisCaptureGuardSnapshot): bool
 async function createAnalysisCaptureGuard(
   context: BrowserContext,
   page: Page,
+  nativeStateTransitionKey: string,
 ): Promise<{
   snapshot: () => Promise<AnalysisCaptureGuardSnapshot>
   arm: (
@@ -3859,6 +4050,44 @@ async function createAnalysisCaptureGuard(
     throw new Error('The isolated browser main frame is unavailable.')
   }
   const executionContextId = await createIsolatedWorld(cdp)
+  const readNativeStateTransitions = async (): Promise<{
+    count: number
+    integrity: boolean
+    overflow: boolean
+    version: number
+  } | undefined> => {
+    const result = await cdp.send('Runtime.evaluate', {
+      expression: `globalThis[${JSON.stringify(nativeStateTransitionKey)}]`,
+      returnByValue: true,
+    }) as {
+      result?: { value?: { count?: unknown, integrity?: unknown, overflow?: unknown, version?: unknown } }
+      exceptionDetails?: unknown
+    }
+    const value = result.result?.value
+    if (
+      result.exceptionDetails
+      || value?.version !== 1
+      || !Number.isSafeInteger(value.count)
+      || Number(value.count) < 0
+      || typeof value.integrity !== 'boolean'
+      || typeof value.overflow !== 'boolean'
+    ) return undefined
+    return {
+      count: Number(value.count),
+      integrity: value.integrity,
+      overflow: value.overflow,
+      version: 1,
+    }
+  }
+  const nativeStateTransitionBaseline = await readNativeStateTransitions()
+  if (
+    !nativeStateTransitionBaseline
+    || nativeStateTransitionBaseline.overflow
+    || !nativeStateTransitionBaseline.integrity
+  ) {
+    await cdp.detach().catch(() => undefined)
+    throw new Error('The native-state transition guard is unavailable.')
+  }
   let navigationCount = 0
   let styleSheetChangeCount = 0
   let topLayerChangeCount = 0
@@ -4143,8 +4372,18 @@ async function createAnalysisCaptureGuard(
       if (captured.exceptionDetails || !captured.result?.value) {
         throw new Error('The isolated analysis mutation guard became unavailable.')
       }
+      const nativeStateTransitions = await readNativeStateTransitions()
+      const nativeStateTransitionInvalid = !nativeStateTransitions
+        || nativeStateTransitions.count < nativeStateTransitionBaseline.count
+        || nativeStateTransitions.count - nativeStateTransitionBaseline.count > MAX_CAPTURE_NATIVE_TRANSITIONS
       return {
         ...captured.result.value,
+        nativeStateTransitionCount: nativeStateTransitionInvalid
+          ? -1
+          : nativeStateTransitions.count - nativeStateTransitionBaseline.count,
+        nativeStateTransitionOverflow: nativeStateTransitionInvalid
+          || nativeStateTransitions.overflow
+          || !nativeStateTransitions.integrity,
         navigationCount,
         styleSheetChangeCount,
         topLayerChangeCount,
@@ -5937,12 +6176,15 @@ export class WrapperProofService {
   private readonly maxTargetSessionBytes: number
   private readonly beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   private readonly beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
+  private readonly duringAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   private readonly afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   private readonly beforeControlWrite?: (page: Page) => Promise<void>
   private readonly beforeRadioGroupWrite?: (page: Page) => Promise<void>
   private readonly afterActionRecapture?: (page: Page) => Promise<void>
   private readonly duringActionCaptureArm?: (page: Page) => Promise<void>
   private readonly beforeActionStateCapture?: (page: Page) => Promise<void>
+  private readonly duringActionScreenshot?: (page: Page) => Promise<void>
+  private readonly afterActionScreenshot?: (page: Page) => Promise<void>
   private readonly beforeSubframeOwnerLookup?: (page: Page, frameId: string, attempt: number) => Promise<void>
 
   constructor(options: WrapperProofServiceOptions = {}) {
@@ -5959,12 +6201,15 @@ export class WrapperProofService {
     this.maxTargetSessionBytes = options.maxTargetSessionBytes ?? WRAPPER_MAX_TARGET_SESSION_BYTES
     this.beforeDomEvidenceCollection = options.beforeDomEvidenceCollection
     this.beforeAnalysisScreenshot = options.beforeAnalysisScreenshot
+    this.duringAnalysisScreenshot = options.duringAnalysisScreenshot
     this.afterAnalysisScreenshot = options.afterAnalysisScreenshot
     this.beforeControlWrite = options.beforeControlWrite
     this.beforeRadioGroupWrite = options.beforeRadioGroupWrite
     this.afterActionRecapture = options.afterActionRecapture
     this.duringActionCaptureArm = options.duringActionCaptureArm
     this.beforeActionStateCapture = options.beforeActionStateCapture
+    this.duringActionScreenshot = options.duringActionScreenshot
+    this.afterActionScreenshot = options.afterActionScreenshot
     this.beforeSubframeOwnerLookup = options.beforeSubframeOwnerLookup
   }
 
@@ -6010,6 +6255,23 @@ export class WrapperProofService {
       : new WrapperServiceError(
           'invalid_action',
           'The isolated page attempted a consequential navigation and was stopped.',
+          409,
+          { sessionInvalidated: true },
+        )
+    this.stopForPolicyFailure(session)
+  }
+
+  private failPopupBoundary(session: ProofSession): void {
+    if (session.navigationPolicyError) return
+    session.navigationPolicyError = session.capabilities.size === 0
+      ? new WrapperServiceError(
+          'unsupported_page',
+          'This page could not be loaded safely in the isolated browser.',
+          422,
+        )
+      : new WrapperServiceError(
+          'invalid_action',
+          'The isolated page opened an unsupported popup and was stopped.',
           409,
           { sessionInvalidated: true },
         )
@@ -6219,7 +6481,11 @@ export class WrapperProofService {
       await session.cdp.send('Page.getFrameTree')
       await waitForNetworkQuiescence(session)
       const subframeBoundaryBefore = session.subframeBoundaryCount
-      const guard = await createAnalysisCaptureGuard(session.context, session.page)
+      const guard = await createAnalysisCaptureGuard(
+        session.context,
+        session.page,
+        session.nativeStateTransitionKey,
+      )
       let pausedAnimations: PausedDocumentAnimations | undefined
       let captureSucceeded = false
       let captureCleanupFailed = false
@@ -6230,6 +6496,8 @@ export class WrapperProofService {
           before.overflow
           || before.topLayerOverflow
           || before.focusChangeCount !== 0
+          || before.nativeStateTransitionCount !== 0
+          || before.nativeStateTransitionOverflow
           || before.scrollChanged
           || before.scrollOverflow
           || before.scrollStateMismatch
@@ -6257,6 +6525,7 @@ export class WrapperProofService {
         )
         await session.cdp.send('Page.getFrameTree')
         await waitForNetworkQuiescence(session)
+        await this.duringAnalysisScreenshot?.(session.page, attempt)
         const candidateScreenshot = await guard.screenshot()
         await this.afterAnalysisScreenshot?.(session.page, attempt)
         const afterScreenshot = await guard.snapshot()
@@ -6296,6 +6565,8 @@ export class WrapperProofService {
           || after.mutationCount !== 0
           || after.nativeControlStateOverflow
           || after.nativeControlStateSignature !== before.nativeControlStateSignature
+          || after.nativeStateTransitionOverflow
+          || after.nativeStateTransitionCount !== before.nativeStateTransitionCount
           || (
             collectedDomEvidence.usesDocumentIdReferences
             && after.documentIdMutationCount !== before.documentIdMutationCount
@@ -6552,6 +6823,10 @@ export class WrapperProofService {
       await raceWithSignal(cdp.send('DOM.enable'), signal)
       await raceWithSignal(cdp.send('Network.enable'), signal)
       await raceWithSignal(installEarlyFocusChangeCounter(cdp), signal)
+      const nativeStateTransitionKey = await raceWithSignal(
+        installEarlyNativeStateTransitionCounter(cdp),
+        signal,
+      )
       const frameTree = await raceWithSignal(cdp.send('Page.getFrameTree'), signal) as {
         frameTree?: { frame?: { id?: string } }
       }
@@ -6592,6 +6867,7 @@ export class WrapperProofService {
         resolveTargetTrafficFailure,
         navigationPolicyError: null,
         mainFrameId,
+        nativeStateTransitionKey,
         pendingSubframeBlocks: new Set(),
         subframeBoundaryCount: 0,
       }
@@ -6660,7 +6936,9 @@ export class WrapperProofService {
         }
       }), signal)
       context.on('page', (popup) => {
-        if (popup !== page) void popup.close()
+        if (popup === page) return
+        this.failPopupBoundary(session)
+        void popup.close()
       })
       page.on('dialog', (dialog) => void dialog.dismiss())
       page.on('download', (download) => void download.cancel())
@@ -6835,7 +7113,11 @@ export class WrapperProofService {
           )
           actionCaptureGuard = await raceWithSessionPolicy(
             session,
-            createAnalysisCaptureGuard(session.context, session.page),
+            createAnalysisCaptureGuard(
+              session.context,
+              session.page,
+              session.nativeStateTransitionKey,
+            ),
             signal,
           )
           await raceWithSessionPolicy(
@@ -6910,12 +7192,24 @@ export class WrapperProofService {
               throw new Error('The isolated page changed before its visible action state was captured.')
             }
           }
+          await raceWithSessionPolicy(
+            session,
+            this.duringActionScreenshot?.(session.page) ?? Promise.resolve(),
+            signal,
+          )
         }
         beforeActionScreenshotDataUrl = screenshotDataUrl(await raceWithSessionPolicy(
           session,
           captureViewportScreenshot(session.cdp),
           signal,
         ))
+        if (capability.kind !== 'navigation') {
+          await raceWithSessionPolicy(
+            session,
+            this.afterActionScreenshot?.(session.page) ?? Promise.resolve(),
+            signal,
+          )
+        }
         beforeActionTargetDigests = capability.kind === 'navigation'
           ? null
           : await raceWithSessionPolicy(

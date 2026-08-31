@@ -2449,6 +2449,48 @@ async function startFixture(): Promise<Fixture> {
         </script>`)
       return
     }
+    if (requestUrl === '/native-transition-paths') {
+      response.end(`<!doctype html><title>Native transition paths</title>
+        <form id="native-transition-form">
+          <input id="native-transition-search" type="search" aria-label="Native transition search">
+          <input id="native-transition-input" hidden value="default input">
+          <input id="native-transition-checkbox" type="checkbox" hidden checked>
+          <textarea id="native-transition-textarea" hidden>default textarea</textarea>
+          <select id="native-transition-select" hidden>
+            <option id="native-transition-default" value="default">Default</option>
+            <option id="native-transition-baseline" value="baseline">Baseline</option>
+          </select>
+        </form>
+        <script>
+          document.getElementById('native-transition-input').value = 'baseline input';
+          document.getElementById('native-transition-checkbox').checked = false;
+          document.getElementById('native-transition-textarea').value = 'baseline textarea';
+          document.getElementById('native-transition-select').selectedIndex = 1;
+        </script>`)
+      return
+    }
+    if (requestUrl === '/native-transition-foreign-realm') {
+      response.end(`<!doctype html><title>Foreign realm native transition</title>
+        <style>
+          #foreign-realm-shell:has(#foreign-realm-checkbox:checked) {
+            border: 20px solid red;
+          }
+        </style>
+        <main id="foreign-realm-shell">
+          <label><input id="foreign-realm-checkbox" type="checkbox"> Safe choice</label>
+          <input id="foreign-realm-search" type="search" aria-label="Foreign realm search">
+        </main>
+        <script>
+          const frame = document.createElement('iframe');
+          document.body.append(frame);
+          globalThis.__foreignCheckedSetter = Object.getOwnPropertyDescriptor(
+            frame.contentWindow.HTMLInputElement.prototype,
+            'checked',
+          ).set;
+          frame.remove();
+        </script>`)
+      return
+    }
     if (requestUrl === '/native-control-xhtml') {
       response.setHeader('Content-Type', 'application/xhtml+xml; charset=utf-8')
       response.end(`<?xml version="1.0" encoding="UTF-8"?>
@@ -3070,12 +3112,15 @@ function createService(options: {
   maxTargetSessionBytes?: number
   beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
+  duringAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   beforeControlWrite?: (page: Page) => Promise<void>
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
   afterActionRecapture?: (page: Page) => Promise<void>
   duringActionCaptureArm?: (page: Page) => Promise<void>
   beforeActionStateCapture?: (page: Page) => Promise<void>
+  duringActionScreenshot?: (page: Page) => Promise<void>
+  afterActionScreenshot?: (page: Page) => Promise<void>
   beforeSubframeOwnerLookup?: (page: Page, frameId: string, attempt: number) => Promise<void>
 } = {}) {
   const resolveTarget = async (value: string): Promise<PublicTarget> => {
@@ -3098,12 +3143,15 @@ function createService(options: {
     maxTargetSessionBytes: options.maxTargetSessionBytes,
     beforeDomEvidenceCollection: options.beforeDomEvidenceCollection,
     beforeAnalysisScreenshot: options.beforeAnalysisScreenshot,
+    duringAnalysisScreenshot: options.duringAnalysisScreenshot,
     afterAnalysisScreenshot: options.afterAnalysisScreenshot,
     beforeControlWrite: options.beforeControlWrite,
     beforeRadioGroupWrite: options.beforeRadioGroupWrite,
     afterActionRecapture: options.afterActionRecapture,
     duringActionCaptureArm: options.duringActionCaptureArm,
     beforeActionStateCapture: options.beforeActionStateCapture,
+    duringActionScreenshot: options.duringActionScreenshot,
+    afterActionScreenshot: options.afterActionScreenshot,
     beforeSubframeOwnerLookup: options.beforeSubframeOwnerLookup,
   })
 }
@@ -5260,10 +5308,13 @@ describe('WrapperProofService security boundaries', () => {
     const analysis = await service.analyze(`${fixture.origin}/analysis-native-state`)
     expect(captureCalls).toBe(2)
     expect(JSON.stringify(analysis)).not.toContain('private-state-after-screenshot')
-    const search = analysis.capabilities.find(({ kind }) => kind === 'prepare_search')!
-    await expect(service.execute(
-      analysis.sessionId,
-      analysis.sessionToken,
+    const stableService = createService()
+    services.push(stableService)
+    const stableAnalysis = await stableService.analyze(`${fixture.origin}/analysis-native-state`)
+    const search = stableAnalysis.capabilities.find(({ kind }) => kind === 'prepare_search')!
+    await expect(stableService.execute(
+      stableAnalysis.sessionId,
+      stableAnalysis.sessionToken,
       search.name,
       search.sampleInput,
       undefined,
@@ -5992,6 +6043,285 @@ describe('WrapperProofService security boundaries', () => {
     expect(JSON.stringify(analysis)).not.toContain('opaque-native-capture-secret')
   })
 
+  it('retries when transient intrinsic native state changes alter screenshot paint between endpoint snapshots', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.locator('#native-state-checkbox').evaluate((control) => {
+          ;(control as HTMLInputElement).checked = true
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.locator('#native-state-checkbox').evaluate((control) => {
+          ;(control as HTMLInputElement).checked = false
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/native-control-state-capture`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it.each([
+    'input-value',
+    'input-checked',
+    'input-indeterminate',
+    'textarea-value',
+    'select-value',
+    'select-selected-index',
+    'option-selected',
+    'form-reset',
+    'element-click',
+    'dispatch-click',
+  ])('records a bounded monotone transition for transient %s writes', async (transition) => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate((kind) => {
+          const input = document.querySelector<HTMLInputElement>('#native-transition-input')!
+          const checkbox = document.querySelector<HTMLInputElement>('#native-transition-checkbox')!
+          const textarea = document.querySelector<HTMLTextAreaElement>('#native-transition-textarea')!
+          const select = document.querySelector<HTMLSelectElement>('#native-transition-select')!
+          if (kind === 'input-value') input.value = 'transient input'
+          if (kind === 'input-checked') checkbox.checked = true
+          if (kind === 'input-indeterminate') checkbox.indeterminate = true
+          if (kind === 'textarea-value') textarea.value = 'transient textarea'
+          if (kind === 'select-value') select.value = 'default'
+          if (kind === 'select-selected-index') select.selectedIndex = 0
+          if (kind === 'option-selected') {
+            document.querySelector<HTMLOptionElement>('#native-transition-default')!.selected = true
+          }
+          if (kind === 'form-reset') {
+            document.querySelector<HTMLFormElement>('#native-transition-form')!.reset()
+          }
+          if (kind === 'element-click') checkbox.click()
+          if (kind === 'dispatch-click') {
+            checkbox.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+          }
+        }, transition)
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          document.querySelector<HTMLInputElement>('#native-transition-input')!.value = 'baseline input'
+          const checkbox = document.querySelector<HTMLInputElement>('#native-transition-checkbox')!
+          checkbox.checked = false
+          checkbox.indeterminate = false
+          document.querySelector<HTMLTextAreaElement>('#native-transition-textarea')!.value = 'baseline textarea'
+          document.querySelector<HTMLSelectElement>('#native-transition-select')!.selectedIndex = 1
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/native-transition-paths`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it('fails closed when transient unrelated native state changes during an action screenshot', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringActionScreenshot: async (page) => {
+        await page.locator('#native-state-checkbox').evaluate((control) => {
+          ;(control as HTMLInputElement).checked = true
+        })
+      },
+      afterActionScreenshot: async (page) => {
+        await page.locator('#native-state-checkbox').evaluate((control) => {
+          ;(control as HTMLInputElement).checked = false
+        })
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/native-control-state-capture`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('records temporary descriptor and Array.every tampering without trusting endpoint integrity', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          ;(globalThis as typeof globalThis & { __nativeOriginalEvery?: typeof Array.prototype.every })
+            .__nativeOriginalEvery = Array.prototype.every
+          Array.prototype.every = (() => true) as unknown as typeof Array.prototype.every
+          const descriptor = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')!
+          try {
+            Object.defineProperty(HTMLInputElement.prototype, 'checked', {
+              ...descriptor,
+              set() {},
+            })
+          } catch {
+            // The fail-closed production guard makes the wrapper non-configurable.
+          }
+          document.querySelector<HTMLInputElement>('#native-state-checkbox')!.checked = true
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          document.querySelector<HTMLInputElement>('#native-state-checkbox')!.checked = false
+          const scope = globalThis as typeof globalThis & {
+            __nativeOriginalEvery?: typeof Array.prototype.every
+          }
+          if (scope.__nativeOriginalEvery) Array.prototype.every = scope.__nativeOriginalEvery
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/native-control-state-capture`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it('fails closed when native-state transitions exceed the monotone counter budget', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringAnalysisScreenshot: async (page) => {
+        await page.evaluate(() => {
+          const checkbox = document.querySelector<HTMLInputElement>('#native-state-checkbox')!
+          for (let index = 0; index < 4_100; index += 1) checkbox.checked = false
+        })
+      },
+    })
+    services.push(service)
+
+    await expect(service.analyze(
+      `${fixture.origin}/native-control-state-capture`,
+    )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('records a retained same-origin subframe setter against the main-realm transition boundary', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    let captureCalls = 0
+    const service = createService({
+      duringAnalysisScreenshot: async (page, attempt) => {
+        captureCalls += 1
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          const scope = globalThis as typeof globalThis & {
+            __foreignCheckedSetter: (this: HTMLInputElement, value: boolean) => void
+          }
+          const checkbox = document.querySelector<HTMLInputElement>('#foreign-realm-checkbox')!
+          scope.__foreignCheckedSetter.call(checkbox, true)
+        })
+      },
+      afterAnalysisScreenshot: async (page, attempt) => {
+        if (attempt !== 0) return
+        await page.evaluate(() => {
+          const scope = globalThis as typeof globalThis & {
+            __foreignCheckedSetter: (this: HTMLInputElement, value: boolean) => void
+          }
+          scope.__foreignCheckedSetter.call(
+            document.querySelector<HTMLInputElement>('#foreign-realm-checkbox')!,
+            false,
+          )
+        })
+      },
+    })
+    services.push(service)
+
+    const analysis = await service.analyze(`${fixture.origin}/native-transition-foreign-realm`)
+
+    expect(captureCalls).toBe(2)
+    expect(analysis.capabilities.some(({ name }) => name === 'prepare_page_search')).toBe(true)
+  })
+
+  it('fails closed when a popup realm is created during capture', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringAnalysisScreenshot: async (page) => {
+        await page.evaluate(() => {
+          const popup = window.open('about:blank')
+          if (!popup) throw new Error('Popup fixture was unexpectedly blocked.')
+          const popupInput = popup.document.createElement('input')
+          const setter = Object.getOwnPropertyDescriptor(
+            Object.getPrototypeOf(popupInput),
+            'checked',
+          )?.set
+          setter?.call(document.querySelector<HTMLInputElement>('#native-state-checkbox')!, true)
+          setter?.call(document.querySelector<HTMLInputElement>('#native-state-checkbox')!, false)
+        })
+        await page.waitForTimeout(25)
+      },
+    })
+    services.push(service)
+
+    await expect(service.analyze(
+      `${fixture.origin}/native-control-state-capture`,
+    )).rejects.toMatchObject({ code: 'unsupported_page', status: 422 })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
+  it('invalidates an active session when a popup realm is created before an action write', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService({
+      duringActionScreenshot: async (page) => {
+        await page.evaluate(() => {
+          const popup = window.open('about:blank')
+          if (!popup) throw new Error('Popup fixture was unexpectedly blocked.')
+          const popupInput = popup.document.createElement('input')
+          const setter = Object.getOwnPropertyDescriptor(
+            Object.getPrototypeOf(popupInput),
+            'checked',
+          )?.set
+          setter?.call(document.querySelector<HTMLInputElement>('#native-state-checkbox')!, true)
+          setter?.call(document.querySelector<HTMLInputElement>('#native-state-checkbox')!, false)
+        })
+        await page.waitForTimeout(25)
+      },
+    })
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/native-control-state-capture`)
+    const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      search.name,
+      search.sampleInput,
+      undefined,
+      search.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 409, sessionInvalidated: true })
+    expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+  })
+
   it('keeps short private state raw and large private state bounded-hashed while detecting either drift', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -6021,13 +6351,17 @@ describe('WrapperProofService security boundaries', () => {
     expect(search).toBeDefined()
     expect(JSON.stringify(analysis)).not.toContain('short-private-state')
     expect(JSON.stringify(analysis)).not.toContain('private-hash-source-')
-    await expect(service.execute(
-      analysis.sessionId,
-      analysis.sessionToken,
-      search.name,
-      search.sampleInput,
+    const stableService = createService()
+    services.push(stableService)
+    const stableAnalysis = await stableService.analyze(`${fixture.origin}/native-control-state-hashed`)
+    const stableSearch = stableAnalysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
+    await expect(stableService.execute(
+      stableAnalysis.sessionId,
+      stableAnalysis.sessionToken,
+      stableSearch.name,
+      stableSearch.sampleInput,
       undefined,
-      search.id,
+      stableSearch.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
   })
 
