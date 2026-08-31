@@ -67,6 +67,10 @@ export interface ActionField {
   textSample?: string
   radioSampleIndex?: number
   radioGroupSize?: number
+  /** Private native state bound to the accepted analysis; never serialized publicly. */
+  analysisState?: string | number | boolean
+  /** Private native states for every bound radio-group member. */
+  analysisStates?: Array<string | number | boolean>
   safetySnapshot: string
   safetySnapshots?: string[]
 }
@@ -82,6 +86,8 @@ export interface CapabilityAction {
   fields?: ActionField[]
   textMinLength?: number
   textMaxLength?: number
+  /** Private native state bound to the accepted analysis; never serialized publicly. */
+  analysisState?: string | number | boolean
   safetySnapshot?: string
   safetySnapshots?: string[]
 }
@@ -217,6 +223,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         controlType: search.type,
         textMinLength: Math.max(1, search.textMinLength ?? 0),
         textMaxLength: Math.min(80, search.textMaxLength ?? 80),
+        analysisState: search.analysisState,
         safetySnapshot: search.safetySnapshot,
       },
     })
@@ -253,6 +260,7 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         optionValues: control.optionValues,
         optionIndices: control.optionIndices
           ?? control.optionValues?.map((_value, optionIndex) => optionIndex),
+        analysisState: control.analysisState,
         safetySnapshot: control.safetySnapshot,
       },
     })
@@ -375,6 +383,8 @@ export function inferSafeCapabilities(controls: DetectedControl[]): InferredCapa
         textSample: control.textSample,
         radioSampleIndex,
         radioGroupSize: radioGroup?.length,
+        analysisState: control.analysisState,
+        analysisStates: radioGroup?.map(({ analysisState }) => analysisState as string | number | boolean),
         safetySnapshot: control.safetySnapshot,
         safetySnapshots: radioGroup?.map(({ safetySnapshot }) => safetySnapshot),
       })

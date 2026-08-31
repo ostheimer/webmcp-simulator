@@ -183,6 +183,38 @@ async function startFixture(): Promise<Fixture> {
         <a href="/about-safe">Neutral safe redirect</a>`)
       return
     }
+    if (requestUrl === '/destructive-navigation-source') {
+      response.end(`<!doctype html><title>Destructive navigation source</title>
+        <a href="/delete-account">Delete account</a>
+        <a href="/unsubscribe?token=agent-secret">Unsubscribe</a>
+        <a href="/logout">Log out</a>
+        <a href="/konto#löschen">Konto löschen</a>
+        <a href="/about#overview">Neutral overview</a>
+        <a href="/destructive-redirect">Neutral redirect label</a>
+        <a href="/late-destructive-route">Late destructive route</a>`)
+      return
+    }
+    if (requestUrl === '/destructive-redirect') {
+      response.statusCode = 302
+      response.setHeader('Location', '/remove-profile')
+      response.end()
+      return
+    }
+    if (requestUrl === '/late-destructive-route') {
+      response.end(`<!doctype html><title>Late destructive destination</title>
+        <script>setTimeout(() => { location.hash = '/unsubscribe?token=late' }, 30)</script>`)
+      return
+    }
+    if (
+      requestUrl.startsWith('/delete-account')
+      || requestUrl.startsWith('/unsubscribe')
+      || requestUrl.startsWith('/logout')
+      || requestUrl.startsWith('/konto')
+      || requestUrl.startsWith('/remove-profile')
+    ) {
+      response.end('<!doctype html><title>Destructive destination must not load</title>')
+      return
+    }
     if (requestUrl === '/iframe-navigation-source') {
       response.end(`<!doctype html><title>Iframe navigation source</title>
         <a href="/iframe-destination">Open safe destination</a>`)
@@ -1713,6 +1745,19 @@ async function startFixture(): Promise<Fixture> {
         </form>`)
       return
     }
+    if (requestUrl === '/select-readonly-safety') {
+      response.end(`<!doctype html><title>Select readonly safety</title>
+        <select id="initial-readonly-select" aria-label="Initial readonly category filter" aria-readonly="true">
+          <option value="one" selected>One</option><option value="two">Two</option>
+        </select>
+        <select id="false-readonly-select" aria-label="False readonly category filter" aria-readonly="false">
+          <option value="one" selected>One</option><option value="two">Two</option>
+        </select>
+        <select id="late-readonly-select" aria-label="Late readonly category filter">
+          <option value="one" selected>One</option><option value="two">Two</option>
+        </select>`)
+      return
+    }
     if (requestUrl === '/option-described-safety') {
       response.end(`<!doctype html><title>Option described safety</title>
         <span id="sensitive-option-description">Credit card number</span>
@@ -2018,6 +2063,61 @@ async function startFixture(): Promise<Fixture> {
         <form id="late-required-checkbox-form">
           <input id="late-required-checkbox" type="checkbox" aria-label="Late required checkbox">
           <input id="late-required-checkbox-detail" type="text" aria-label="Late required checkbox detail">
+        </form>
+        <form id="aria-required-unchecked-form">
+          <input id="aria-required-unchecked" type="checkbox" aria-required="true" aria-label="ARIA required unchecked">
+          <input type="text" aria-label="ARIA required unchecked detail">
+        </form>
+        <form id="aria-required-checked-form">
+          <input id="aria-required-checked" type="checkbox" aria-required="true" checked aria-label="ARIA required checked">
+          <input type="text" aria-label="ARIA required checked first">
+          <input type="text" aria-label="ARIA required checked second">
+        </form>
+        <form id="late-aria-required-form">
+          <input id="late-aria-required" type="checkbox" aria-label="Late ARIA required checkbox">
+          <input id="late-aria-required-detail" type="text" aria-label="Late ARIA required detail">
+        </form>`)
+      return
+    }
+    if (requestUrl === '/target-value-safety') {
+      response.end(`<!doctype html><title>Target value safety</title>
+        <form id="sensitive-live-form">
+          <input id="sensitive-live-value" type="text" aria-label="Safe reference" value="Credit card number">
+          <input type="text" aria-label="Safe reference detail">
+        </form>
+        <form id="sensitive-range-form">
+          <input id="sensitive-range-value" type="range" min="0" max="100" value="25" aria-label="Safe range" aria-valuetext="Bank account">
+          <input type="text" aria-label="Safe range detail">
+        </form>
+        <form id="neutral-live-form">
+          <input id="neutral-live-value" type="text" aria-label="Neutral reference" value="private-draft">
+          <input id="neutral-live-detail" type="text" aria-label="Neutral reference detail">
+        </form>
+        <form id="late-live-form">
+          <input id="late-live-value" type="text" aria-label="Late reference" value="initial-draft">
+          <input id="late-live-detail" type="text" aria-label="Late reference detail">
+        </form>
+        <form id="late-range-form">
+          <input id="late-range-value" type="range" min="0" max="100" value="25" aria-label="Late range">
+          <input id="late-range-detail" type="text" aria-label="Late range detail">
+        </form>
+        <form id="sensitive-checkbox-value-form">
+          <input id="sensitive-checkbox-value" type="checkbox" value="Credit card number" aria-label="Sensitive checkbox value">
+          <input type="text" aria-label="Sensitive checkbox detail">
+        </form>
+        <form id="late-checkbox-value-form">
+          <input id="late-checkbox-value" type="checkbox" value="neutral-choice" aria-label="Late checkbox value">
+          <input id="late-checkbox-detail" type="text" aria-label="Late checkbox detail">
+        </form>
+        <form id="sensitive-radio-value-form">
+          <label><input id="sensitive-radio-value-a" type="radio" name="sensitive-choice" value="neutral-choice" checked> Sensitive radio A</label>
+          <label><input id="sensitive-radio-value-b" type="radio" name="sensitive-choice" value="Credit card number"> Sensitive radio B</label>
+          <input type="text" aria-label="Sensitive radio detail">
+        </form>
+        <form id="late-radio-value-form">
+          <label><input id="late-radio-value-a" type="radio" name="late-choice" value="first-choice" checked> Late radio A</label>
+          <label><input id="late-radio-value-b" type="radio" name="late-choice" value="second-choice"> Late radio B</label>
+          <input id="late-radio-detail" type="text" aria-label="Late radio detail">
         </form>`)
       return
     }
@@ -2342,6 +2442,7 @@ function createService(options: {
   beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
+  beforeControlWrite?: (page: Page) => Promise<void>
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
   afterActionRecapture?: (page: Page) => Promise<void>
 } = {}) {
@@ -2366,6 +2467,7 @@ function createService(options: {
     beforeDomEvidenceCollection: options.beforeDomEvidenceCollection,
     beforeAnalysisScreenshot: options.beforeAnalysisScreenshot,
     afterAnalysisScreenshot: options.afterAnalysisScreenshot,
+    beforeControlWrite: options.beforeControlWrite,
     beforeRadioGroupWrite: options.beforeRadioGroupWrite,
     afterActionRecapture: options.afterActionRecapture,
   })
@@ -4549,6 +4651,169 @@ describe('WrapperProofService security boundaries', () => {
     expect(internalServiceState(driftingService)).toEqual({ sessions: 0, reservations: 0 })
   })
 
+  it('classifies target-native value semantics privately and revalidates them before mutation', async () => {
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const service = createService()
+    services.push(service)
+    const analysis = await service.analyze(`${fixture.origin}/target-value-safety`)
+    const capabilityFor = (snapshot: typeof analysis, label: string) => {
+      const evidence = snapshot.domEvidence.find((item) => item.label === label)
+      return evidence && snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))
+    }
+
+    expect(capabilityFor(analysis, 'Safe reference')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Safe range')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Sensitive checkbox value')).toBeUndefined()
+    expect(capabilityFor(analysis, 'Sensitive radio B')).toBeUndefined()
+    expect(analysis.domEvidence.find(({ label }) => label === 'Sensitive checkbox value')).toMatchObject({ sensitive: true })
+    expect(analysis.domEvidence.find(({ label }) => label === 'Sensitive radio B')).toMatchObject({ sensitive: true })
+    const neutral = capabilityFor(analysis, 'Neutral reference')!
+    expect(neutral).toBeDefined()
+    expect(JSON.stringify(analysis)).not.toMatch(/Credit card number|Bank account|private-draft|initial-draft|neutral-choice|first-choice|second-choice/)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      neutral.name,
+      neutral.sampleInput,
+      undefined,
+      neutral.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const lateService = createService()
+    services.push(lateService)
+    const lateAnalysis = await lateService.analyze(`${fixture.origin}/target-value-safety`)
+    const latePage = internalSession(lateService, lateAnalysis.sessionId).page
+    const late = capabilityFor(lateAnalysis, 'Late reference')!
+    await latePage.locator('#late-live-value').evaluate((input) => {
+      (input as HTMLInputElement).value = 'Credit card number'
+    })
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      late.name,
+      late.sampleInput,
+      undefined,
+      late.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await latePage.locator('#late-live-value').inputValue()).toBe('Credit card number')
+    expect(await latePage.locator('#late-live-detail').inputValue()).toBe('')
+
+    const lateRange = capabilityFor(lateAnalysis, 'Late range')!
+    await latePage.locator('#late-range-value').evaluate((input) =>
+      input.setAttribute('aria-valuetext', 'Bank account'))
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      lateRange.name,
+      lateRange.sampleInput,
+      undefined,
+      lateRange.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await latePage.locator('#late-range-value').inputValue()).toBe('25')
+
+    const lateCheckbox = capabilityFor(lateAnalysis, 'Late checkbox value')!
+    await latePage.locator('#late-checkbox-value').evaluate((input) => {
+      (input as HTMLInputElement).value = 'IBAN'
+    })
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      lateCheckbox.name,
+      lateCheckbox.sampleInput,
+      undefined,
+      lateCheckbox.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await latePage.locator('#late-checkbox-value').isChecked()).toBe(false)
+    expect(await latePage.locator('#late-checkbox-detail').inputValue()).toBe('')
+
+    const lateRadio = capabilityFor(lateAnalysis, 'Late radio A')!
+    await latePage.locator('#late-radio-value-b').evaluate((input) => {
+      (input as HTMLInputElement).value = 'BIC'
+    })
+    await expect(lateService.execute(
+      lateAnalysis.sessionId,
+      lateAnalysis.sessionToken,
+      lateRadio.name,
+      lateRadio.sampleInput,
+      undefined,
+      lateRadio.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await latePage.locator('#late-radio-value-a, #late-radio-value-b').evaluateAll(
+      (radios) => radios.map((radio) => (radio as HTMLInputElement).checked),
+    )).toEqual([true, false])
+    expect(await latePage.locator('#late-radio-detail').inputValue()).toBe('')
+
+    const raceService = createService({ actionStartDelayMs: 180 })
+    services.push(raceService)
+    const raceAnalysis = await raceService.analyze(`${fixture.origin}/target-value-safety`)
+    const racePage = internalSession(raceService, raceAnalysis.sessionId).page
+    const raceCapability = capabilityFor(raceAnalysis, 'Late reference')!
+    const pending = raceService.execute(
+      raceAnalysis.sessionId,
+      raceAnalysis.sessionToken,
+      raceCapability.name,
+      raceCapability.sampleInput,
+      undefined,
+      raceCapability.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await racePage.locator('#late-live-value').evaluate((input) => {
+      (input as HTMLInputElement).value = 'Password'
+    })
+    await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+
+    const seamService = createService({
+      beforeControlWrite: async (page) => {
+        await page.locator('#late-live-value').evaluate((input) => {
+          (input as HTMLInputElement).value = 'Credit card number'
+        })
+      },
+    })
+    services.push(seamService)
+    const seamAnalysis = await seamService.analyze(`${fixture.origin}/target-value-safety`)
+    const seamCapability = capabilityFor(seamAnalysis, 'Late reference')!
+    await expect(seamService.execute(
+      seamAnalysis.sessionId,
+      seamAnalysis.sessionToken,
+      seamCapability.name,
+      seamCapability.sampleInput,
+      undefined,
+      seamCapability.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(seamService)).toEqual({ sessions: 0, reservations: 0 })
+
+    const preflightService = createService()
+    services.push(preflightService)
+    const preflightAnalysis = await preflightService.analyze(`${fixture.origin}/target-value-safety`)
+    const preflightCapability = capabilityFor(preflightAnalysis, 'Neutral reference')!
+    const preflightPage = internalSession(preflightService, preflightAnalysis.sessionId).page
+    await preflightPage.locator('#neutral-live-detail').evaluate((input) => {
+      (input as HTMLInputElement).value = 'Password'
+    })
+    await expect(preflightService.execute(
+      preflightAnalysis.sessionId,
+      preflightAnalysis.sessionToken,
+      preflightCapability.name,
+      preflightCapability.sampleInput,
+      undefined,
+      preflightCapability.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await preflightPage.locator('#neutral-live-value').inputValue()).toBe('private-draft')
+    await preflightPage.locator('#neutral-live-detail').evaluate((input) => {
+      (input as HTMLInputElement).value = ''
+    })
+    await expect(preflightService.execute(
+      preflightAnalysis.sessionId,
+      preflightAnalysis.sessionToken,
+      preflightCapability.name,
+      preflightCapability.sampleInput,
+      undefined,
+      preflightCapability.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+  }, 15_000)
+
   it('verifies every prepared form field atomically against periodic hostile resets', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
@@ -5996,6 +6261,27 @@ describe('WrapperProofService security boundaries', () => {
     expect(mutationHookCalls).toBe(1)
     expect(changeEvents).toBe(0)
     expect(internalServiceState(service)).toEqual({ sessions: 0, reservations: 0 })
+
+    const stateDriftService = createService({
+      beforeRadioGroupWrite: async (page) => {
+        await page.locator('#first-a, #first-b').evaluateAll((radios) => {
+          ;(radios[0] as HTMLInputElement).checked = false
+          ;(radios[1] as HTMLInputElement).checked = true
+        })
+      },
+    })
+    services.push(stateDriftService)
+    const stateDriftAnalysis = await stateDriftService.analyze(`${fixture.origin}/checked-radio-groups`)
+    const stateDriftForm = stateDriftAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
+    await expect(stateDriftService.execute(
+      stateDriftAnalysis.sessionId,
+      stateDriftAnalysis.sessionToken,
+      stateDriftForm.name,
+      stateDriftForm.sampleInput,
+      undefined,
+      stateDriftForm.id,
+    )).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(stateDriftService)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('revalidates page-authored safety evidence before read, write, and verification', async () => {
@@ -6351,7 +6637,6 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       ariaFalseOption.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
-
     const optionService = createService()
     services.push(optionService)
     const optionAnalysis = await optionService.analyze(`${fixture.origin}/option-and-readonly-safety`)
@@ -6369,6 +6654,50 @@ describe('WrapperProofService security boundaries', () => {
     expect(await optionPage.locator('#late-option-operability').evaluate(
       (select) => (select as HTMLSelectElement).selectedIndex,
     )).toBe(0)
+
+    const selectService = createService()
+    services.push(selectService)
+    const selectAnalysis = await selectService.analyze(`${fixture.origin}/select-readonly-safety`)
+    expect(capabilityFor(selectAnalysis, 'Initial readonly category filter')).toBeUndefined()
+    const falseReadonlySelect = capabilityFor(selectAnalysis, 'False readonly category filter')!
+    expect(falseReadonlySelect).toBeDefined()
+    await expect(selectService.execute(
+      selectAnalysis.sessionId,
+      selectAnalysis.sessionToken,
+      falseReadonlySelect.name,
+      falseReadonlySelect.sampleInput,
+      undefined,
+      falseReadonlySelect.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
+
+    const lateSelectService = createService()
+    services.push(lateSelectService)
+    const lateSelectAnalysis = await lateSelectService.analyze(`${fixture.origin}/select-readonly-safety`)
+    const lateSelectPage = internalSession(lateSelectService, lateSelectAnalysis.sessionId).page
+    const lateReadonlySelect = capabilityFor(lateSelectAnalysis, 'Late readonly category filter')!
+    await lateSelectPage.locator('#late-readonly-select').evaluate((select) =>
+      select.setAttribute('aria-readonly', 'true'))
+    await expect(lateSelectService.execute(
+      lateSelectAnalysis.sessionId,
+      lateSelectAnalysis.sessionToken,
+      lateReadonlySelect.name,
+      lateReadonlySelect.sampleInput,
+      undefined,
+      lateReadonlySelect.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await lateSelectPage.locator('#late-readonly-select').evaluate(
+      (select) => (select as HTMLSelectElement).selectedIndex,
+    )).toBe(0)
+    await lateSelectPage.locator('#late-readonly-select').evaluate((select) =>
+      select.removeAttribute('aria-readonly'))
+    await expect(lateSelectService.execute(
+      lateSelectAnalysis.sessionId,
+      lateSelectAnalysis.sessionToken,
+      lateReadonlySelect.name,
+      lateReadonlySelect.sampleInput,
+      undefined,
+      lateReadonlySelect.id,
+    )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
 
     const readonlyService = createService()
     services.push(readonlyService)
@@ -6437,6 +6766,24 @@ describe('WrapperProofService security boundaries', () => {
     await new Promise((resolve) => setTimeout(resolve, 40))
     await readonlyPage.locator('#late-readonly-value').evaluate((input) => input.setAttribute('aria-readonly', 'true'))
     await expect(pendingReadonly).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+
+    const selectService = createService({ actionStartDelayMs: 180 })
+    services.push(selectService)
+    const selectAnalysis = await selectService.analyze(`${fixture.origin}/select-readonly-safety`)
+    const selectPage = internalSession(selectService, selectAnalysis.sessionId).page
+    const lateReadonlySelect = capabilityFor(selectAnalysis, 'Late readonly category filter')
+    const pendingSelect = selectService.execute(
+      selectAnalysis.sessionId,
+      selectAnalysis.sessionToken,
+      lateReadonlySelect.name,
+      lateReadonlySelect.sampleInput,
+      undefined,
+      lateReadonlySelect.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await selectPage.locator('#late-readonly-select').evaluate((select) =>
+      select.setAttribute('aria-readonly', 'true'))
+    await expect(pendingSelect).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
   })
 
   it('classifies option descriptions privately and revalidates described evidence before mutation', async () => {
@@ -6833,6 +7180,28 @@ describe('WrapperProofService security boundaries', () => {
     expect(Object.values(textOnlyForm.inputSchema.properties ?? {})).not.toContainEqual(
       expect.objectContaining({ type: 'boolean' }),
     )
+
+    const ariaRequiredEvidence = analysis.domEvidence.find(({ label }) => label === 'ARIA required unchecked')!
+    const ariaRequiredForm = analysis.capabilities.find(({ evidenceIds }) =>
+      evidenceIds.includes(ariaRequiredEvidence.id))!
+    expect(ariaRequiredForm.inputSchema).toMatchObject({
+      properties: { field_1: { type: 'boolean', const: true } },
+    })
+    expect(ariaRequiredForm.sampleInput.field_1).toBe(true)
+    await expect(service.execute(
+      analysis.sessionId,
+      analysis.sessionToken,
+      ariaRequiredForm.name,
+      { ...ariaRequiredForm.sampleInput, field_1: false },
+      undefined,
+      ariaRequiredForm.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', status: 400, sessionInvalidated: false })
+    expect(await internalSession(service, analysis.sessionId).page.locator('#aria-required-unchecked').isChecked()).toBe(false)
+
+    const ariaRequiredCheckedEvidence = analysis.domEvidence.find(({ label }) => label === 'ARIA required checked')!
+    expect(analysis.capabilities.find(({ evidenceIds }) =>
+      evidenceIds.includes(ariaRequiredCheckedEvidence.id))).toBeUndefined()
+    expect(await internalSession(service, analysis.sessionId).page.locator('#aria-required-checked').isChecked()).toBe(true)
   })
 
   it('revalidates a checkbox that becomes required before and after action admission', async () => {
@@ -6892,6 +7261,46 @@ describe('WrapperProofService security boundaries', () => {
 
     await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(internalServiceState(raceService)).toEqual({ sessions: 0, reservations: 0 })
+
+    const ariaService = createService()
+    services.push(ariaService)
+    const ariaAnalysis = await ariaService.analyze(`${fixture.origin}/checkbox-samples`)
+    const ariaEvidence = ariaAnalysis.domEvidence.find(({ label }) => label === 'Late ARIA required checkbox')!
+    const ariaCapability = ariaAnalysis.capabilities.find(({ evidenceIds }) => evidenceIds.includes(ariaEvidence.id))!
+    const ariaPage = internalSession(ariaService, ariaAnalysis.sessionId).page
+    await ariaPage.locator('#late-aria-required').evaluate((checkbox) =>
+      checkbox.setAttribute('aria-required', 'true'))
+    await expect(ariaService.execute(
+      ariaAnalysis.sessionId,
+      ariaAnalysis.sessionToken,
+      ariaCapability.name,
+      ariaCapability.sampleInput,
+      undefined,
+      ariaCapability.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: false })
+    expect(await ariaPage.locator('#late-aria-required').isChecked()).toBe(false)
+    expect(await ariaPage.locator('#late-aria-required-detail').inputValue()).toBe('')
+
+    const ariaRaceService = createService({ actionStartDelayMs: 200 })
+    services.push(ariaRaceService)
+    const ariaRaceAnalysis = await ariaRaceService.analyze(`${fixture.origin}/checkbox-samples`)
+    const ariaRaceEvidence = ariaRaceAnalysis.domEvidence.find(({ label }) => label === 'Late ARIA required checkbox')!
+    const ariaRaceCapability = ariaRaceAnalysis.capabilities.find(({ evidenceIds }) =>
+      evidenceIds.includes(ariaRaceEvidence.id))!
+    const ariaRacePage = internalSession(ariaRaceService, ariaRaceAnalysis.sessionId).page
+    const ariaPending = ariaRaceService.execute(
+      ariaRaceAnalysis.sessionId,
+      ariaRaceAnalysis.sessionToken,
+      ariaRaceCapability.name,
+      ariaRaceCapability.sampleInput,
+      undefined,
+      ariaRaceCapability.id,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    await ariaRacePage.locator('#late-aria-required').evaluate((checkbox) =>
+      checkbox.setAttribute('aria-required', 'true'))
+    await expect(ariaPending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
+    expect(internalServiceState(ariaRaceService)).toEqual({ sessions: 0, reservations: 0 })
   })
 
   it('excludes initially indeterminate checkboxes while preserving another safe control and state', async () => {
@@ -7764,6 +8173,99 @@ describe('WrapperProofService security boundaries', () => {
     })
     expect(result.structuredContent.allowedNetworkRequests).toBeGreaterThanOrEqual(1)
     expect(fixture.requests).toContain('/next')
+  })
+
+  it('screens destructive navigation terms consistently at discovery, redirect, and final URL boundaries', async () => {
+    expect(isConsequentialNavigationUrl('https://example.com/delete-account')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://example.com/unsubscribe?token=agent-secret')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://example.com/token/agent-secret')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://example.com/tokens/agent-secret')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://example.com/profile?token=agent-secret')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://example.com/profile?tokens=agent-secret')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://example.com/profile#logout')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://example.com/konto#l%C3%B6schen')).toBe(true)
+    expect(isConsequentialNavigationUrl('https://example.com/profile-overview?section=details#history')).toBe(false)
+
+    const fixture = await startFixture()
+    fixtures.push(fixture)
+    const capabilityAndIndex = (
+      snapshot: Awaited<ReturnType<WrapperProofService['analyze']>>,
+      label: string,
+    ) => {
+      const capability = snapshot.capabilities.find(({ kind }) => kind === 'navigation')!
+      const labels = capability.evidenceIds.map((id) =>
+        snapshot.domEvidence.find((evidence) => evidence.id === id)?.label)
+      return { capability, linkIndex: labels.indexOf(label) }
+    }
+
+    const discoveryService = createService()
+    services.push(discoveryService)
+    const discovery = await discoveryService.analyze(`${fixture.origin}/destructive-navigation-source`)
+    const navigation = discovery.capabilities.find(({ kind }) => kind === 'navigation')!
+    const advertisedLabels = navigation.evidenceIds.map((id) =>
+      discovery.domEvidence.find((evidence) => evidence.id === id)?.label)
+    expect(advertisedLabels).not.toEqual(expect.arrayContaining([
+      'Delete account',
+      'Unsubscribe',
+      'Log out',
+      'Konto löschen',
+    ]))
+    const neutral = capabilityAndIndex(discovery, 'Neutral overview')
+    expect(neutral.linkIndex).toBeGreaterThanOrEqual(0)
+    await expect(discoveryService.execute(
+      discovery.sessionId,
+      discovery.sessionToken,
+      neutral.capability.name,
+      { linkIndex: neutral.linkIndex },
+      undefined,
+      neutral.capability.id,
+    )).resolves.toMatchObject({
+      finalUrl: `${fixture.origin}/about#overview`,
+      structuredContent: { targetStateVerified: true },
+    })
+
+    const redirectService = createService()
+    services.push(redirectService)
+    const redirectAnalysis = await redirectService.analyze(`${fixture.origin}/destructive-navigation-source`)
+    const redirect = capabilityAndIndex(redirectAnalysis, 'Neutral redirect label')
+    await expect(redirectService.execute(
+      redirectAnalysis.sessionId,
+      redirectAnalysis.sessionToken,
+      redirect.capability.name,
+      { linkIndex: redirect.linkIndex },
+      undefined,
+      redirect.capability.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(fixture.requests).toContain('/destructive-redirect')
+    expect(fixture.requests).not.toContain('/remove-profile')
+
+    const finalService = createService()
+    services.push(finalService)
+    const finalAnalysis = await finalService.analyze(`${fixture.origin}/destructive-navigation-source`)
+    const late = capabilityAndIndex(finalAnalysis, 'Late destructive route')
+    await expect(finalService.execute(
+      finalAnalysis.sessionId,
+      finalAnalysis.sessionToken,
+      late.capability.name,
+      { linkIndex: late.linkIndex },
+      undefined,
+      late.capability.id,
+    )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
+    expect(fixture.requests).toContain('/late-destructive-route')
+
+    for (const path of [
+      '/delete-account',
+      '/unsubscribe?token=initial',
+      '/logout',
+      '/konto#l%C3%B6schen',
+    ]) {
+      const initialService = createService()
+      services.push(initialService)
+      await expect(initialService.analyze(`${fixture.origin}${path}`)).rejects.toMatchObject({
+        code: 'unsupported_page',
+      })
+      expect(internalServiceState(initialService)).toEqual({ sessions: 0, reservations: 0 })
+    }
   })
 
   it('blocks consequential redirect hops before requesting them and allows neutral redirects', async () => {

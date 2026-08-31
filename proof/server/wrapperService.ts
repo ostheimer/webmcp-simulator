@@ -44,7 +44,7 @@ const MAX_ANALYSIS_SCROLL_NODES = 512
 const MAX_ANALYSIS_WATCH_NODES = 2_048
 const MAX_ACTIVE_TOP_LAYER_ELEMENTS = 32
 const UNSAFE_FIELD_HINT = /(?:^|\s)(?:cvc|cvv)(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
-const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|order|ordering|purchase|purchasing|reservation|reserve|subscribe|termin|bestellen|bestellung|buchen|buchung|kaufen|kasse|reservieren|reservierung|warenkorb)\b/i
+const UNSAFE_NAVIGATION_HINT = /\b(appointment|book|booking|buy|cart|checkout|delete|deletion|logoff|logout|order|ordering|purchase|purchasing|removal|remove|reservation|reserve|signout|subscribe|tokens?|unsubscribe|unsubscription|termin|abmelden|abmeldung|austragen|bestellen|bestellung|buchen|buchung|entfernen|entfernung|kaufen|kasse|kündigen|kündigung|löschen|löschung|reservieren|reservierung|warenkorb)\b/i
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
   'additional-name',
   'address-level1',
@@ -152,6 +152,8 @@ export interface WrapperProofServiceOptions {
   afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   /** Test-only hook for deterministic radio-group drift immediately before the atomic write. */
   beforeRadioGroupWrite?: (page: Page) => Promise<void>
+  /** Test-only hook for deterministic control drift at the read-to-write boundary. */
+  beforeControlWrite?: (page: Page) => Promise<void>
   /** Test-only hook for deterministic target-state drift immediately after action recapture. */
   afterActionRecapture?: (page: Page) => Promise<void>
 }
@@ -902,6 +904,7 @@ function captureIsolatedSafetyEvidence(
   anchorImageAlts: string[]
   generatedContent: string[]
   ownerContextEvidence: string[]
+  targetNativeControlValue: string
 } {
   const getAttribute = Element.prototype.getAttribute
   const matches = Element.prototype.matches
@@ -1474,6 +1477,9 @@ function captureIsolatedSafetyEvidence(
     'aria-description',
     'aria-disabled',
     'aria-readonly',
+    'aria-required',
+    'aria-valuenow',
+    'aria-valuetext',
     'autocomplete',
     'placeholder',
     'name',
@@ -1601,6 +1607,7 @@ function captureIsolatedSafetyEvidence(
     ? boundedNodeText(element)
     : { value: '', overflow: false }
   let nativeRequired: boolean | null = null
+  let targetNativeControlValue = bounded('')
   if (
     element instanceof HTMLInputElement
     || element instanceof HTMLSelectElement
@@ -1614,6 +1621,15 @@ function captureIsolatedSafetyEvidence(
     const requiredGetter = Object.getOwnPropertyDescriptor(prototype, 'required')?.get
     if (!requiredGetter) aggregateOverflow = true
     else nativeRequired = Boolean(requiredGetter.call(element))
+    if (element instanceof HTMLInputElement) {
+      const typeGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'type')?.get
+      const valueGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+      if (!typeGetter || !valueGetter) {
+        targetNativeControlValue = bounded('', true)
+      } else if (['checkbox', 'radio'].includes(String(typeGetter.call(element)).toLowerCase())) {
+        targetNativeControlValue = bounded(valueGetter.call(element))
+      }
+    }
   }
   const anchorImageAlts = element instanceof HTMLAnchorElement
     ? boundedDescendantImageAlts(element)
@@ -1763,6 +1779,7 @@ function captureIsolatedSafetyEvidence(
     || captureSourceState?.overflow
     || effectiveAriaDisabled.overflow
     || effectiveInert.overflow
+    || targetNativeControlValue.overflow
   if (overflow) {
     return {
       snapshot: '',
@@ -1774,6 +1791,7 @@ function captureIsolatedSafetyEvidence(
       anchorImageAlts: [],
       generatedContent: [],
       ownerContextEvidence: [],
+      targetNativeControlValue: '',
     }
   }
   const labelEntries = labels.map(({ text, imageAlts, ariaLabel, title, generatedContent, descendantAccessibleEntries, descendantAccessibleEvidence, referenceEvidence, referenceSnapshot }) => ({
@@ -1825,6 +1843,7 @@ function captureIsolatedSafetyEvidence(
       ariaDescribed,
       labels: labelEntries,
       nativeRequired,
+      targetNativeControlValue: targetNativeControlValue.value,
       anchorText: anchorText.value,
       anchorImageAlts: anchorImageAlts.values,
       generatedContent: generatedContent.values,
@@ -1845,6 +1864,7 @@ function captureIsolatedSafetyEvidence(
       anchorImageAlts: [],
       generatedContent: [],
       ownerContextEvidence: [],
+      targetNativeControlValue: '',
     }
   }
   return {
@@ -1857,6 +1877,7 @@ function captureIsolatedSafetyEvidence(
     anchorImageAlts: anchorImageAlts.values,
     generatedContent: generatedContent.values,
     ownerContextEvidence,
+    targetNativeControlValue: targetNativeControlValue.value,
   }
 }
 
@@ -2248,7 +2269,9 @@ function classifyDomInIsolatedWorld({
           : element instanceof HTMLTextAreaElement
             ? 'textarea'
             : element.type.toLowerCase()
-      const ariaReadOnlySource = element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement
+      const ariaReadOnlySource = element instanceof HTMLInputElement
+        || element instanceof HTMLSelectElement
+        || element instanceof HTMLTextAreaElement
         ? getAttribute.call(element, 'aria-readonly') ?? ''
         : ''
       const ariaReadOnlyOverflow = ariaReadOnlySource.length > maxSafetyEvidenceLength
@@ -2472,10 +2495,18 @@ function classifyDomInIsolatedWorld({
             return !getter || Boolean(getter.call(element))
           })()
         : false
+      const checkboxAriaRequiredSource = element instanceof HTMLInputElement && type === 'checkbox'
+        ? getAttribute.call(element, 'aria-required') ?? ''
+        : ''
+      const checkboxAriaRequiredOverflow = checkboxAriaRequiredSource.length > maxSafetyEvidenceLength
+      const checkboxAriaRequired = !checkboxAriaRequiredOverflow
+        && checkboxAriaRequiredSource.trim().toLowerCase() === 'true'
       const checkboxRequired = element instanceof HTMLInputElement && type === 'checkbox'
         ? (() => {
             const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'required')?.get
-            return getter ? Boolean(getter.call(element)) : undefined
+            return getter && !checkboxAriaRequiredOverflow
+              ? Boolean(getter.call(element)) || checkboxAriaRequired
+              : undefined
           })()
         : undefined
       const selectRequired = element instanceof HTMLSelectElement
@@ -2534,9 +2565,30 @@ function classifyDomInIsolatedWorld({
       } catch {
         // A malformed encoded path remains untrusted evidence in its raw form.
       }
+      let analysisState: IsolatedControlState | undefined
+      if (element instanceof HTMLSelectElement) {
+        const getter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.get
+        if (getter) analysisState = Number(getter.call(element))
+      } else if (element instanceof HTMLTextAreaElement) {
+        const getter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
+        const value = getter ? String(getter.call(element)) : undefined
+        if (value !== undefined && value.length <= maxSafetyEvidenceLength) analysisState = value
+      } else if (element instanceof HTMLInputElement) {
+        if (type === 'checkbox' || type === 'radio') {
+          const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.get
+          if (getter) analysisState = Boolean(getter.call(element))
+        } else {
+          const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+          const value = getter ? String(getter.call(element)) : undefined
+          if (value !== undefined && value.length <= maxSafetyEvidenceLength) analysisState = value
+        }
+      }
+
       const safetyEvidenceSources = [
         element.getAttribute('aria-label') ?? '',
         element.getAttribute('aria-description') ?? '',
+        element.getAttribute('aria-valuenow') ?? '',
+        element.getAttribute('aria-valuetext') ?? '',
         ariaLabelled.raw,
         ...ariaLabelled.ids,
         ...ariaLabelled.nodes.map(accessibleNodeText),
@@ -2587,6 +2639,8 @@ function classifyDomInIsolatedWorld({
         decodedLinkPath,
         ...optionSafetySources,
         ...safetyCapture.ownerContextEvidence,
+        safetyCapture.targetNativeControlValue,
+        analysisState ?? '',
       ].map((value) => String(value ?? ''))
       const hasUnsafeEvidence = safetyEvidenceSources.some((value) => {
         const tokenized = tokenizeEvidence(value)
@@ -2635,25 +2689,6 @@ function classifyDomInIsolatedWorld({
       const radioGroupComplete = type === 'radio'
         ? Boolean(traversalComplete && currentRadioGroupKey && radioGroupSize)
         : undefined
-
-      let analysisState: IsolatedControlState | undefined
-      if (element instanceof HTMLSelectElement) {
-        const getter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.get
-        if (getter) analysisState = Number(getter.call(element))
-      } else if (element instanceof HTMLTextAreaElement) {
-        const getter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
-        const value = getter ? String(getter.call(element)) : undefined
-        if (value !== undefined && value.length <= maxSafetyEvidenceLength) analysisState = value
-      } else if (element instanceof HTMLInputElement) {
-        if (type === 'checkbox' || type === 'radio') {
-          const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.get
-          if (getter) analysisState = Boolean(getter.call(element))
-        } else {
-          const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
-          const value = getter ? String(getter.call(element)) : undefined
-          if (value !== undefined && value.length <= maxSafetyEvidenceLength) analysisState = value
-        }
-      }
 
       return {
         id,
@@ -3365,7 +3400,11 @@ function assertIsolatedControlOperable(
     const getter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'readOnly')?.get
     if (!getter || getter.call(element)) throw new Error('The isolated control is read-only.')
   }
-  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+  if (
+    element instanceof HTMLInputElement
+    || element instanceof HTMLSelectElement
+    || element instanceof HTMLTextAreaElement
+  ) {
     const ariaReadOnlySource = String(Element.prototype.getAttribute.call(element, 'aria-readonly') ?? '')
     if (
       ariaReadOnlySource.length > maxSafetyEvidenceLength
@@ -3397,7 +3436,14 @@ function assertIsolatedControlOperable(
       throw new Error('The isolated checkbox became indeterminate.')
     }
     const requiredGetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'required')?.get
-    if (!requiredGetter || (expectedValue === false && requiredGetter.call(element))) {
+    const ariaRequiredSource = String(Element.prototype.getAttribute.call(element, 'aria-required') ?? '')
+    const ariaRequired = ariaRequiredSource.trim().toLowerCase() === 'true'
+    if (
+      !requiredGetter
+      || ariaRequiredSource.length > maxSafetyEvidenceLength
+      || JSON.stringify(ariaRequiredSource).length + 8 > maxTotalSafetyEvidenceLength
+      || (expectedValue === false && (requiredGetter.call(element) || ariaRequired))
+    ) {
       throw new Error('The isolated checkbox value violates its native required contract.')
     }
   }
@@ -3591,6 +3637,7 @@ function writeIsolatedControlState(
   modalState: { elements: Element[], overflow: boolean, limit: number },
   expectedType: string,
   value: IsolatedControlState,
+  expectedAnalysisState: IsolatedControlState,
   viewportWidth: number,
   viewportHeight: number,
   expectedOptionIndex: number,
@@ -3644,6 +3691,27 @@ function writeIsolatedControlState(
   assertIsolatedRadioGroupBound(this, expectedRadioGroupSize, maxElementsInspected)
   assertIsolatedDateLikeValueAllowed(this, expectedType, value)
   assertIsolatedTextValueAllowed(this, expectedType, value)
+  let currentAnalysisState: IsolatedControlState
+  if (expectedType === 'select-one') {
+    const getter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.get
+    if (!getter) throw new Error('The isolated select state is unavailable.')
+    currentAnalysisState = Number(getter.call(this))
+  } else if (expectedType === 'textarea') {
+    const getter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.get
+    if (!getter) throw new Error('The isolated textarea state is unavailable.')
+    currentAnalysisState = String(getter.call(this))
+  } else if (expectedType === 'checkbox' || expectedType === 'radio') {
+    const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.get
+    if (!getter) throw new Error('The isolated checked state is unavailable.')
+    currentAnalysisState = Boolean(getter.call(this))
+  } else {
+    const getter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get
+    if (!getter) throw new Error('The isolated input state is unavailable.')
+    currentAnalysisState = String(getter.call(this))
+  }
+  if (!Object.is(currentAnalysisState, expectedAnalysisState)) {
+    throw new Error('The isolated control native state changed after analysis.')
+  }
   if (expectedType === 'select-one') {
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.set
     const selectedIndexGetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.get
@@ -3676,6 +3744,7 @@ function writeIsolatedRadioGroupState(
   selectedIndex: number,
   expectedGroupSize: number,
   expectedSafetySnapshotsJson: string,
+  expectedAnalysisStatesJson: string,
   viewportWidth: number,
   viewportHeight: number,
   maxSafetyEvidenceLength: number,
@@ -3685,14 +3754,18 @@ function writeIsolatedRadioGroupState(
   ...members: Element[]
 ): boolean[] {
   let expectedSafetySnapshots: unknown
+  let expectedAnalysisStates: unknown
   try {
     expectedSafetySnapshots = JSON.parse(expectedSafetySnapshotsJson)
+    expectedAnalysisStates = JSON.parse(expectedAnalysisStatesJson)
   } catch {
     throw new Error('The isolated radio group safety snapshots are invalid.')
   }
   if (
     !Array.isArray(expectedSafetySnapshots)
+    || !Array.isArray(expectedAnalysisStates)
     || members.length !== expectedSafetySnapshots.length
+    || members.length !== expectedAnalysisStates.length
     || members.length !== expectedGroupSize
     || !Number.isInteger(selectedIndex)
     || selectedIndex < 0
@@ -3734,7 +3807,11 @@ function writeIsolatedRadioGroupState(
       modalState,
     )
     assertIsolatedRadioGroupBound(member, expectedGroupSize, maxElementsInspected)
-    before.push(Boolean(checkedGetter.call(member)))
+    const currentState = Boolean(checkedGetter.call(member))
+    if (!Object.is(currentState, expectedAnalysisStates[index])) {
+      throw new Error('The isolated radio group native state changed after analysis.')
+    }
+    before.push(currentState)
   }
 
   checkedSetter.call(this, true)
@@ -3954,10 +4031,14 @@ function writeControlState(
   backendNodeId: number,
   expectedType: string,
   value: IsolatedControlState,
+  expectedAnalysisState: IsolatedControlState | undefined,
   expectedSafetySnapshot: string,
   expectedOptionIndex = -1,
   expectedRadioGroupSize = -1,
 ): Promise<void> {
+  if (expectedAnalysisState === undefined) {
+    throw new Error('The isolated control analysis state is unavailable.')
+  }
   return callOnIsolatedNode<void>(
     context,
     page,
@@ -3966,6 +4047,7 @@ function writeControlState(
     [
       expectedType,
       value,
+      expectedAnalysisState,
       CAPTURE_VIEWPORT_WIDTH,
       CAPTURE_VIEWPORT_HEIGHT,
       expectedOptionIndex,
@@ -3985,10 +4067,12 @@ async function writeRadioGroupState(
   backendNodeIds: number[],
   selectedIndex: number,
   expectedSafetySnapshots: string[],
+  expectedAnalysisStates: IsolatedControlState[],
   expectedGroupSize: number,
 ): Promise<boolean[]> {
   if (
     backendNodeIds.length !== expectedSafetySnapshots.length
+    || backendNodeIds.length !== expectedAnalysisStates.length
     || backendNodeIds.length !== expectedGroupSize
     || !backendNodeIds[selectedIndex]
   ) throw new Error('The isolated radio group binding is incomplete.')
@@ -4022,6 +4106,7 @@ async function writeRadioGroupState(
         { value: selectedIndex },
         { value: expectedGroupSize },
         { value: JSON.stringify(expectedSafetySnapshots) },
+        { value: JSON.stringify(expectedAnalysisStates) },
         { value: CAPTURE_VIEWPORT_WIDTH },
         { value: CAPTURE_VIEWPORT_HEIGHT },
         { value: MAX_SAFETY_EVIDENCE_LENGTH },
@@ -4330,11 +4415,21 @@ function validateActionInput(
   }
 }
 
+function assertBoundAnalysisState(
+  current: IsolatedControlState,
+  expected: IsolatedControlState | undefined,
+): void {
+  if (expected === undefined || !Object.is(current, expected)) {
+    throw new Error('The isolated control native state changed after analysis.')
+  }
+}
+
 async function applyAction(
   context: BrowserContext,
   page: Page,
   action: CapabilityAction,
   input: Record<string, unknown>,
+  beforeControlWrite?: (page: Page) => Promise<void>,
   beforeRadioGroupWrite?: (page: Page) => Promise<void>,
 ): Promise<PendingActionEvidence> {
   if (action.kind === 'prepare_search' && action.backendNodeId && action.controlType) {
@@ -4348,7 +4443,17 @@ async function applyAction(
       true,
       safetySnapshot,
     )
-    await writeControlState(context, page, action.backendNodeId, action.controlType, value, safetySnapshot)
+    assertBoundAnalysisState(before, action.analysisState)
+    await beforeControlWrite?.(page)
+    await writeControlState(
+      context,
+      page,
+      action.backendNodeId,
+      action.controlType,
+      value,
+      action.analysisState,
+      safetySnapshot,
+    )
     return {
       navigationOccurred: false,
       stateChanged: async () =>
@@ -4387,12 +4492,15 @@ async function applyAction(
       safetySnapshot,
       optionIndex,
     )
+    assertBoundAnalysisState(before, action.analysisState)
+    await beforeControlWrite?.(page)
     await writeControlState(
       context,
       page,
       action.backendNodeId,
       'select-one',
       optionIndex,
+      action.analysisState,
       safetySnapshot,
       optionIndex,
     )
@@ -4458,12 +4566,15 @@ async function applyAction(
         field.safetySnapshot,
         optionIndex,
       )
+      assertBoundAnalysisState(before, field.analysisState)
+      await beforeControlWrite?.(page)
       await writeControlState(
         context,
         page,
         field.backendNodeId,
         field.type,
         optionIndex,
+        field.analysisState,
         field.safetySnapshot,
         optionIndex,
       )
@@ -4489,6 +4600,7 @@ async function applyAction(
         backendNodeIds,
         selectedIndex,
         safetySnapshots,
+        field.analysisStates ?? [],
         field.radioGroupSize ?? -1,
       )
       formBindings.push({
@@ -4511,12 +4623,15 @@ async function applyAction(
         -1,
         field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
       )
+      assertBoundAnalysisState(before, field.analysisState)
+      await beforeControlWrite?.(page)
       await writeControlState(
         context,
         page,
         field.backendNodeId,
         field.type,
         Boolean(value),
+        field.analysisState,
         field.safetySnapshot,
         -1,
         field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
@@ -4540,12 +4655,15 @@ async function applyAction(
         true,
         field.safetySnapshot,
       )
+      assertBoundAnalysisState(before, field.analysisState)
+      await beforeControlWrite?.(page)
       await writeControlState(
         context,
         page,
         field.backendNodeId,
         field.type,
         stringValue,
+        field.analysisState,
         field.safetySnapshot,
       )
       formBindings.push({
@@ -4574,19 +4692,21 @@ async function actionWouldChange(
   input: Record<string, unknown>,
 ): Promise<boolean> {
   if (action.kind === 'prepare_search' && action.backendNodeId && action.controlType) {
-    return await readControlState(
+    const current = await readControlState(
       context,
       page,
       action.backendNodeId,
       action.controlType,
       true,
       action.safetySnapshot as string,
-    ) !== String(input.query)
+    )
+    assertBoundAnalysisState(current, action.analysisState)
+    return current !== String(input.query)
   }
   if (action.kind === 'filter' && action.backendNodeId) {
     const optionIndex = action.optionIndices?.[Number(input.optionIndex)]
     if (optionIndex === undefined) return true
-    return await readControlState(
+    const current = await readControlState(
       context,
       page,
       action.backendNodeId,
@@ -4594,7 +4714,9 @@ async function actionWouldChange(
       true,
       action.safetySnapshot as string,
       optionIndex,
-    ) !== optionIndex
+    )
+    assertBoundAnalysisState(current, action.analysisState)
+    return current !== optionIndex
   }
   if (action.kind === 'navigation') {
     const url = action.urls?.[Number(input.linkIndex)]
@@ -4609,13 +4731,14 @@ async function actionWouldChange(
     )
     return page.url() !== url
   }
+  let wouldChange = false
   for (const field of action.fields ?? []) {
     if (!Object.hasOwn(input, field.key)) continue
     const value = input[field.key]
     if (field.type === 'select-one') {
       const optionIndex = field.optionIndices?.[Number(value)]
       if (optionIndex === undefined) return true
-      if (await readControlState(
+      const current = await readControlState(
         context,
         page,
         field.backendNodeId,
@@ -4623,7 +4746,9 @@ async function actionWouldChange(
         true,
         field.safetySnapshot,
         optionIndex,
-      ) !== optionIndex) return true
+      )
+      assertBoundAnalysisState(current, field.analysisState)
+      if (current !== optionIndex) wouldChange = true
     } else if (field.type === 'radio-group') {
       const backendNodeIds = field.backendNodeIds ?? []
       const safetySnapshots = field.safetySnapshots ?? []
@@ -4642,9 +4767,16 @@ async function actionWouldChange(
           field.radioGroupSize ?? -1,
         ))
       }
-      if (!states[selectedIndex] || states.filter(Boolean).length !== 1) return true
+      const expectedStates = field.analysisStates ?? []
+      if (
+        states.length !== expectedStates.length
+        || states.some((state, index) => !Object.is(state, expectedStates[index]))
+      ) {
+        throw new Error('The isolated radio group native state changed after analysis.')
+      }
+      if (!states[selectedIndex] || states.filter(Boolean).length !== 1) wouldChange = true
     } else if (field.type === 'checkbox' || field.type === 'radio') {
-      if (await readControlState(
+      const current = await readControlState(
         context,
         page,
         field.backendNodeId,
@@ -4653,19 +4785,23 @@ async function actionWouldChange(
         field.safetySnapshot,
         -1,
         field.type === 'radio' ? field.radioGroupSize ?? -1 : -1,
-      ) !== value) return true
-    } else if (await readControlState(
-      context,
-      page,
-      field.backendNodeId,
-      field.type,
-      true,
-      field.safetySnapshot,
-    ) !== String(value)) {
-      return true
+      )
+      assertBoundAnalysisState(current, field.analysisState)
+      if (current !== value) wouldChange = true
+    } else {
+      const current = await readControlState(
+        context,
+        page,
+        field.backendNodeId,
+        field.type,
+        true,
+        field.safetySnapshot,
+      )
+      assertBoundAnalysisState(current, field.analysisState)
+      if (current !== String(value)) wouldChange = true
     }
   }
-  return false
+  return wouldChange
 }
 
 export class WrapperProofService {
@@ -4682,6 +4818,7 @@ export class WrapperProofService {
   private readonly beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
   private readonly beforeAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
   private readonly afterAnalysisScreenshot?: (page: Page, attempt: number) => Promise<void>
+  private readonly beforeControlWrite?: (page: Page) => Promise<void>
   private readonly beforeRadioGroupWrite?: (page: Page) => Promise<void>
   private readonly afterActionRecapture?: (page: Page) => Promise<void>
 
@@ -4700,6 +4837,7 @@ export class WrapperProofService {
     this.beforeDomEvidenceCollection = options.beforeDomEvidenceCollection
     this.beforeAnalysisScreenshot = options.beforeAnalysisScreenshot
     this.afterAnalysisScreenshot = options.afterAnalysisScreenshot
+    this.beforeControlWrite = options.beforeControlWrite
     this.beforeRadioGroupWrite = options.beforeRadioGroupWrite
     this.afterActionRecapture = options.afterActionRecapture
   }
@@ -5491,6 +5629,7 @@ export class WrapperProofService {
             session.page,
             capability.action,
             acceptedInput,
+            this.beforeControlWrite,
             this.beforeRadioGroupWrite,
           ),
           signal,
