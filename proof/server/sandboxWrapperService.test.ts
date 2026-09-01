@@ -98,6 +98,7 @@ class FakeSandbox {
   afterAnalyzeResult?: () => void
   beforeCloseResult?: () => void
   commandError?: Error
+  commandCwds: Array<string | undefined> = []
   totalDurationMs: number | undefined = 1_000
   workerRuntimeMs = 20
   totalActiveCpuDurationMs: number | undefined = 100
@@ -113,11 +114,13 @@ class FakeSandbox {
   }
 
   async runCommand(params: {
+    cwd?: string
     env?: Record<string, string>
     detached?: boolean
     signal?: AbortSignal
   }) {
     this.commandCalls += 1
+    this.commandCwds.push(params.cwd)
     if (params.detached) return commandResult(0, '')
     const operation = params.env?.WEBMCP_WORKER_OPERATION
     if (this.commandError && operation !== 'health') throw this.commandError
@@ -353,6 +356,19 @@ describe('SandboxWrapperService session boundaries', () => {
       status: 504,
     })
     expect(setupSandbox.deleted).toBe(1)
+  })
+
+  it('runs every sandbox command in an explicit working directory', async () => {
+    const harness = createHarness()
+    await harness.service.analyze('https://public.example.at/')
+
+    // A Sandbox restored from a snapshot has no default working directory, so an
+    // implicit cwd fails with `chdir /vercel/sandbox` before the command runs.
+    // Analysis covers both call sites: the detached worker launch and callWorker.
+    expect(harness.sandbox.commandCwds.length).toBeGreaterThan(1)
+    for (const cwd of harness.sandbox.commandCwds) {
+      expect(cwd).toBe('/opt/webmcp-wrapper')
+    }
   })
 
   it('trims option browser sources and treats whitespace-only values as unconfigured', async () => {

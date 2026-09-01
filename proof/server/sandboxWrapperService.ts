@@ -24,6 +24,10 @@ import {
   WrapperServiceError,
 } from './wrapperErrors.ts'
 
+// Every command must name its working directory explicitly. A Sandbox restored
+// from a snapshot does not carry the default working directory that an
+// image-based Sandbox provides, so an implicit cwd fails with
+// `chdir /vercel/sandbox: no such file or directory` before the command runs.
 const WORKER_ROOT = '/opt/webmcp-wrapper'
 const WORKER_PATH = `${WORKER_ROOT}/worker.mjs`
 const CLIENT_PATH = `${WORKER_ROOT}/client.mjs`
@@ -76,6 +80,7 @@ interface SandboxHandle {
   runCommand(params: {
     cmd: string
     args?: string[]
+    cwd?: string
     env?: Record<string, string>
     detached?: boolean
     signal?: AbortSignal
@@ -379,6 +384,7 @@ export class SandboxWrapperService {
     const command = await sandbox.runCommand({
       cmd: 'node',
       args: [CLIENT_PATH],
+      cwd: WORKER_ROOT,
       env: {
         WEBMCP_WORKER_SOCKET: SOCKET_PATH,
         WEBMCP_SESSION_CAPABILITY: capabilityToken,
@@ -494,6 +500,7 @@ export class SandboxWrapperService {
       await raceSandboxOperation(sandbox.runCommand({
         cmd: 'node',
         args: [WORKER_PATH, CONFIG_PATH],
+        cwd: WORKER_ROOT,
         detached: true,
         signal: operationController.signal,
         timeoutMs: WRAPPER_SESSION_TTL_MS - 5_000,
