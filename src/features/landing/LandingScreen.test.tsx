@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const { readWrapperHealth } = vi.hoisted(() => ({ readWrapperHealth: vi.fn() }))
@@ -60,6 +60,28 @@ describe('LandingScreen deployment notice', () => {
     await waitFor(() => expect(readWrapperHealth).toHaveBeenCalled())
     expect(screen.queryByText(NOTICE)).toBeNull()
     expect(screen.getByRole('button', { name: /Try the HeatFlow demo/ })).toBeTruthy()
+  })
+})
+
+describe('LandingScreen notice and error do not duplicate each other', () => {
+  it('replaces the standing notice with the specific error once analysis fails', async () => {
+    readWrapperHealth.mockResolvedValue({
+      ready: false,
+      mode: 'vercel-sandbox',
+      configuration: 'missing-browser-source',
+    })
+    const onAnalyze = vi.fn(async () => 'Analyzing your own website runs a real browser in an isolated sandbox.')
+    render(<LandingScreen onAnalyze={onAnalyze} onDemo={vi.fn()} />)
+
+    await waitFor(() => expect(screen.getByText(NOTICE)).toBeTruthy())
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Public website URL' }), {
+      target: { value: 'https://public.example.at/' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Analyze website/ }))
+
+    await waitFor(() => expect(screen.getByText(/isolated sandbox\.$/)).toBeTruthy())
+    expect(screen.queryByText(NOTICE)).toBeNull()
   })
 })
 

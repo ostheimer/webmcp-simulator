@@ -81,7 +81,10 @@ export function LandingScreen({ onAnalyze, onDemo }: LandingScreenProps) {
             </form>
             {error && <p className="form-error" id="url-error">{error}</p>}
 
-            {liveAnalysisReady === false && (
+            {/* The submitted error is the more specific of the two and replaces
+                the standing notice, so a visitor never reads the same boundary
+                explained twice in adjacent paragraphs. */}
+            {!error && liveAnalysisReady === false && (
               <p className="deployment-notice">
                 <span aria-hidden="true">◎</span>
                 Analyzing your own website runs a real browser in an isolated sandbox,
