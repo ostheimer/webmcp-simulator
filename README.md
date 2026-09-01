@@ -113,6 +113,20 @@ For local testing in a compatible Chrome build:
 4. Open the simulator and launch the HeatFlow simulation.
 5. Inspect and invoke the registered tools with a compatible agent or the Model Context Tool Inspector extension.
 
+To drive the tools directly from the browser console:
+
+```js
+const tools = await document.modelContext.getTools()
+const tool = tools.find((candidate) => candidate.name === 'check_service_area')
+await document.modelContext.executeTool(tool, JSON.stringify({ postcode: '2230', service: 'heat_pump' }))
+```
+
+`executeTool` takes the registered tool object rather than its name, and its
+arguments as a JSON string. Passing a name string fails with
+`The provided value is not of type 'RegisteredTool'`, and passing a plain object
+fails with `Failed to parse input arguments`. `getTools` resolves to a promise,
+and it returns an empty list until a simulation is launched.
+
 The page feature-detects `document.modelContext`. Unsupported browsers keep the complete human interface available and show an accurate compatibility message instead of reporting a false connection.
 
 WebMCP is an evolving draft. Before submission, the implementation must be verified against the current [WebMCP specification](https://webmachinelearning.github.io/webmcp/) and [Chrome documentation](https://developer.chrome.com/docs/ai/webmcp).

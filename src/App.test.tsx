@@ -4,9 +4,12 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WrapperAnalysis } from './features/wrapper/types'
 
-const { analyzeWebsiteInWrapper, closeWrapperSession } = vi.hoisted(() => ({
+const { analyzeWebsiteInWrapper, closeWrapperSession, readWrapperHealth } = vi.hoisted(() => ({
   analyzeWebsiteInWrapper: vi.fn(),
   closeWrapperSession: vi.fn(),
+  // Keeps the landing screen's health read hermetic instead of attempting a
+  // real request from jsdom.
+  readWrapperHealth: vi.fn(async () => null),
 }))
 
 vi.mock('./features/wrapper/wrapperApi', async (importOriginal) => {
@@ -15,6 +18,7 @@ vi.mock('./features/wrapper/wrapperApi', async (importOriginal) => {
     ...original,
     analyzeWebsiteInWrapper,
     closeWrapperSession,
+    readWrapperHealth,
   }
 })
 

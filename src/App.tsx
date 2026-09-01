@@ -6,7 +6,8 @@ import { LandingScreen } from './features/landing/LandingScreen'
 import { AnalysisWorkspace } from './features/opportunities/AnalysisWorkspace'
 import { SimulationWorkspace } from './features/simulation/SimulationWorkspace'
 import { WrapperProofWorkspace } from './features/wrapper/WrapperProofWorkspace'
-import { analyzeWebsiteInWrapper, closeWrapperSession } from './features/wrapper/wrapperApi'
+import { analyzeWebsiteInWrapper, closeWrapperSession, WrapperApiError } from './features/wrapper/wrapperApi'
+import { wrapperErrorCopy } from './features/wrapper/wrapperErrorCopy'
 import type { WrapperAnalysis } from './features/wrapper/types'
 
 type AppView = 'landing' | 'analysis' | 'simulation' | 'wrapper'
@@ -76,6 +77,7 @@ function App() {
         || (error instanceof DOMException && error.name === 'AbortError')
         || activeAnalysisRef.current?.generation !== generation
       ) return null
+      if (error instanceof WrapperApiError) return wrapperErrorCopy(error.code, error.message)
       return error instanceof Error && error.message !== 'Invalid URL'
         ? error.message
         : 'Enter a valid public website URL.'
