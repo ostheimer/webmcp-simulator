@@ -19,12 +19,14 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 
 - Repository: `ostheimer/webmcp-simulator`
 - Canonical branch: `main`
-- Current `main` commit: `fdd833458f7c470fba6c99365497908a45dc442e`
+- Current `main` commit: `8e71edea35c047913d03fc2c71c4c3631b83d9d7`
 - Production-wrapper code baseline: `4536da64cec5907c7cf43d4e6b9112a8b4a7ae07`. Everything merged since then is documentation only.
 - PR #3: production wrapper architecture merged.
 - PR #4: Vercel relative TypeScript import emission fixed.
 - PR #5: Vercel Web Handler response emission fixed.
 - PR #7: cross-agent relay protocol merged. Documentation and issue template only, 258 insertions, no code.
+- PR #8: handoff reconciled with verified state. Documentation only.
+- PR #9: public-deployment clarity merged. Landing copy, wrapper error copy and on-page agent test instructions. No change to wrapper behaviour, isolation policy or security contract.
 - Existing Issue #2 is a separate Auto WebMCP form-adapter exploration and is not the relay for this work.
 
 ## Verification state
@@ -32,6 +34,8 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 - Full automated suite at `4536da64cec5907c7cf43d4e6b9112a8b4a7ae07`: 20 files, 474 tests passed.
 - Re-verified independently by Claude Code on 2026-09-01 at the same commit: 20 files, 474 tests passed, exit code 0.
 - TypeScript, lint, application build, Vercel build, generated-function runtime verification, diff check and audit passed at `4536da64cec5907c7cf43d4e6b9112a8b4a7ae07`.
+- Full automated suite at `be53adc76dda758b23ae27caf81e344cadecc68a`, the PR #9 branch head: 22 files, 492 tests passed, exit code 0. Eighteen tests added, none removed or weakened.
+- Chrome verification on the live URL, 2026-09-01: `document.modelContext.getTools()` returns the five HeatFlow tools after the simulation launches, and `executeTool` produces a verified visible change. Chrome 151 with WebMCP enabled.
 - Every test figure in this file is bound to a named commit. Do not carry a figure forward to a later commit without re-running it or showing that the intervening diff contains no code.
 - The generated Vercel handlers are exercised through the actual local `@vercel/node` HTTP dispatcher.
 - Local real-site proof with `https://www.hotwagner.at/` successfully registered `open_page_link`, navigated to `/restaurant-2/`, refreshed the visible evidence and tool catalogue, and showed activity without modifying the original site.
@@ -39,8 +43,8 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 ## Production state
 
 - Public URL: `https://webmcp-simulator.vercel.app/`
-- Current production deployment: `dpl_5TnPkWD9kHnDEbFuKiNrJSZDFPWa`, created 2026-09-01 10:17:03 CEST from the PR #7 merge. The alias `webmcp-simulator.vercel.app` resolves to it.
-- Superseded: `dpl_9zxX5emim5BePZoWTFEkautnNA6x`, the deployment named in the previous handoff.
+- Current production deployment: `dpl_Eutgn45ViQpoFdPYrpmA4BCUbTxq`, built from `8e71edea35c047913d03fc2c71c4c3631b83d9d7`. The alias `webmcp-simulator.vercel.app` resolves to it.
+- Superseded: `dpl_5TnPkWD9kHnDEbFuKiNrJSZDFPWa`, then `dpl_9zxX5emim5BePZoWTFEkautnNA6x`.
 - Root page: live verified HTTP 200 on 2026-09-01 at approximately 10:20 CEST.
 - `/api/wrapper/health`: live verified HTTP 200 on 2026-09-01 at approximately 10:20 CEST.
 - Health contract currently reports `ready:false` and `configuration:"missing-browser-source"`.
@@ -95,16 +99,14 @@ Steps 1, 4 and 6 require explicit Andreas authorization. Step 1 writes productio
 
 Deadline: **September 3, 2026 at 1:00 PM PDT.** `SUBMISSION_CHECKLIST.md` is the source of truth for the individual gates and must be reconfirmed against the displayed Devpost deadline before final submission.
 
+Closed on 2026-09-01: the repository is public and GitHub detects the MIT license; the live URL is reachable without special access; and a real compatible agent discovers and invokes the tools in Chrome with WebMCP enabled. The official rules require the live URL to work in ChatGPT's in-app browser **or** Chrome, so the Chrome verification satisfies that requirement.
+
 Open gates as of 2026-09-01:
 
-- The deployed application is reachable without payment or special access.
-- A real compatible agent can discover and invoke the tools.
-- The deployed app is tested in ChatGPT's in-app browser.
-- The deployed app is tested in Chrome with WebMCP enabled.
+- The deployed app is tested in ChatGPT's in-app browser. Optional; the Chrome path already satisfies the rule.
 - The current WebMCP specification is rechecked immediately before submission.
 - A public YouTube demo with audio, shorter than three minutes, is recorded.
 - The Devpost narrative covers the WebMCP fit, the new human-plus-agent capability and the implementation.
-- The repository is switched from private to public and GitHub shows the MIT license in the About area.
 
 The HeatFlow vertical slice already satisfies the product gates that are checked in `SUBMISSION_CHECKLIST.md`, so Track B is achievable without Track A.
 
