@@ -28,8 +28,8 @@ interface SimulationWorkspaceProps {
 }
 
 /**
- * Transient marker rendered inside the section an agent call just changed.
- * Keyed by the highlight ID so a second call to the same section restarts
+ * Transient marker rendered as the last child of the section an agent call
+ * just changed, so it never displaces a :first-child styling hook. Keyed by the highlight ID so a second call to the same section restarts
  * the animation instead of silently extending the previous one.
  */
 function AgentTouch({ highlight }: { highlight: AgentHighlight | null }) {
@@ -197,7 +197,6 @@ export function SimulationWorkspace({ onBack, agentHighlightMs = agentHighlightD
             </section>
 
             <section className={sectionClass('service-catalog', 'services')} id="services" tabIndex={-1}>
-              <AgentTouch highlight={touched('services')} />
               <div className="heatflow-section-title"><div><span>OUR SERVICES</span><h2>Find the right heating solution</h2></div><label className={fieldClass('query')}><span>⌕</span><input type="search" value={state.query} onChange={(event) => handleHumanSearch(event.target.value)} placeholder="Search services" /></label></div>
               {state.query && <div className="filter-result"><span>✦</span> Showing {visibleServices.length} result{visibleServices.length === 1 ? '' : 's'} for “{state.query}” <button type="button" onClick={() => handleHumanSearch('')}>Clear</button></div>}
               <div className="service-grid">
@@ -215,21 +214,21 @@ export function SimulationWorkspace({ onBack, agentHighlightMs = agentHighlightD
                   )
                 })}
               </div>
+              <AgentTouch highlight={touched('services')} />
             </section>
 
             {comparedServices.length >= 2 && (
               <section className={sectionClass('comparison-panel', 'service-comparison')} id="service-comparison" tabIndex={-1} aria-live="polite">
-                <AgentTouch highlight={touched('service-comparison')} />
                 <div className="comparison-heading"><div><span>DIRECT COMPARISON</span><h2>{comparedServices.length} solutions side by side</h2></div><button type="button" onClick={() => dispatch({ type: 'SET_COMPARISON', serviceIds: [] })}>Close ×</button></div>
                 <div className="comparison-table">
                   <div className="comparison-labels"><span>Solution</span><span>Investment</span><span>Efficiency</span><span>Ideal for</span></div>
                   {comparedServices.map((service) => <div key={service.id}><strong>{service.name}</strong><span>{service.price}</span><span>{service.efficiency}</span><span>{service.idealFor}</span></div>)}
                 </div>
+                <AgentTouch highlight={touched('service-comparison')} />
               </section>
             )}
 
             <section className={sectionClass('area-section', 'service-area')} id="service-area" tabIndex={-1}>
-              <AgentTouch highlight={touched('service-area')} />
               <div><span className="heatflow-kicker">SERVICE AREA</span><h2>Is HeatFlow available near you?</h2><p>Coverage uses deterministic demo rules. The agent cannot invent availability.</p></div>
               <form onSubmit={handleAreaSubmit}>
                 <label className={fieldClass('areaPostcode')}>Postcode<input required inputMode="numeric" minLength={4} maxLength={4} pattern="[0-9]{4}" value={state.areaPostcode} onChange={(event) => dispatch({ type: 'SET_AREA_POSTCODE', postcode: event.target.value.replace(/\D/g, '').slice(0, 4) })} /></label>
@@ -237,10 +236,10 @@ export function SimulationWorkspace({ onBack, agentHighlightMs = agentHighlightD
                 <button type="submit">Check area</button>
               </form>
               {state.areaResult && <div className={`area-result result-${state.areaResult.status}`} aria-live="polite"><span>{state.areaResult.status === 'available' ? '✓' : '?'}</span><div><strong>{state.areaResult.status === 'available' ? 'Service available' : 'Manual confirmation needed'}</strong><p>{state.areaResult.message}</p></div></div>}
+              <AgentTouch highlight={touched('service-area')} />
             </section>
 
             <section className={sectionClass('quote-section', 'quote-request')} id="quote-request">
-              <AgentTouch highlight={touched('quote-request')} />
               <div className="quote-copy"><span className="heatflow-kicker">PERSONAL CONSULTATION</span><h2>Prepare your quote request</h2><p>Tell us about the property. Nothing is sent from this simulation.</p><ul><li>✓ Editable before review</li><li>✓ No automatic submission</li><li>✓ Original website untouched</li></ul></div>
               <form className={state.agentPreparedQuote ? 'agent-prepared' : ''} onSubmit={handleQuoteReview}>
                 {state.agentPreparedQuote && <div className="prepared-banner"><span>✦</span><div><strong>Prepared by agent</strong><small>Review and edit every field before continuing.</small></div></div>}
@@ -251,11 +250,11 @@ export function SimulationWorkspace({ onBack, agentHighlightMs = agentHighlightD
                 <small className="simulation-submit-note">Simulation only — this button never sends data.</small>
                 {state.sendNotice && <div className="not-sent-notice" role="status">✓ Review complete. No request was sent.</div>}
               </form>
+              <AgentTouch highlight={touched('quote-request')} />
             </section>
           </section>
 
         <aside className={sectionClass('agent-panel', 'agent-activity')} id="agent-activity" tabIndex={0} aria-label="WebMCP agent activity">
-            <AgentTouch highlight={touched('agent-activity')} />
             <div className="agent-panel-header"><div><span className="agent-orb">✦</span><span><strong>Agent activity</strong><small>Real WebMCP tool calls appear here</small></span></div><span className={`webmcp-state state-${webMcpStatus}`}>{webMcpStatus === 'connected' ? 'Connected' : webMcpStatus === 'checking' ? 'Checking' : webMcpStatus === 'unavailable' ? 'Browser unsupported' : 'Registration error'}</span></div>
             {webMcpStatus === 'unavailable' && <div className="support-message"><strong>WebMCP is not exposed in this browser.</strong><p>Open the deployed app in ChatGPT's in-app browser or enable WebMCP testing in compatible Chrome.</p></div>}
             {webMcpStatus === 'error' && <div className="support-message error"><strong>Tools could not be registered.</strong><p>{registrationError}</p></div>}
@@ -275,6 +274,7 @@ export function SimulationWorkspace({ onBack, agentHighlightMs = agentHighlightD
             </div>
 
             <div className="agent-explainer"><span>↯</span><p><strong>Structured, not simulated clicks.</strong>The agent receives explicit capabilities and validated inputs from the page.</p></div>
+            <AgentTouch highlight={touched('agent-activity')} />
           </aside>
         </main>
       )}

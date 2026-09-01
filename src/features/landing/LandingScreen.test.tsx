@@ -98,7 +98,8 @@ describe('LandingScreen orientation copy', () => {
     renderLanding()
 
     expect(screen.getByRole('heading', { name: 'Google Chrome' })).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'ChatGPT in-app browser' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'ChatGPT desktop app' })).toBeTruthy()
+    expect(screen.getByText('Site tools')).toBeTruthy()
     expect(screen.getByText('chrome://flags/#enable-webmcp-testing')).toBeTruthy()
   })
 
@@ -108,5 +109,6 @@ describe('LandingScreen orientation copy', () => {
     const note = screen.getByText(/takes the registered tool object/)
     expect(note.textContent).toContain('not its name')
     expect(note.textContent).toContain('JSON string')
+    expect(note.textContent).toContain('plain object')
   })
 })
