@@ -182,7 +182,15 @@ async function startFixture(): Promise<Fixture> {
         <a href="/about#painted-image"><img alt="Painted image destination" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20'%3E%3Crect width='20' height='20' fill='%23088'/%3E%3C/svg%3E"></a>
         <a id="covered-anchor" href="/about#covered" style="position:absolute;left:300px;top:20px;width:300px;height:60px">Covered destination identity</a>
         <div style="position:absolute;left:300px;top:20px;width:230px;height:24px;background:#111;z-index:10;pointer-events:none"></div>
-        <a id="offscreen-pseudo" href="/about#offscreen-pseudo" aria-label="Offscreen pseudo destination"></a>`)
+        <a id="offscreen-pseudo" href="/about#offscreen-pseudo" aria-label="Offscreen pseudo destination"></a>
+        <a href="/about#mixed-hidden"><span>Visible mixed hidden prefix</span><span hidden>Hidden identity suffix</span></a>
+        <a href="/about#mixed-offscreen"><span>Visible mixed offscreen prefix</span><span style="position:absolute;left:2000px">Offscreen identity suffix</span></a>
+        <a href="/about#mixed-zero-font"><span>Visible mixed font prefix</span><span style="font-size:0">Zero font identity suffix</span></a>
+        <a href="/about#mixed-covered" style="position:absolute;left:650px;top:20px;width:300px;height:60px"><span>Visible covered prefix</span><span style="position:absolute;left:150px;top:0;width:135px;height:24px">Covered identity suffix</span></a>
+        <div style="position:absolute;left:800px;top:20px;width:135px;height:60px;background:#111;z-index:10;pointer-events:none"></div>
+        <a href="/about#mixed-descendant-covered" style="position:absolute;left:650px;top:120px;width:300px;height:60px"><span>Visible descendant prefix</span><span style="position:absolute;left:150px;top:0;width:135px;height:60px">Covered descendant suffix<span style="position:absolute;inset:0;background:#111;z-index:10;pointer-events:none"></span></span></a>
+        <a href="/about#svg-text"><svg width="180" height="24"><text x="0" y="18">SVG text destination</text></svg></a>
+        <a href="/about#svg-foreign-object"><svg width="180" height="24"><foreignObject width="180" height="24"><span xmlns="http://www.w3.org/1999/xhtml">SVG foreign object destination</span></foreignObject></svg></a>`)
       return
     }
     if (requestUrl === '/anchor-text-paint-late') {
@@ -228,13 +236,15 @@ async function startFixture(): Promise<Fixture> {
         <a href="/cancel">Cancel path</a>
         <a href="/about?intent=cancelled">Cancelled query</a>
         <a href="/about#/cancellation">Cancellation hash</a>
+        <a href="/canceling">Canceling path</a>
+        <a href="/about?intent=cancelling">Cancelling query</a>
         <a href="/cancellationPolicy">Cancellation policy</a>
         <a href="/neutral-policy-redirect">Neutral redirect</a>`)
       return
     }
     if (requestUrl === '/neutral-policy-redirect') {
       response.statusCode = 302
-      response.setHeader('Location', '/cancelations')
+      response.setHeader('Location', '/cancelling')
       response.end()
       return
     }
@@ -242,7 +252,7 @@ async function startFixture(): Promise<Fixture> {
       response.end('<!doctype html><title>Cancellation policy</title><input type="search" aria-label="Policy search">')
       return
     }
-    if (requestUrl === '/cancel' || requestUrl === '/cancelations') {
+    if (requestUrl === '/cancel' || requestUrl === '/cancelations' || requestUrl === '/cancelling') {
       response.end('<!doctype html><title>Cancellation destination must not load</title>')
       return
     }
@@ -3362,6 +3372,7 @@ function createService(options: {
   actionSettleMs?: number
   sessionExpiresAtMs?: number
   sessionTtlMs?: number
+  afterActionAdmission?: () => void | Promise<void>
   maxTargetResourceBytes?: number
   maxTargetSessionBytes?: number
   beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
@@ -3393,6 +3404,7 @@ function createService(options: {
     actionSettleMs: options.actionSettleMs ?? 80,
     sessionExpiresAtMs: options.sessionExpiresAtMs,
     sessionTtlMs: options.sessionTtlMs,
+    afterActionAdmission: options.afterActionAdmission,
     maxTargetResourceBytes: options.maxTargetResourceBytes,
     maxTargetSessionBytes: options.maxTargetSessionBytes,
     beforeDomEvidenceCollection: options.beforeDomEvidenceCollection,
@@ -3408,6 +3420,17 @@ function createService(options: {
     afterActionScreenshot: options.afterActionScreenshot,
     beforeSubframeOwnerLookup: options.beforeSubframeOwnerLookup,
   })
+}
+
+function createActionAdmissionLatch(): {
+  reached: Promise<void>
+  notify: () => void
+} {
+  let notify!: () => void
+  const reached = new Promise<void>((resolve) => {
+    notify = resolve
+  })
+  return { reached, notify }
 }
 
 function createBudgetedService() {
@@ -3923,7 +3946,11 @@ describe('WrapperProofService security boundaries', () => {
     expect(await page.locator('#late-required-select').inputValue()).toBe('one')
     expect(await page.locator('#late-required-select-detail').inputValue()).toBe('')
 
-    const raceService = createService({ actionStartDelayMs: 200 })
+    const raceAdmission = createActionAdmissionLatch()
+    const raceService = createService({
+      actionStartDelayMs: 200,
+      afterActionAdmission: raceAdmission.notify,
+    })
     services.push(raceService)
     const raceAnalysis = await raceService.analyze(`${fixture.origin}/required-select-contracts`)
     const raceEvidence = raceAnalysis.domEvidence.find(({ label }) => label === 'Required form choice')!
@@ -3937,7 +3964,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       raceCapability.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await raceAdmission.reached
     await racePage.locator('#required-form-select option[value="one"]').evaluate((option) => {
       (option as HTMLOptionElement).value = ''
     })
@@ -4135,7 +4162,11 @@ describe('WrapperProofService security boundaries', () => {
       node.removeAttribute('aria-label')
     })
 
-    const raceService = createService({ actionStartDelayMs: 160 })
+    const raceAdmission = createActionAdmissionLatch()
+    const raceService = createService({
+      actionStartDelayMs: 160,
+      afterActionAdmission: raceAdmission.notify,
+    })
     services.push(raceService)
     const raceAnalysis = await raceService.analyze(`${fixture.origin}/select-option-reference-safety`)
     const racePage = internalSession(raceService, raceAnalysis.sessionId).page
@@ -4148,7 +4179,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       referenced.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 30))
+    await raceAdmission.reached
     await racePage.locator('#late-option-reference').evaluate((node) => {
       node.textContent = 'Password'
     })
@@ -4243,7 +4274,11 @@ describe('WrapperProofService security boundaries', () => {
       (select) => (select as HTMLSelectElement).selectedIndex,
     )).toBe(1)
 
-    const raceService = createService({ actionStartDelayMs: 120 })
+    const raceAdmission = createActionAdmissionLatch()
+    const raceService = createService({
+      actionStartDelayMs: 120,
+      afterActionAdmission: raceAdmission.notify,
+    })
     services.push(raceService)
     const raceAnalysis = await raceService.analyze(`${fixture.origin}/late-control-contracts`)
     const racePage = internalSession(raceService, raceAnalysis.sessionId).page
@@ -4265,7 +4300,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       raceFilter.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 25))
+    await raceAdmission.reached
     await racePage.locator('#late-multiple').evaluate((select) => {
       (select as HTMLSelectElement).multiple = true
     })
@@ -4852,7 +4887,11 @@ describe('WrapperProofService security boundaries', () => {
     expect(await internalSession(wrappedService, wrappedAnalysis.sessionId).page
       .locator('#wrapped-descendant-target').inputValue()).not.toBe('')
 
-    const raceService = createService({ actionStartDelayMs: 200 })
+    const raceAdmission = createActionAdmissionLatch()
+    const raceService = createService({
+      actionStartDelayMs: 200,
+      afterActionAdmission: raceAdmission.notify,
+    })
     services.push(raceService)
     const raceAnalysis = await raceService.analyze(`${fixture.origin}/aria-reference-descendant-source-safety`)
     const racePage = internalSession(raceService, raceAnalysis.sessionId).page
@@ -4865,7 +4904,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       raceCapability.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await raceAdmission.reached
     await racePage.locator('#late-descendant-source').evaluate((source) => {
       ;(source as HTMLInputElement).value = 'Credit card number'
     })
@@ -4946,7 +4985,11 @@ describe('WrapperProofService security boundaries', () => {
     expect(await internalSession(wrappedService, wrappedAnalysis.sessionId).page
       .locator('#wrapped-label-target').inputValue()).not.toBe('')
 
-    const raceService = createService({ actionStartDelayMs: 200 })
+    const raceAdmission = createActionAdmissionLatch()
+    const raceService = createService({
+      actionStartDelayMs: 200,
+      afterActionAdmission: raceAdmission.notify,
+    })
     services.push(raceService)
     const raceAnalysis = await raceService.analyze(`${fixture.origin}/label-embedded-control-safety`)
     const raceEvidence = raceAnalysis.domEvidence.find(({ label }) => label === 'Late label native field')!
@@ -4960,7 +5003,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       raceCapability.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await raceAdmission.reached
     await racePage.locator('#late-label-native-source').evaluate((control) => {
       (control as HTMLTextAreaElement).value = 'Credit card number'
     })
@@ -5687,7 +5730,11 @@ describe('WrapperProofService security boundaries', () => {
     )).toEqual([true, false])
     expect(await latePage.locator('#late-radio-detail').inputValue()).toBe('')
 
-    const raceService = createService({ actionStartDelayMs: 180 })
+    const raceAdmission = createActionAdmissionLatch()
+    const raceService = createService({
+      actionStartDelayMs: 180,
+      afterActionAdmission: raceAdmission.notify,
+    })
     services.push(raceService)
     const raceAnalysis = await raceService.analyze(`${fixture.origin}/target-value-safety`)
     const racePage = internalSession(raceService, raceAnalysis.sessionId).page
@@ -5700,7 +5747,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       raceCapability.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await raceAdmission.reached
     await racePage.locator('#late-live-value').evaluate((input) => {
       (input as HTMLInputElement).value = 'Password'
     })
@@ -9276,7 +9323,11 @@ describe('WrapperProofService security boundaries', () => {
       (radios) => radios.map((radio) => (radio as HTMLInputElement).checked),
     )).toEqual([false, true])
 
-    const raceService = createService({ actionStartDelayMs: 150 })
+    const raceAdmission = createActionAdmissionLatch()
+    const raceService = createService({
+      actionStartDelayMs: 150,
+      afterActionAdmission: raceAdmission.notify,
+    })
     services.push(raceService)
     const raceAnalysis = await raceService.analyze(`${fixture.origin}/radio-native-groups`)
     const raceForm = raceAnalysis.capabilities.find(({ name }) => name === 'prepare_visible_form')!
@@ -9298,7 +9349,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       raceForm.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await raceAdmission.reached
     await racePage.locator('#safe-radio-form').evaluate((owner) => {
       const hidden = document.createElement('input')
       hidden.type = 'radio'
@@ -9565,7 +9616,11 @@ describe('WrapperProofService security boundaries', () => {
   it('invalidates the session when a control becomes disabled after the pre-action read', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
-    const service = createService({ actionStartDelayMs: 200 })
+    const admission = createActionAdmissionLatch()
+    const service = createService({
+      actionStartDelayMs: 200,
+      afterActionAdmission: admission.notify,
+    })
     services.push(service)
     const analysis = await service.analyze(`${fixture.origin}/action-operability`)
     const search = analysis.capabilities.find(({ name }) => name === 'prepare_page_search')!
@@ -9578,7 +9633,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       search.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await admission.reached
     await page.locator('#search-control').evaluate((input) => {
       (input as HTMLInputElement).disabled = true
     })
@@ -9677,7 +9732,11 @@ describe('WrapperProofService security boundaries', () => {
   it('invalidates the session when aria-disabled changes after action admission', async () => {
     const fixture = await startFixture()
     fixtures.push(fixture)
-    const service = createService({ actionStartDelayMs: 200 })
+    const admission = createActionAdmissionLatch()
+    const service = createService({
+      actionStartDelayMs: 200,
+      afterActionAdmission: admission.notify,
+    })
     services.push(service)
     const analysis = await service.analyze(`${fixture.origin}/action-operability`)
     const enabledEvidence = analysis.domEvidence.find(({ label }) => label === 'Enabled value')!
@@ -9691,7 +9750,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       enabledForm.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await admission.reached
     await page.locator('#enabled-form').evaluate((form) => form.setAttribute('aria-disabled', 'true'))
 
     await expect(pending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
@@ -9820,7 +9879,11 @@ describe('WrapperProofService security boundaries', () => {
       return snapshot.capabilities.find(({ evidenceIds }) => evidenceIds.includes(evidence.id))!
     }
 
-    const optionService = createService({ actionStartDelayMs: 180 })
+    const optionAdmission = createActionAdmissionLatch()
+    const optionService = createService({
+      actionStartDelayMs: 180,
+      afterActionAdmission: optionAdmission.notify,
+    })
     services.push(optionService)
     const optionAnalysis = await optionService.analyze(`${fixture.origin}/option-and-readonly-safety`)
     const optionPage = internalSession(optionService, optionAnalysis.sessionId).page
@@ -9833,11 +9896,15 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       lateOption.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await optionAdmission.reached
     await optionPage.locator('#late-option-target').evaluate((option) => option.setAttribute('aria-disabled', 'true'))
     await expect(pendingOption).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
 
-    const readonlyService = createService({ actionStartDelayMs: 180 })
+    const readonlyAdmission = createActionAdmissionLatch()
+    const readonlyService = createService({
+      actionStartDelayMs: 180,
+      afterActionAdmission: readonlyAdmission.notify,
+    })
     services.push(readonlyService)
     const readonlyAnalysis = await readonlyService.analyze(`${fixture.origin}/option-and-readonly-safety`)
     const readonlyPage = internalSession(readonlyService, readonlyAnalysis.sessionId).page
@@ -9850,11 +9917,15 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       lateReadonly.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await readonlyAdmission.reached
     await readonlyPage.locator('#late-readonly-value').evaluate((input) => input.setAttribute('aria-readonly', 'true'))
     await expect(pendingReadonly).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
 
-    const selectService = createService({ actionStartDelayMs: 180 })
+    const selectAdmission = createActionAdmissionLatch()
+    const selectService = createService({
+      actionStartDelayMs: 180,
+      afterActionAdmission: selectAdmission.notify,
+    })
     services.push(selectService)
     const selectAnalysis = await selectService.analyze(`${fixture.origin}/select-readonly-safety`)
     const selectPage = internalSession(selectService, selectAnalysis.sessionId).page
@@ -9867,7 +9938,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       lateReadonlySelect.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await selectAdmission.reached
     await selectPage.locator('#late-readonly-select').evaluate((select) =>
       select.setAttribute('aria-readonly', 'true'))
     await expect(pendingSelect).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
@@ -9923,7 +9994,11 @@ describe('WrapperProofService security boundaries', () => {
       (select) => (select as HTMLSelectElement).selectedIndex,
     )).toBe(0)
 
-    const admittedService = createService({ actionStartDelayMs: 180 })
+    const admittedAdmission = createActionAdmissionLatch()
+    const admittedService = createService({
+      actionStartDelayMs: 180,
+      afterActionAdmission: admittedAdmission.notify,
+    })
     services.push(admittedService)
     const admittedAnalysis = await admittedService.analyze(`${fixture.origin}/option-described-safety`)
     const admittedPage = internalSession(admittedService, admittedAnalysis.sessionId).page
@@ -9936,7 +10011,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       admitted.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await admittedAdmission.reached
     await admittedPage.locator('#late-option-description').evaluate((node) => {
       node.setAttribute('aria-description', 'Credit card number')
     })
@@ -10608,7 +10683,11 @@ describe('WrapperProofService security boundaries', () => {
       capability.id,
     )).resolves.toMatchObject({ structuredContent: { targetStateVerified: true } })
 
-    const raceService = createService({ actionStartDelayMs: 200 })
+    const raceAdmission = createActionAdmissionLatch()
+    const raceService = createService({
+      actionStartDelayMs: 200,
+      afterActionAdmission: raceAdmission.notify,
+    })
     services.push(raceService)
     const raceAnalysis = await raceService.analyze(`${fixture.origin}/checkbox-samples`)
     const raceEvidence = raceAnalysis.domEvidence.find(({ label }) => label === 'Late required checkbox')!
@@ -10622,7 +10701,7 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       raceCapability.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await raceAdmission.reached
     await racePage.locator('#late-required-checkbox').evaluate((checkbox) => {
       (checkbox as HTMLInputElement).required = true
     })
@@ -10649,7 +10728,11 @@ describe('WrapperProofService security boundaries', () => {
     expect(await ariaPage.locator('#late-aria-required').isChecked()).toBe(false)
     expect(await ariaPage.locator('#late-aria-required-detail').inputValue()).toBe('')
 
-    const ariaRaceService = createService({ actionStartDelayMs: 200 })
+    const ariaRaceAdmission = createActionAdmissionLatch()
+    const ariaRaceService = createService({
+      actionStartDelayMs: 200,
+      afterActionAdmission: ariaRaceAdmission.notify,
+    })
     services.push(ariaRaceService)
     const ariaRaceAnalysis = await ariaRaceService.analyze(`${fixture.origin}/checkbox-samples`)
     const ariaRaceEvidence = ariaRaceAnalysis.domEvidence.find(({ label }) => label === 'Late ARIA required checkbox')!
@@ -10664,12 +10747,12 @@ describe('WrapperProofService security boundaries', () => {
       undefined,
       ariaRaceCapability.id,
     )
-    await new Promise((resolve) => setTimeout(resolve, 40))
+    await ariaRaceAdmission.reached
     await ariaRacePage.locator('#late-aria-required').evaluate((checkbox) =>
       checkbox.setAttribute('aria-required', 'true'))
     await expect(ariaPending).rejects.toMatchObject({ code: 'action_failed', sessionInvalidated: true })
     expect(internalServiceState(ariaRaceService)).toEqual({ sessions: 0, reservations: 0 })
-  })
+  }, 15_000)
 
   it('excludes initially indeterminate checkboxes while preserving another safe control and state', async () => {
     const fixture = await startFixture()
@@ -11788,6 +11871,8 @@ describe('WrapperProofService security boundaries', () => {
       'cancelations',
       'cancellation',
       'cancellations',
+      'canceling',
+      'cancelling',
     ]) {
       expect(isConsequentialNavigationUrl(`https://example.test/${variant}`), variant).toBe(true)
       expect(isConsequentialNavigationUrl(`https://example.test/about?intent=${variant}`), variant).toBe(true)
@@ -11800,7 +11885,7 @@ describe('WrapperProofService security boundaries', () => {
     const discoveryService = createService()
     services.push(discoveryService)
     const discovery = await discoveryService.analyze(`${fixture.origin}/navigation-term-source`)
-    for (const label of ['Cancel path', 'Cancelled query', 'Cancellation hash']) {
+    for (const label of ['Cancel path', 'Cancelled query', 'Cancellation hash', 'Canceling path', 'Cancelling query']) {
       expect(discovery.domEvidence.find((evidence) => evidence.label === label)).toMatchObject({ sensitive: true })
     }
     expect(discovery.domEvidence.find(({ label }) => label === 'Cancellation policy'))
@@ -11836,9 +11921,9 @@ describe('WrapperProofService security boundaries', () => {
       redirectNavigation.id,
     )).rejects.toMatchObject({ code: 'invalid_action', sessionInvalidated: true })
     expect(fixture.requests).toContain('/neutral-policy-redirect')
-    expect(fixture.requests).not.toContain('/cancelations')
+    expect(fixture.requests).not.toContain('/cancelling')
 
-    for (const path of ['/cancel', '/about?intent=cancelation', '/about#/canceled']) {
+    for (const path of ['/cancel', '/about?intent=cancelation', '/about#/canceled', '/about?intent=cancelling', '/about#/canceling']) {
       const directService = createService()
       services.push(directService)
       const before = fixture.requests.length

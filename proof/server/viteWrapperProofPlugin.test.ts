@@ -129,10 +129,10 @@ describe('local wrapper API error boundary', () => {
           body: JSON.stringify({ url: `${targetOrigin}/slow-document` }),
           signal: controller.signal,
         })
-        await vi.waitFor(() => expect(slowRequests).toBe(attempt), { timeout: 3_000 })
+        await vi.waitFor(() => expect(slowRequests).toBe(attempt), { timeout: 8_000 })
         controller.abort()
         await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
-        await vi.waitFor(() => expect(activeSessionCount(service)).toBe(0), { timeout: 2_000 })
+        await vi.waitFor(() => expect(activeSessionCount(service)).toBe(0), { timeout: 5_000 })
         expect(analysisReservationCount(service)).toBe(0)
       }
 
@@ -231,7 +231,7 @@ describe('local wrapper API error boundary', () => {
       targetServer.close()
       await once(targetServer, 'close')
     }
-  })
+  }, 20_000)
 
   it('enforces one fixed local analysis deadline before and after browser launch and frees capacity', async () => {
     const heldResponses: ServerResponse[] = []

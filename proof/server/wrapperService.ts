@@ -55,7 +55,7 @@ const SUBFRAME_REMOVAL_RETRY_DELAY_MS = 15
 const UNSAFE_FIELD_HINT = /(?:^|\s)(?:(?:api|access|private)\s*keys?|cvc|cvv|otp|pin|pass\s*codes?|one\s*time\s*codes?|verification\s+codes?|date\s+of\s+birth|birth\s+date|birth\s*days?|dob|geburts\s*(?:datum|tag))(?=\s|$)|\b(address|bank\s*account|bankkonto|bankverbindung|bic|book|buy|card|checkout|comment|contact|credential|delete|email|iban|kontonummer|login|logout|message|name|order|password|pay|payment|phone|publish|register|remove|secrets?|security|send|signin|signout|ssn|subscribe|tokens?|unsubscribe|upload|username|adresse|buchen|kaufen|karte|kommentar|kontakt|löschen|nachricht|passwort|telefon|veröffentlichen|zahlen)\b/i
 const UNSAFE_NAVIGATION_HINT = /(?<![\p{L}\p{N}_])(appointment|appointments|book|booking|bookings|buy|cart|carts|checkout|checkouts|delete|deletion|deletions|logoff|logout|order|orders|ordering|pay|payment|payments|purchase|purchases|purchasing|removal|removals|remove|reservation|reservations|reserve|signout|subscribe|subscriptions|tokens?|unsubscribe|unsubscription|unsubscriptions|termin|termine|abmelden|abmeldung|abmeldungen|austragen|bestellen|bestellung|bestellungen|buchen|buchung|buchungen|entfernen|entfernung|kaufen|käufe|kasse|kündigen|kündigung|kündigungen|löschen|löschung|löschungen|reservieren|reservierung|reservierungen|warenkorb|warenkörbe|zahlung|zahlungen)(?![\p{L}\p{N}_])/iu
 const IDENTITY_DOCUMENT_FIELD_HINT = /(?<![\p{L}\p{N}_])(?:passport(?:\s+number)?|government(?:\s+issued)?\s+(?:id|identification(?:\s+number)?)|national\s+(?:id|identification(?:\s+number)?)|identity\s+(?:card|document(?:\s+number)?)|driver(?:\s+s)?\s+licen[cs]e|driving\s+licen[cs]e|tax(?:\s+payer)?\s+(?:id|identification(?:\s+number)?)|social\s+(?:security|insurance)\s+(?:number|id)|reise\s*pass|pass\s*nummer|personalausweis(?:nummer)?|ausweis\s*nummer|führerschein(?:nummer)?|steuer\s*(?:id|identifikationsnummer)|sozialversicherungs\s*nummer)(?![\p{L}\p{N}_])/iu
-const CANCELLATION_NAVIGATION_HINT = /(?<![\p{L}\p{N}_])cancel(?:ed|led|ations?|lations?)?(?!\s+polic(?:y|ies)(?![\p{L}\p{N}_]))(?![\p{L}\p{N}_])/iu
+const CANCELLATION_NAVIGATION_HINT = /(?<![\p{L}\p{N}_])cancel(?:ed|led|ing|ling|ations?|lations?)?(?!\s+polic(?:y|ies)(?![\p{L}\p{N}_]))(?![\p{L}\p{N}_])/iu
 const SENSITIVE_AUTOCOMPLETE_TOKENS = [
   'additional-name',
   'address-level1',
@@ -156,6 +156,8 @@ export interface WrapperProofServiceOptions {
   sessionExpiresAtMs?: number
   /** Test-only local session lifetime override, still clamped to the production TTL. */
   sessionTtlMs?: number
+  /** Test-only latch after action admission and before any configured action delay. */
+  afterActionAdmission?: () => void | Promise<void>
   maxTargetResourceBytes?: number
   maxTargetSessionBytes?: number
   /** Test-only hook for deterministic head drift before DOM evidence collection. */
@@ -790,12 +792,18 @@ function isElementScreenshotVisible(
       if (retainedCharacters > 4_096) return { present: true, painted: false, overflow: true }
       if (!/\S/.test(raw)) continue
       present = true
-      const parent = parentElementGetter.call(node) as HTMLElement | null
-      if (!parent) continue
+      const parent = parentElementGetter.call(node) as Element | null
+      // SVG text can contribute to an anchor's identity, but this HTML-only
+      // paint proof cannot safely classify it. Exclude the whole link instead
+      // of invoking branded HTMLElement getters on SVG elements.
+      if (!(parent instanceof HTMLElement)) {
+        return { present: true, painted: false, overflow: false }
+      }
       const range = createRange.call(document) as Range
       selectNodeContents.call(range, node)
       const rangeRects = getRangeClientRects.call(range) as DOMRectList
       if (rangeRects.length > 256) return { present: true, painted: false, overflow: true }
+      let runPainted = false
       for (let rectIndex = 0; rectIndex < rangeRects.length; rectIndex += 1) {
         const rect = rangeRects.item(rectIndex)
         if (!rect) continue
@@ -804,10 +812,17 @@ function isElementScreenshotVisible(
         let right = Math.min(viewportWidth, rect.right)
         let bottom = Math.min(viewportHeight, rect.bottom)
         if (right <= left || bottom <= top) continue
-        let current: HTMLElement | null = parent
+        let current: Element | null = parent
         let reachedTarget = false
         let clippedOut = false
         while (current) {
+          // A text node inside foreignObject can start in an HTMLElement and
+          // then cross into SVG ancestors. The HTML-only visibility proof must
+          // fail closed before invoking branded HTMLElement getters there.
+          if (!(current instanceof HTMLElement)) {
+            clippedOut = true
+            break
+          }
           const style = computedStyle(current)
           const hasFilter = style.filter.trim() !== '' && style.filter !== 'none'
           const hasMask = [
@@ -846,10 +861,12 @@ function isElementScreenshotVisible(
             reachedTarget = true
             break
           }
-          current = parentElementGetter.call(current) as HTMLElement | null
+          current = parentElementGetter.call(current) as Element | null
         }
-        if (!clippedOut && reachedTarget && hasTextPaint(computedStyle(parent))) painted = true
+        if (!clippedOut && reachedTarget && hasTextPaint(computedStyle(parent))) runPainted = true
       }
+      if (!runPainted) return { present: true, painted: false, overflow: false }
+      painted = true
     }
     const extra = nextNode.call(walker) as Node | null
     return extra
@@ -4061,7 +4078,12 @@ async function isCdpPaintVisible(
 ): Promise<boolean> {
   let viewportPageX = 0
   let viewportPageY = 0
-  const samplePoints: Array<[number, number]> = []
+  const runParentStorageKey = `__webmcp_paint_run_parents_${randomUUID().replaceAll('-', '_')}`
+  const samplePointGroups: Array<{
+    points: Array<[number, number]>
+    expectedBackendNodeId: number
+    allowDescendant: boolean
+  }> = []
   try {
     const metrics = await cdp.send('Page.getLayoutMetrics') as {
       cssVisualViewport?: { pageX?: number, pageY?: number }
@@ -4071,15 +4093,16 @@ async function isCdpPaintVisible(
     if (!Number.isFinite(viewportPageX) || !Number.isFinite(viewportPageY)) return false
 
     const anchorText = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: `function() {
+      functionDeclaration: `function(storageKey) {
         const descriptor = Object.getOwnPropertyDescriptor;
         const tagNameGetter = descriptor(Element.prototype, 'tagName')?.get;
         if (!tagNameGetter || tagNameGetter.call(this) !== 'A') {
-          return { isAnchor: false, present: false, overflow: false, points: [] };
+          return { isAnchor: false, present: false, overflow: false, runs: [] };
         }
         const createTreeWalker = descriptor(Document.prototype, 'createTreeWalker')?.value;
         const nextNode = descriptor(TreeWalker.prototype, 'nextNode')?.value;
         const nodeValueGetter = descriptor(Node.prototype, 'nodeValue')?.get;
+        const parentElementGetter = descriptor(Node.prototype, 'parentElement')?.get;
         const createRange = descriptor(Document.prototype, 'createRange')?.value;
         const rangePrototype = globalThis.Range?.prototype;
         const selectNodeContents = rangePrototype
@@ -4088,33 +4111,40 @@ async function isCdpPaintVisible(
         const getClientRects = rangePrototype
           ? descriptor(rangePrototype, 'getClientRects')?.value
           : undefined;
-        if (!createTreeWalker || !nextNode || !nodeValueGetter || !createRange || !selectNodeContents || !getClientRects) {
-          return { isAnchor: true, present: true, overflow: true, points: [] };
+        if (!createTreeWalker || !nextNode || !nodeValueGetter || !parentElementGetter || !createRange || !selectNodeContents || !getClientRects) {
+          return { isAnchor: true, present: true, overflow: true, runs: [] };
         }
+        globalThis[storageKey] = [];
         const walker = createTreeWalker.call(document, this, NodeFilter.SHOW_TEXT);
-        const points = [];
+        const runs = [];
         let inspectedNodes = 0;
         let retainedCharacters = 0;
         let inspectedRects = 0;
+        let retainedPoints = 0;
         let present = false;
         while (inspectedNodes < 256) {
           const node = nextNode.call(walker);
-          if (!node) return { isAnchor: true, present, overflow: false, points };
+          if (!node) return { isAnchor: true, present, overflow: false, runs };
           inspectedNodes += 1;
           const raw = String(nodeValueGetter.call(node) ?? '');
           retainedCharacters += raw.length;
           if (retainedCharacters > 4096) {
-            return { isAnchor: true, present: true, overflow: true, points: [] };
+            return { isAnchor: true, present: true, overflow: true, runs: [] };
           }
           if (!/\\S/u.test(raw)) continue;
           present = true;
+          const parent = parentElementGetter.call(node);
+          if (!(parent instanceof HTMLElement)) {
+            return { isAnchor: true, present: true, overflow: true, runs: [] };
+          }
+          const points = [];
           const range = createRange.call(document);
           selectNodeContents.call(range, node);
           const rects = getClientRects.call(range);
           for (let index = 0; index < rects.length; index += 1) {
             inspectedRects += 1;
             if (inspectedRects > 256) {
-              return { isAnchor: true, present: true, overflow: true, points: [] };
+              return { isAnchor: true, present: true, overflow: true, runs: [] };
             }
             const rect = rects.item(index);
             if (!rect) continue;
@@ -4128,17 +4158,21 @@ async function isCdpPaintVisible(
                 Math.floor(left + (right - left) * fraction),
                 Math.floor(top + (bottom - top) * 0.5),
               ]);
-              if (points.length > 192) {
-                return { isAnchor: true, present: true, overflow: true, points: [] };
+              retainedPoints += 1;
+              if (retainedPoints > 192) {
+                return { isAnchor: true, present: true, overflow: true, runs: [] };
               }
             }
           }
+          globalThis[storageKey].push(parent);
+          runs.push(points);
         }
         return nextNode.call(walker)
-          ? { isAnchor: true, present: true, overflow: true, points: [] }
-          : { isAnchor: true, present, overflow: false, points };
+          ? { isAnchor: true, present: true, overflow: true, runs: [] }
+          : { isAnchor: true, present, overflow: false, runs };
       }`,
       objectId: targetObjectId,
+      arguments: [{ value: runParentStorageKey }],
       objectGroup,
       returnByValue: true,
     }) as {
@@ -4147,7 +4181,7 @@ async function isCdpPaintVisible(
           isAnchor?: unknown
           present?: unknown
           overflow?: unknown
-          points?: unknown
+          runs?: unknown
         }
       }
       exceptionDetails?: unknown
@@ -4155,22 +4189,47 @@ async function isCdpPaintVisible(
     if (anchorText.exceptionDetails) return false
     const anchorValue = anchorText.result?.value
     if (anchorValue?.isAnchor === true && anchorValue.present === true) {
-      if (anchorValue.overflow === true || !Array.isArray(anchorValue.points)) return false
-      for (const point of anchorValue.points.slice(0, 192)) {
-        if (
-          !Array.isArray(point)
-          || point.length !== 2
-          || !Number.isFinite(point[0])
-          || !Number.isFinite(point[1])
-        ) return false
-        samplePoints.push([
-          Math.max(0, Math.min(CAPTURE_VIEWPORT_WIDTH - 1, Math.floor(Number(point[0])))),
-          Math.max(0, Math.min(CAPTURE_VIEWPORT_HEIGHT - 1, Math.floor(Number(point[1])))),
-        ])
+      if (anchorValue.overflow === true || !Array.isArray(anchorValue.runs)) return false
+      let retainedPoints = 0
+      for (let runIndex = 0; runIndex < anchorValue.runs.slice(0, 256).length; runIndex += 1) {
+        const run = anchorValue.runs[runIndex]
+        if (!Array.isArray(run) || run.length === 0) return false
+        const points: Array<[number, number]> = []
+        for (const point of run) {
+          retainedPoints += 1
+          if (
+            retainedPoints > 192
+            || !Array.isArray(point)
+            || point.length !== 2
+            || !Number.isFinite(point[0])
+            || !Number.isFinite(point[1])
+          ) return false
+          points.push([
+            Math.max(0, Math.min(CAPTURE_VIEWPORT_WIDTH - 1, Math.floor(Number(point[0])))),
+            Math.max(0, Math.min(CAPTURE_VIEWPORT_HEIGHT - 1, Math.floor(Number(point[1])))),
+          ])
+        }
+        const remoteParent = await cdp.send('Runtime.evaluate', {
+          expression: `globalThis[${JSON.stringify(runParentStorageKey)}]?.[${runIndex}]`,
+          contextId: executionContextId,
+          objectGroup,
+        }) as { result?: { objectId?: string }, exceptionDetails?: unknown }
+        const parentObjectId = remoteParent.result?.objectId
+        if (remoteParent.exceptionDetails || !parentObjectId) return false
+        const describedParent = await cdp.send('DOM.describeNode', { objectId: parentObjectId }) as {
+          node?: { backendNodeId?: number }
+        }
+        if (!describedParent.node?.backendNodeId) return false
+        samplePointGroups.push({
+          points,
+          expectedBackendNodeId: describedParent.node.backendNodeId,
+          allowDescendant: false,
+        })
       }
-      if (samplePoints.length === 0) return false
+      if (samplePointGroups.length === 0) return false
     } else {
       const result = await cdp.send('DOM.getContentQuads', { backendNodeId }) as { quads?: number[][] }
+      const points: Array<[number, number]> = []
       for (const quad of (result.quads ?? []).slice(0, 4)) {
         if (quad.length !== 8) continue
         const xs = [quad[0], quad[2], quad[4], quad[6]]
@@ -4182,48 +4241,74 @@ async function isCdpPaintVisible(
         if (right <= left || bottom <= top) continue
         for (const xFraction of [0.1, 0.5, 0.9]) {
           for (const yFraction of [0.1, 0.5, 0.9]) {
-            samplePoints.push([
+            points.push([
               Math.max(0, Math.min(CAPTURE_VIEWPORT_WIDTH - 1, Math.floor(left + (right - left) * xFraction))),
               Math.max(0, Math.min(CAPTURE_VIEWPORT_HEIGHT - 1, Math.floor(top + (bottom - top) * yFraction))),
             ])
           }
         }
       }
+      if (points.length > 0) {
+        samplePointGroups.push({ points, expectedBackendNodeId: backendNodeId, allowDescendant: true })
+      }
     }
   } catch {
     return false
-  }
-  for (const [x, y] of samplePoints) {
-    let hitBackendNodeId: number | undefined
+  } finally {
     try {
-      const hit = await cdp.send('DOM.getNodeForLocation', {
-        x: x + viewportPageX,
-        y: y + viewportPageY,
-        ignorePointerEventsNone: true,
-      }) as { backendNodeId?: number }
-      hitBackendNodeId = hit.backendNodeId
+      await cdp.send('Runtime.evaluate', {
+        expression: `delete globalThis[${JSON.stringify(runParentStorageKey)}]`,
+        contextId: executionContextId,
+        objectGroup,
+        returnByValue: true,
+      })
     } catch {
-      return false
+      // The isolated world may already be gone; object-group cleanup remains authoritative.
     }
-    if (!hitBackendNodeId) continue
-    if (hitBackendNodeId === backendNodeId) return true
-    const resolvedHit = await cdp.send('DOM.resolveNode', {
-      backendNodeId: hitBackendNodeId,
-      executionContextId,
-      objectGroup,
-    }) as { object?: { objectId?: string } }
-    const hitObjectId = resolvedHit.object?.objectId
-    if (!hitObjectId) continue
-    const contained = await cdp.send('Runtime.callFunctionOn', {
-      functionDeclaration: 'function(candidate) { return candidate instanceof Node && (candidate === this || this.contains(candidate)); }',
-      objectId: targetObjectId,
-      arguments: [{ objectId: hitObjectId }],
-      objectGroup,
-      returnByValue: true,
-    }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
-    if (!contained.exceptionDetails && contained.result?.value === true) return true
   }
-  return false
+  if (samplePointGroups.length === 0) return false
+  for (const { points, expectedBackendNodeId, allowDescendant } of samplePointGroups) {
+    let runVisible = false
+    for (const [x, y] of points) {
+      let hitBackendNodeId: number | undefined
+      try {
+        const hit = await cdp.send('DOM.getNodeForLocation', {
+          x: x + viewportPageX,
+          y: y + viewportPageY,
+          ignorePointerEventsNone: true,
+        }) as { backendNodeId?: number }
+        hitBackendNodeId = hit.backendNodeId
+      } catch {
+        return false
+      }
+      if (!hitBackendNodeId) continue
+      if (hitBackendNodeId === expectedBackendNodeId) {
+        runVisible = true
+        break
+      }
+      if (!allowDescendant) continue
+      const resolvedHit = await cdp.send('DOM.resolveNode', {
+        backendNodeId: hitBackendNodeId,
+        executionContextId,
+        objectGroup,
+      }) as { object?: { objectId?: string } }
+      const hitObjectId = resolvedHit.object?.objectId
+      if (!hitObjectId) continue
+      const contained = await cdp.send('Runtime.callFunctionOn', {
+        functionDeclaration: 'function(candidate) { return candidate instanceof Node && (candidate === this || this.contains(candidate)); }',
+        objectId: targetObjectId,
+        arguments: [{ objectId: hitObjectId }],
+        objectGroup,
+        returnByValue: true,
+      }) as { result?: { value?: boolean }, exceptionDetails?: unknown }
+      if (!contained.exceptionDetails && contained.result?.value === true) {
+        runVisible = true
+        break
+      }
+    }
+    if (!runVisible) return false
+  }
+  return true
 }
 
 interface CollectedDomEvidence {
@@ -7041,6 +7126,7 @@ export class WrapperProofService {
   private readonly actionSettleMs: number
   private readonly sessionExpiresAtMs: number
   private readonly sessionTtlMs: number
+  private readonly afterActionAdmission?: () => void | Promise<void>
   private readonly maxTargetResourceBytes: number
   private readonly maxTargetSessionBytes: number
   private readonly beforeDomEvidenceCollection?: (page: Page, attempt: number) => Promise<void>
@@ -7066,6 +7152,7 @@ export class WrapperProofService {
       Math.max(1, options.sessionTtlMs ?? WRAPPER_SESSION_TTL_MS),
       WRAPPER_SESSION_TTL_MS,
     )
+    this.afterActionAdmission = options.afterActionAdmission
     this.maxTargetResourceBytes = options.maxTargetResourceBytes ?? WRAPPER_MAX_TARGET_RESOURCE_BYTES
     this.maxTargetSessionBytes = options.maxTargetSessionBytes ?? WRAPPER_MAX_TARGET_SESSION_BYTES
     this.beforeDomEvidenceCollection = options.beforeDomEvidenceCollection
@@ -8177,6 +8264,7 @@ export class WrapperProofService {
 
       session.activeNetworkMetrics = metrics
       actionStarted = true
+      await this.afterActionAdmission?.()
       if (capability.kind === 'navigation') {
         await raceWithSessionPolicy(session, session.context.setOffline(false), signal)
         session.networkMode = 'navigation'
