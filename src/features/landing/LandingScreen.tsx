@@ -159,16 +159,17 @@ export function LandingScreen({ onAnalyze, onDemo }: LandingScreenProps) {
                 <li>The tools appear in <code>document.modelContext</code>.</li>
               </ol>
               <p className="agent-test-note">
-                <code>executeTool</code> takes the registered tool object, not its name,
-                and its arguments as a JSON string.
+                <code>executeTool</code> takes the registered tool object, not its name.
+                Chrome 152 still wants the arguments as a JSON string; the current draft
+                specifies a plain object.
               </p>
             </article>
             <article>
-              <h2>ChatGPT in-app browser</h2>
+              <h2>ChatGPT desktop app</h2>
               <ol>
-                <li>Open this page in ChatGPT with site tools enabled.</li>
-                <li>Launch the HeatFlow simulation.</li>
-                <li>Ask the agent to check postcode <code>2230</code> for a heat pump.</li>
+                <li>Open the built-in browser (⌘⇧B) in a Work or Codex chat using GPT-5.6 Sol or Terra.</li>
+                <li>Load this page and launch the HeatFlow simulation.</li>
+                <li>Open <strong>Site tools</strong> in the address bar, or ask the agent to check postcode <code>2230</code> for a heat pump.</li>
                 <li>Every accepted call changes the page visibly.</li>
               </ol>
               <p className="agent-test-note">

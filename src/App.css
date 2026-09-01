@@ -500,3 +500,70 @@
   .wrapper-runtime-strip { grid-template-columns: 1fr 1fr; }
   .wrapper-runtime-strip > span { border-bottom: 1px solid #252933; }
 }
+
+/* Agent feedback: transient, wrapper-owned emphasis on the part of the page an agent call just changed. Human interactions never trigger it. */
+.service-catalog, .comparison-panel, .area-section, .quote-section { position: relative; scroll-margin-top: 84px; }
+.agent-touch { position: absolute; inset: 0; z-index: 4; pointer-events: none; border-radius: inherit; }
+.agent-touch-ring { position: absolute; inset: 0; border-radius: inherit; box-shadow: inset 0 0 0 3px #8f7cff, 0 0 0 0 rgb(143 124 255 / 0%); animation: agent-ring 3.2s cubic-bezier(0.2, 0.7, 0.2, 1) forwards; }
+.agent-touch-badge { position: absolute; top: 14px; right: 14px; display: inline-flex; align-items: center; gap: 7px; padding: 8px 13px; border: 1px solid rgb(173 158 255 / 60%); border-radius: 999px; color: #eae6ff; background: #24203b; box-shadow: 0 8px 24px rgb(20 16 40 / 35%), 0 0 0 4px rgb(143 124 255 / 18%); font-size: 0.6rem; font-weight: 700; letter-spacing: 0.02em; white-space: nowrap; animation: agent-badge 3.2s ease-out forwards; }
+.agent-touch-badge > span { color: #ad9eff; }
+.agent-touch-badge code { color: #c9bfff; font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.57rem; }
+.comparison-panel .agent-touch-badge { top: -15px; right: 20px; }
+.agent-panel .agent-touch-badge { top: auto; right: 14px; bottom: 14px; }
+.agent-filled input, .agent-filled select, .agent-filled textarea, .heatflow-section-title label.agent-filled { animation: agent-field 2.8s ease-out forwards; }
+.heatflow-section-title label.agent-filled input { animation: none; }
+.service-card.agent-filled { animation: agent-card 2.8s ease-out forwards; }
+.registered-tool.is-active { background: linear-gradient(90deg, rgb(143 124 255 / 16%), transparent 70%); box-shadow: inset 3px 0 0 #8f7cff; }
+.registered-tool.is-active .tool-mini-icon { color: #fff; background: #6c59dc; animation: agent-icon 1.2s ease-in-out infinite; }
+.activity-item { animation: activity-in 480ms ease-out; }
+.simulation-pulse { animation: simulation-pulse 2.2s ease-in-out infinite; }
+
+@keyframes agent-ring {
+  0% { opacity: 0; box-shadow: inset 0 0 0 0 #8f7cff, 0 0 0 0 rgb(143 124 255 / 55%); }
+  8% { opacity: 1; box-shadow: inset 0 0 0 4px #8f7cff, 0 0 0 12px rgb(143 124 255 / 22%); }
+  70% { opacity: 1; box-shadow: inset 0 0 0 3px #8f7cff, 0 0 0 0 rgb(143 124 255 / 0%); }
+  100% { opacity: 0; box-shadow: inset 0 0 0 3px #8f7cff, 0 0 0 0 rgb(143 124 255 / 0%); }
+}
+@keyframes agent-badge {
+  0% { opacity: 0; transform: translateY(-6px) scale(0.92); }
+  10% { opacity: 1; transform: none; }
+  82% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-4px); }
+}
+@keyframes agent-field {
+  0% { box-shadow: 0 0 0 0 rgb(143 124 255 / 0%), inset 0 0 0 999px rgb(143 124 255 / 0%); }
+  12% { box-shadow: 0 0 0 3px rgb(143 124 255 / 75%), inset 0 0 0 999px rgb(143 124 255 / 22%); }
+  100% { box-shadow: 0 0 0 0 rgb(143 124 255 / 0%), inset 0 0 0 999px rgb(143 124 255 / 0%); }
+}
+@keyframes agent-card {
+  0% { box-shadow: 0 0 0 0 rgb(143 124 255 / 0%), 0 8px 24px rgb(42 61 53 / 5%); }
+  12% { box-shadow: 0 0 0 3px #8f7cff, 0 14px 36px rgb(143 124 255 / 28%); }
+  100% { box-shadow: 0 0 0 0 rgb(143 124 255 / 0%), 0 8px 24px rgb(42 61 53 / 5%); }
+}
+@keyframes agent-icon {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgb(143 124 255 / 45%); }
+  50% { transform: scale(1.1); box-shadow: 0 0 0 5px rgb(143 124 255 / 0%); }
+}
+@keyframes activity-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes simulation-pulse {
+  0%, 100% { box-shadow: 0 0 10px #9a87ff; transform: scale(1); }
+  50% { box-shadow: 0 0 3px #9a87ff; transform: scale(0.8); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-touch-ring, .agent-touch-badge, .agent-filled input, .agent-filled select, .agent-filled textarea, .service-card.agent-filled, .registered-tool.is-active .tool-mini-icon, .activity-item, .simulation-pulse { animation: none; }
+  .agent-touch-ring { opacity: 1; box-shadow: inset 0 0 0 3px #8f7cff; }
+  .agent-touch-badge { opacity: 1; }
+  .agent-filled input, .agent-filled select, .agent-filled textarea, .heatflow-section-title label.agent-filled { box-shadow: 0 0 0 3px rgb(143 124 255 / 75%), inset 0 0 0 999px rgb(143 124 255 / 22%); }
+  .heatflow-section-title label.agent-filled input { box-shadow: none; }
+  .service-card.agent-filled { box-shadow: 0 0 0 3px #8f7cff; }
+}
+
+@media (max-width: 680px) {
+  .agent-touch-badge { top: 8px; right: 8px; padding: 6px 9px; }
+  .comparison-panel .agent-touch-badge, .agent-panel .agent-touch-badge { top: auto; right: 8px; bottom: 8px; }
+  .service-catalog, .comparison-panel, .area-section, .quote-section { scroll-margin-top: 120px; }
+}

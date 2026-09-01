@@ -22,20 +22,20 @@ The repository is public as of 2026-09-01. Do not submit until every required re
 - [x] Registration and cleanup work without duplicate tools after navigation.
 - [ ] The deployed app is tested in ChatGPT's in-app browser. Optional: the rules require ChatGPT **or** Chrome, and Chrome is verified.
 - [x] The deployed app is tested in Chrome with WebMCP enabled.
-- [ ] The current WebMCP specification is rechecked immediately before submission.
+- [x] The current WebMCP specification is rechecked immediately before submission. Done 2026-09-01 against the Draft Community Group Report of 26 August 2026 and Chrome's documentation: entry point, `registerTool` options, descriptor fields, annotation names, execute callback and tool-name rules conform. Documented divergence: Chrome 152 wants `executeTool` input as a JSON string, the draft declares an object. Repeat on submission day if Chrome or the draft changed.
 
 ## Devpost deliverables
 
 - [x] Deploy a working live URL accessible to judges.
-- [ ] Record a public YouTube demo with audio, shorter than three minutes.
-- [ ] Explain why the use case is a strong fit for WebMCP.
-- [ ] Explain what people and agents can do together that was previously difficult.
-- [ ] Briefly explain the WebMCP implementation.
-- [ ] Include all required source code, assets, and functional instructions.
+- [ ] Record a public YouTube demo with audio, shorter than three minutes. Script and shot list in `docs/demo-script.md`.
+- [ ] Explain why the use case is a strong fit for WebMCP. Drafted in `docs/devpost-submission.md`; paste into the form.
+- [ ] Explain what people and agents can do together that was previously difficult. Drafted in `docs/devpost-submission.md`.
+- [ ] Briefly explain the WebMCP implementation. Drafted in `docs/devpost-submission.md`.
+- [ ] Include all required source code, assets, and functional instructions. Repository is complete; testing instructions drafted in `docs/devpost-submission.md`.
 - [x] Keep the MIT license visible in the repository root.
 - [x] Change the GitHub repository from private to public before submission.
 - [x] Confirm GitHub detects the license and shows it in the repository About area.
 
 ## Competition deadline
 
-Submission deadline: September 3, 2026 at 1:00 PM PDT. Reconfirm the displayed Devpost deadline before the final submission.
+Submission deadline: September 3, 2026 at 1:00 PM PDT, reconfirmed on the Devpost header on 2026-09-01. Reconfirm once more before the final submission. After the deadline, do not change the repository, the live site or the video until winners are announced; the rules treat edits during judging as an eligibility risk.

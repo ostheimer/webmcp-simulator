@@ -19,7 +19,7 @@ a public Preview remains blocked until a distributed WAF rule or authenticated
 quota is published and verified. It does not change the production site until
 a Preview is explicitly verified.
 
-The current vertical slice uses a deterministic fictional HeatFlow website to propose potential WebMCP capabilities and launch a safe simulation in which a compatible agent can invoke real WebMCP tools. Every invocation produces a visible state change on the simulation page. For arbitrary URLs, the browser-only MVP records only the normalized URL and deliberately makes no unsupported capability claims.
+The current vertical slice uses a deterministic fictional HeatFlow website to propose potential WebMCP capabilities and launch a safe simulation in which a compatible agent can invoke real WebMCP tools. Every invocation produces a visible state change on the simulation page. The section that changed is outlined and labelled with the tool name for a few seconds, and the fields or cards the call populated are emphasised, so a viewer can attribute every visible change to the call that caused it. Human interactions never trigger that emphasis, and no cursor or click is simulated. For arbitrary URLs, the browser-only MVP records only the normalized URL and deliberately makes no unsupported capability claims.
 
 ## Product boundaries
 
@@ -101,11 +101,18 @@ npm run build
 
 ### ChatGPT desktop app
 
-Open the deployed application in ChatGPT's in-app browser with site tools enabled. Launch the HeatFlow simulation, then ask the agent to search for a heat pump, check postcode `2230`, compare air- and ground-source heat pumps, or prepare a quote request. Compatible ChatGPT agents can discover the tools registered by the active simulation page.
+OpenAI calls its WebMCP support "site tools". They work in the built-in browser of the ChatGPT desktop app, not on chatgpt.com:
+
+1. Update the ChatGPT desktop app to the latest version and make sure **Settings › Browser › Permissions › Enable site tools** is on. Site tools are not available in Enterprise or Edu workspaces.
+2. Start a chat in Work or Codex mode with GPT-5.6 Sol or GPT-5.6 Terra. GPT-5.6 Luna currently has WebMCP disabled.
+3. Open the built-in browser (⌘⇧B on macOS), load the deployed application and launch the HeatFlow simulation.
+4. Select **Site tools** in the browser's address bar to see the five registered tools, then ask the agent to search for a heat pump, check postcode `2230`, compare air- and ground-source heat pumps, or prepare a quote request.
+
+Tools belong to the page that registers them: reloading or navigating away drops them until the simulation is launched again. This path has not yet been verified by the project; the Chrome path below has.
 
 ### Google Chrome
 
-For local testing in a compatible Chrome build:
+In Chrome 149 or later:
 
 1. Open `chrome://flags/#enable-webmcp-testing`.
 2. Enable WebMCP testing.
@@ -121,15 +128,18 @@ const tool = tools.find((candidate) => candidate.name === 'check_service_area')
 await document.modelContext.executeTool(tool, JSON.stringify({ postcode: '2230', service: 'heat_pump' }))
 ```
 
-`executeTool` takes the registered tool object rather than its name, and its
-arguments as a JSON string. Passing a name string fails with
-`The provided value is not of type 'RegisteredTool'`, and passing a plain object
-fails with `Failed to parse input arguments`. `getTools` resolves to a promise,
-and it returns an empty list until a simulation is launched.
+`executeTool` takes the registered tool object rather than its name. Passing a
+name string fails with `The provided value is not of type 'RegisteredTool'`.
+In Chrome 152, verified on 2026-09-01, the arguments must be a JSON string and a
+plain object fails with `Failed to parse input arguments`; the WebMCP draft of
+26 August 2026 specifies a plain object that the browser serialises itself, so a
+later Chrome may accept `{ postcode: '2230', service: 'heat_pump' }` directly.
+`getTools` resolves to a promise, and it returns an empty list until a
+simulation is launched.
 
 The page feature-detects `document.modelContext`. Unsupported browsers keep the complete human interface available and show an accurate compatibility message instead of reporting a false connection.
 
-WebMCP is an evolving draft. Before submission, the implementation must be verified against the current [WebMCP specification](https://webmachinelearning.github.io/webmcp/) and [Chrome documentation](https://developer.chrome.com/docs/ai/webmcp).
+WebMCP is an evolving draft. The implementation was last checked against the [WebMCP specification](https://webmachinelearning.github.io/webmcp/) draft of 26 August 2026 and the [Chrome documentation](https://developer.chrome.com/docs/ai/webmcp) on 2026-09-01: entry point, `registerTool` options, tool descriptor fields, annotation names, the execute callback and its optional abort signal, and the tool-name character rules all conform.
 
 ## Architecture
 

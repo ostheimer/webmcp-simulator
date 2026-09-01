@@ -24,6 +24,30 @@ export interface AgentActivity {
   timestamp: string
 }
 
+export type AgentHighlightSection =
+  | 'services'
+  | 'service-comparison'
+  | 'service-area'
+  | 'quote-request'
+  | 'agent-activity'
+
+/**
+ * Transient, wrapper-owned emphasis on the part of the page an agent call just
+ * changed. Human interactions never create one; they clear it instead, so the
+ * emphasis can only ever point at a real WebMCP tool invocation.
+ */
+export interface AgentHighlight {
+  /** Equals the activity ID so a stale timeout cannot clear a newer highlight. */
+  id: string
+  toolName: string
+  sectionId: AgentHighlightSection
+  /** Wrapper-owned keys of the fields or cards the call populated. */
+  fields: string[]
+}
+
+/** How long the agent highlight stays visible before it clears itself. */
+export const agentHighlightDurationMs = 3200
+
 export interface SimulationState {
   query: string
   visibleServiceIds: string[]
@@ -35,6 +59,7 @@ export interface SimulationState {
   agentPreparedQuote: boolean
   sendNotice: boolean
   activities: AgentActivity[]
+  agentHighlight: AgentHighlight | null
 }
 
 export type SimulationAction =
@@ -50,6 +75,7 @@ export type SimulationAction =
   | { type: 'EDIT_QUOTE'; field: keyof QuoteDraft; value: string }
   | { type: 'MARK_QUOTE_REVIEWED' }
   | { type: 'RESET'; activity?: AgentActivity }
+  | { type: 'CLEAR_AGENT_HIGHLIGHT'; id: string }
 
 export const initialQuote: QuoteDraft = {
   service: '',
@@ -69,6 +95,15 @@ export const initialSimulationState: SimulationState = {
   agentPreparedQuote: false,
   sendNotice: false,
   activities: [],
+  agentHighlight: null,
+}
+
+function highlightFrom(
+  activity: AgentActivity,
+  sectionId: AgentHighlightSection,
+  fields: string[],
+): AgentHighlight {
+  return { id: activity.id, toolName: activity.toolName, sectionId, fields }
 }
 
 export function simulationReducer(
@@ -82,12 +117,14 @@ export function simulationReducer(
         query: action.query,
         visibleServiceIds: action.serviceIds,
         activities: [action.activity, ...state.activities],
+        agentHighlight: highlightFrom(action.activity, 'services', ['query']),
       }
     case 'SET_SEARCH':
       return {
         ...state,
         query: action.query,
         visibleServiceIds: action.serviceIds,
+        agentHighlight: null,
       }
     case 'CHECK_AREA':
       return {
@@ -96,6 +133,7 @@ export function simulationReducer(
         areaService: action.result.service,
         areaResult: action.result,
         activities: [action.activity, ...state.activities],
+        agentHighlight: highlightFrom(action.activity, 'service-area', ['areaPostcode', 'areaService']),
       }
     case 'SET_AREA':
       return {
@@ -103,21 +141,24 @@ export function simulationReducer(
         areaPostcode: action.result.postcode,
         areaService: action.result.service,
         areaResult: action.result,
+        agentHighlight: null,
       }
     case 'SET_AREA_POSTCODE':
-      return { ...state, areaPostcode: action.postcode, areaResult: null }
+      return { ...state, areaPostcode: action.postcode, areaResult: null, agentHighlight: null }
     case 'SET_AREA_SERVICE':
-      return { ...state, areaService: action.service, areaResult: null }
+      return { ...state, areaService: action.service, areaResult: null, agentHighlight: null }
     case 'COMPARE':
       return {
         ...state,
         comparisonIds: action.serviceIds,
         activities: [action.activity, ...state.activities],
+        agentHighlight: highlightFrom(action.activity, 'service-comparison', action.serviceIds),
       }
     case 'SET_COMPARISON':
       return {
         ...state,
         comparisonIds: action.serviceIds,
+        agentHighlight: null,
       }
     case 'PREPARE_QUOTE':
       return {
@@ -126,20 +167,31 @@ export function simulationReducer(
         agentPreparedQuote: true,
         sendNotice: false,
         activities: [action.activity, ...state.activities],
+        agentHighlight: highlightFrom(
+          action.activity,
+          'quote-request',
+          ['service', 'postcode', 'propertySize', ...(action.quote.message ? ['message'] : [])],
+        ),
       }
     case 'EDIT_QUOTE':
       return {
         ...state,
         quote: { ...state.quote, [action.field]: action.value },
         sendNotice: false,
+        agentHighlight: null,
       }
     case 'MARK_QUOTE_REVIEWED':
-      return { ...state, sendNotice: true }
+      return { ...state, sendNotice: true, agentHighlight: null }
     case 'RESET':
       return {
         ...initialSimulationState,
         activities: action.activity ? [action.activity] : [],
+        agentHighlight: action.activity ? highlightFrom(action.activity, 'agent-activity', []) : null,
       }
+    case 'CLEAR_AGENT_HIGHLIGHT':
+      return state.agentHighlight?.id === action.id
+        ? { ...state, agentHighlight: null }
+        : state
   }
 }
 
