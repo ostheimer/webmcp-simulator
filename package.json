@@ -17,7 +17,7 @@
     "pretest": "npm run build:sandbox-worker",
     "test": "vitest run",
     "verify:vercel-build": "npx vercel build && npm run verify:vercel-functions",
-    "verify:vercel-functions": "node scripts/verify-vercel-function-artifacts.mjs",
+    "verify:vercel-functions": "npm exec --yes --package=vercel -- node scripts/verify-vercel-function-artifacts.mjs",
     "verify:wrapper": "node scripts/verify-wrapper-proof.mjs",
     "preview": "vite preview"
   },
