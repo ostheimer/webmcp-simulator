@@ -6,10 +6,10 @@ This file is the current consolidated project state. It is intentionally rewritt
 
 - Active Agent Relay: https://github.com/ostheimer/webmcp-simulator/issues/6
 - Collaboration protocol: `docs/agent-collaboration-protocol.md`
-- Last updated: 2026-09-01, evening CEST
+- Last updated: 2026-09-01, late evening CEST
 - Updated by: Claude Code
 - Coordination owner: Claude Code, transferred from Codex / WebMCP Simulator Manager in Issue #6 on 2026-09-01
-- Expected next agent: Claude Code, blocked on the priority decision in "Blocking decision"
+- Expected next agent: Claude Code. Track A stays blocked on the IPv6 decision; the remaining Track B work is Andreas's (video, Devpost form).
 
 ## Objective
 
@@ -19,7 +19,7 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 
 - Repository: `ostheimer/webmcp-simulator`
 - Canonical branch: `main`
-- Current `main` commit: `4c0b396bde51553d41159acee81bf473695b9820`
+- Current `main` commit: `10b88be`, the squash merge of PR #14.
 - Production-wrapper code baseline: `4536da64cec5907c7cf43d4e6b9112a8b4a7ae07`.
 - PR #3: production wrapper architecture merged.
 - PR #4: Vercel relative TypeScript import emission fixed.
@@ -29,6 +29,8 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 - PR #9: public-deployment clarity merged. Landing copy, wrapper error copy and on-page agent test instructions. No change to wrapper behaviour, isolation policy or security contract.
 - PR #10: notice and error no longer shown together; handoff and checklist reconciled.
 - PR #11: sandbox commands now run in an explicit working directory. First change to wrapper code since the baseline.
+- PR #13: handoff consolidation, documentation only.
+- PR #14: visible agent feedback in the HeatFlow simulation. The section an agent call changed is outlined and labelled "Agent · tool_name" for 3.2 seconds, populated fields and cards are emphasised, the matching tool row is marked active; human interactions never trigger it and clear it; `prefers-reduced-motion` gets a static outline. Same PR: README and landing copy aligned with the WebMCP spec recheck and OpenAI's site-tools documentation, `docs/devpost-submission.md` and `docs/demo-script.md` added, checklist updated. No change to `proof/`, `api/` or any invariant.
 - Existing Issue #2 is a separate Auto WebMCP form-adapter exploration and is not the relay for this work.
 
 ## Verification state
@@ -38,7 +40,10 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 - TypeScript, lint, application build, Vercel build, generated-function runtime verification, diff check and audit passed at `4536da64cec5907c7cf43d4e6b9112a8b4a7ae07`.
 - Full automated suite at `be53adc76dda758b23ae27caf81e344cadecc68a`, the PR #9 branch head: 22 files, 492 tests passed, exit code 0.
 - Full automated suite at `ea6ea9017849170ebc3979870a1aeb2eb2c07b45`, the PR #11 branch head: 22 files, 494 tests passed, exit code 0. Twenty tests added since the baseline, none removed or weakened.
-- Chrome verification on the live URL, 2026-09-01: `document.modelContext.getTools()` returns the five HeatFlow tools after the simulation launches, and `executeTool` produces a verified visible change. Chrome 151 with WebMCP enabled.
+- Full automated suite at `ad99110e10bd8f11c5e20ee7cc19967c00bd56cc`, the PR #14 branch head: 23 files, 502 tests passed. `tsc -b --force` exit 0, `oxlint` no findings. Eight tests added (reducer highlight state, rendered highlight, human-interaction clearing), none removed or weakened.
+- Rendered verification of the highlight at `10b88be` on the production URL with headless Chromium and a stubbed `document.modelContext`: all five tools produced outline, badge, field emphasis and active tool row, and everything cleared after the timeout. The real WebMCP registration path was not changed by PR #14.
+- WebMCP spec recheck, 2026-09-01: implementation conforms to the Draft Community Group Report of 26 August 2026 (entry point, `registerTool` options, descriptor and annotation fields, execute callback with optional abort signal, tool-name rules). Documented divergence: Chrome 152 requires `executeTool` input as a JSON string and passes no options object to `execute`; the draft declares an object and a required signal. Live probe in Chrome 152.0.7977.65 with the flag: `getTools()` returns the five tools after launch, `executeTool` with a JSON string works; without the flag `document.modelContext` is undefined and the page shows "Browser unsupported". No origin-trial token is shipped, by choice.
+- Chrome verification on the live URL, 2026-09-01: `document.modelContext.getTools()` returns the five HeatFlow tools after the simulation launches, and `executeTool` produces a verified visible change. First run in Chrome 151, repeated in Chrome 152.0.7977.65 during the spec recheck, both with WebMCP testing enabled.
 - Every test figure in this file is bound to a named commit. Do not carry a figure forward to a later commit without re-running it or showing that the intervening diff contains no code.
 - The generated Vercel handlers are exercised through the actual local `@vercel/node` HTTP dispatcher.
 - Local real-site proof with `https://www.hotwagner.at/` successfully registered `open_page_link`, navigated to `/restaurant-2/`, refreshed the visible evidence and tool catalogue, and showed activity without modifying the original site.
@@ -46,8 +51,8 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 ## Production state
 
 - Public URL: `https://webmcp-simulator.vercel.app/`
-- Current production deployment: `dpl_7dQM1UmsjHM21JFCVMeM9StAhaCz`, built from `4c0b396bde51553d41159acee81bf473695b9820`.
-- Root page and `/api/wrapper/health`: live verified HTTP 200 on 2026-09-01 evening CEST.
+- Current production deployment: `dpl_63ZFgBVEFf4tWZ6tMyk57crvj2MR`, built from `10b88be` (PR #14), status Ready.
+- Root page and `/api/wrapper/health`: live verified HTTP 200 on 2026-09-01 late evening CEST, after the PR #14 deployment.
 - Health contract reports `ready:false` and `configuration:"missing-browser-source"`.
 - A browser source **was** configured and then deliberately removed on 2026-09-01. `WEBMCP_SANDBOX_SNAPSHOT_ID` was set on Production, health reached `ready:true`, every analysis then failed with `500 internal_error`, and the variable was removed and the deployment redeployed. The enabled state was strictly worse than the disabled one, because the landing screen stops showing its honest boundary notice once health reports ready. Do not set that variable again until the blocker below is resolved.
 - A reviewed Chromium snapshot exists in the Vercel project with a 30-day expiry from 2026-09-01. Retrieve its ID from the project rather than from this file.
@@ -131,19 +136,21 @@ Deadline: **September 3, 2026 at 1:00 PM PDT.** `SUBMISSION_CHECKLIST.md` is the
 
 Closed on 2026-09-01: the repository is public and GitHub detects the MIT license; the live URL is reachable without special access; and a real compatible agent discovers and invokes the tools in Chrome with WebMCP enabled. The official rules require the live URL to work in ChatGPT's in-app browser **or** Chrome, so the Chrome verification satisfies that requirement.
 
-Open gates as of 2026-09-01:
+Closed on 2026-09-01, late evening: the WebMCP specification recheck (see Verification state) and the visible agent feedback Andreas asked for so the demo video shows which part of the page reacted.
 
-- The deployed app is tested in ChatGPT's in-app browser. Optional; the Chrome path already satisfies the rule.
-- The current WebMCP specification is rechecked immediately before submission.
-- A public YouTube demo with audio, shorter than three minutes, is recorded.
-- The Devpost narrative covers the WebMCP fit, the new human-plus-agent capability and the implementation.
+Open gates as of 2026-09-01, late evening:
+
+- The deployed app is tested in ChatGPT's in-app browser. Optional; the Chrome path satisfies the rule. Exact steps from OpenAI's site-tools documentation are in `docs/devpost-submission.md`; needs Andreas's ChatGPT account (Work or Codex mode, GPT-5.6 Sol or Terra, desktop app built-in browser).
+- A public YouTube demo with audio, shorter than three minutes, is recorded. Script and shot list in `docs/demo-script.md`. Andreas records.
+- The Devpost form is filled and submitted. Full text, testing instructions and links drafted in `docs/devpost-submission.md`; Andreas pastes and submits, then adds the video URL.
+- After the deadline (2026-09-03, 1:00 pm PDT) nothing may change in the repository, the live site or the video until winners are announced.
 
 The HeatFlow vertical slice already satisfies the product gates that are checked in `SUBMISSION_CHECKLIST.md`, so Track B is achievable without Track A.
 
 ## Blocking decisions
 
 1. **Track A blocker.** Which of the two IPv6 designs above to implement. Nothing further in Track A can proceed without it.
-2. **Track B remains the deadline-bound work** and is unaffected by the Track A blocker: the demo video and the Devpost text entry are the only outstanding items, and neither is an agent task.
+2. **Track B remains the deadline-bound work** and is unaffected by the Track A blocker: the demo video and the Devpost form entry are the only outstanding items, both drafted under `docs/`, and neither can be completed by an agent.
 
 ## Required start-up sequence for the next agent
 
