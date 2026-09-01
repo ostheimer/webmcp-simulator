@@ -4,6 +4,21 @@
 
 WebMCP Simulator helps website owners, agencies, product managers, and other decision-makers understand what a website could become with WebMCP before changing the original site.
 
+The current research branch also contains a local-only isolated wrapper proof:
+it opens a real public site in ephemeral Playwright Chromium, records real DOM,
+accessibility, and screenshot evidence, and registers wrapper-owned WebMCP tools
+for a strict allowlist of safe interactions. See
+[`docs/wrapper-proof.md`](docs/wrapper-proof.md) for architecture, stash reuse,
+security boundaries, verification, and hosting options. The production-stage
+Vercel Functions and Sandbox architecture is documented separately in
+[`docs/wrapper-production.md`](docs/wrapper-production.md). It keeps the same
+security contract, adds a non-persistent five-minute Sandbox, reconnect with a
+separate capability token, bounded usage metrics, and a reviewed Chromium
+snapshot path. Its source-IP maps are an instance-local best-effort backstop;
+a public Preview remains blocked until a distributed WAF rule or authenticated
+quota is published and verified. It does not change the production site until
+a Preview is explicitly verified.
+
 The current vertical slice uses a deterministic fictional HeatFlow website to propose potential WebMCP capabilities and launch a safe simulation in which a compatible agent can invoke real WebMCP tools. Every invocation produces a visible state change on the simulation page. For arbitrary URLs, the browser-only MVP records only the normalized URL and deliberately makes no unsupported capability claims.
 
 ## Product boundaries
@@ -67,7 +82,7 @@ No authentication, payments, multi-tenancy, or database are required for the MVP
 
 ## Local development
 
-Requirements: Node.js 22 or newer and npm.
+Requirements: Node.js `^22.22.2`, `^24.15.0`, or `>=26.0.0`, plus npm.
 
 ```bash
 npm install

@@ -1,0 +1,471 @@
+import { once } from 'node:events'
+import { createServer as createHttpServer, type ServerResponse } from 'node:http'
+import { createServer as createViteServer } from 'vite'
+import { describe, expect, it, vi } from 'vitest'
+import type { WrapperAnalysis } from '../../src/features/wrapper/types.ts'
+import type { PublicTarget } from './publicTarget.ts'
+import { WRAPPER_MAX_REQUEST_BODY_BYTES } from './wrapperLimits.ts'
+import { WrapperServiceError } from './wrapperErrors.ts'
+import { WrapperProofService } from './wrapperService.ts'
+import { localPublicError, wrapperProofPlugin } from './viteWrapperProofPlugin.ts'
+
+function activeSessionCount(service: WrapperProofService): number {
+  return (service as unknown as { sessions: Map<string, unknown> }).sessions.size
+}
+
+function analysisReservationCount(service: WrapperProofService): number {
+  return (service as unknown as { analysisReservations: number }).analysisReservations
+}
+
+describe('local wrapper API error boundary', () => {
+  it('preserves invalid input and stale capability errors without retiring the local session', () => {
+    expect(localPublicError(new WrapperServiceError(
+      'invalid_action',
+      'query must be non-empty.',
+      400,
+      { sessionInvalidated: false },
+    ), true)).toEqual({
+      status: 400,
+      body: {
+        error: 'query must be non-empty.',
+        code: 'invalid_action',
+        sessionInvalidated: false,
+      },
+    })
+    expect(localPublicError(new WrapperServiceError(
+      'invalid_action',
+      'The requested tool belongs to a stale page analysis.',
+      409,
+      { sessionInvalidated: false },
+    ), true).body.sessionInvalidated).toBe(false)
+  })
+
+  it('propagates trusted post-mutation invalidation and sanitizes unknown failures', () => {
+    expect(localPublicError(new WrapperServiceError(
+      'action_failed',
+      'The isolated page could not safely verify the requested action.',
+      409,
+      { sessionInvalidated: true },
+    ), true)).toEqual({
+      status: 409,
+      body: {
+        error: 'The isolated page could not safely verify the requested action.',
+        code: 'action_failed',
+        sessionInvalidated: true,
+      },
+    })
+
+    expect(localPublicError(new WrapperServiceError(
+      'invalid_action',
+      'An action error without a trusted lifecycle signal.',
+      409,
+    ), true).body.sessionInvalidated).toBe(true)
+
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const safe = localPublicError(new Error('secret path /opt/worker and session token'), true)
+    expect(safe).toEqual({
+      status: 500,
+      body: {
+        error: 'The isolated browser operation failed.',
+        code: 'internal_error',
+        sessionInvalidated: true,
+      },
+    })
+    expect(JSON.stringify(log.mock.calls)).not.toMatch(/secret path|\/opt\/worker|session token/)
+    log.mockRestore()
+  })
+
+  it('cancels delayed local analyses without leaving Chromium sessions or capacity state behind', async () => {
+    let slowRequests = 0
+    const targetServer = createHttpServer((request, response) => {
+      response.setHeader('Content-Type', 'text/html; charset=utf-8')
+      if (request.url === '/slow-document') {
+        slowRequests += 1
+        response.write('<!doctype html><title>Delayed analysis</title><main>')
+        const timeout = setTimeout(() => response.end('</main>'), 5_000)
+        response.once('close', () => clearTimeout(timeout))
+        return
+      }
+      response.end('<!doctype html><title>Normal analysis</title><input type="search" aria-label="Search locally">')
+    })
+    targetServer.listen(0, '127.0.0.1')
+    await once(targetServer, 'listening')
+    const targetAddress = targetServer.address()
+    if (!targetAddress || typeof targetAddress === 'string') throw new Error('Target fixture did not expose a port.')
+    const targetOrigin = `http://proof.example.at:${targetAddress.port}`
+    const resolveTarget = async (value: string): Promise<PublicTarget> => {
+      const url = new URL(value)
+      return {
+        url: url.toString(),
+        origin: url.origin,
+        hostname: url.hostname,
+        pinnedAddress: '127.0.0.1',
+        addresses: [{ address: '127.0.0.1', family: 4 }],
+      }
+    }
+    const service = new WrapperProofService({ resolveTarget, actionSettleMs: 20 })
+    const vite = await createViteServer({
+      appType: 'custom',
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [wrapperProofPlugin(service)],
+      server: { host: '127.0.0.1', port: 0 },
+    })
+    await vite.listen()
+    const viteAddress = vite.httpServer?.address()
+    if (!viteAddress || typeof viteAddress === 'string') throw new Error('Vite fixture did not expose a port.')
+    const apiOrigin = `http://127.0.0.1:${viteAddress.port}`
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-WebMCP-Client': 'local-abort-client-01',
+    }
+
+    try {
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const controller = new AbortController()
+        const pending = fetch(`${apiOrigin}/api/wrapper/analyze`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ url: `${targetOrigin}/slow-document` }),
+          signal: controller.signal,
+        })
+        await vi.waitFor(() => expect(slowRequests).toBe(attempt), { timeout: 8_000 })
+        controller.abort()
+        await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+        await vi.waitFor(() => expect(activeSessionCount(service)).toBe(0), { timeout: 5_000 })
+        expect(analysisReservationCount(service)).toBe(0)
+      }
+
+      const normalResponse = await fetch(`${apiOrigin}/api/wrapper/analyze`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ url: `${targetOrigin}/` }),
+      })
+      expect(normalResponse.status).toBe(200)
+      const analysis = await normalResponse.json() as WrapperAnalysis
+      expect(analysis.title).toBe('Normal analysis')
+      expect(activeSessionCount(service)).toBe(1)
+
+      const actionUrl = `${apiOrigin}/api/wrapper/action`
+      const validActionBody = JSON.stringify({
+        sessionId: analysis.sessionId,
+        sessionToken: analysis.sessionToken,
+        capabilityId: analysis.capabilities[0]?.id,
+        toolName: analysis.capabilities[0]?.name,
+        input: analysis.capabilities[0]?.sampleInput,
+      })
+      const expectBoundaryError = async (
+        requestHeaders: Record<string, string>,
+        body: string,
+        expectedStatus: number,
+        expectedCode: string,
+      ) => {
+        const boundaryResponse = await fetch(actionUrl, {
+          method: 'POST',
+          headers: requestHeaders,
+          body,
+        })
+        expect(boundaryResponse.status).toBe(expectedStatus)
+        expect(await boundaryResponse.json()).toEqual({
+          error: expect.any(String),
+          code: expectedCode,
+          sessionInvalidated: false,
+        })
+        expect(activeSessionCount(service)).toBe(1)
+      }
+
+      await expectBoundaryError(headers, '{', 400, 'invalid_action')
+      await expectBoundaryError(
+        headers,
+        JSON.stringify({ padding: 'x'.repeat(WRAPPER_MAX_REQUEST_BODY_BYTES) }),
+        413,
+        'body_limit',
+      )
+      await expectBoundaryError(
+        { ...headers, 'Content-Type': 'text/plain' },
+        validActionBody,
+        415,
+        'invalid_action',
+      )
+      await expectBoundaryError(
+        { ...headers, 'Sec-Fetch-Site': 'cross-site' },
+        validActionBody,
+        403,
+        'invalid_action',
+      )
+      await expectBoundaryError(
+        { ...headers, Origin: 'https://hostile.example' },
+        validActionBody,
+        403,
+        'invalid_action',
+      )
+      await expectBoundaryError(
+        { ...headers, 'X-WebMCP-Client': 'short' },
+        validActionBody,
+        400,
+        'invalid_action',
+      )
+      await expectBoundaryError(headers, JSON.stringify({ sessionId: analysis.sessionId }), 400, 'invalid_action')
+
+      const validActionResponse = await fetch(actionUrl, {
+        method: 'POST',
+        headers,
+        body: validActionBody,
+      })
+      expect(validActionResponse.status).toBe(200)
+      expect(await validActionResponse.json()).toMatchObject({
+        structuredContent: { targetStateVerified: true },
+      })
+      expect(activeSessionCount(service)).toBe(1)
+
+      const closeResponse = await fetch(`${apiOrigin}/api/wrapper/session`, {
+        method: 'DELETE',
+        headers,
+        body: JSON.stringify({ sessionId: analysis.sessionId, sessionToken: analysis.sessionToken }),
+      })
+      expect(closeResponse.status).toBe(200)
+      expect(activeSessionCount(service)).toBe(0)
+    } finally {
+      await vite.close()
+      await service.close()
+      targetServer.close()
+      await once(targetServer, 'close')
+    }
+  }, 20_000)
+
+  it('enforces one fixed local analysis deadline before and after browser launch and frees capacity', async () => {
+    const heldResponses: ServerResponse[] = []
+    let postLaunchRequests = 0
+    const targetServer = createHttpServer((request, response) => {
+      response.setHeader('Content-Type', 'text/html; charset=utf-8')
+      if (request.url === '/post-launch-stall') {
+        postLaunchRequests += 1
+        response.write('<!doctype html><title>Post launch stall</title><main>')
+        heldResponses.push(response)
+        return
+      }
+      response.end('<!doctype html><title>Deadline recovered</title><input type="search" aria-label="Recovered search">')
+    })
+    targetServer.listen(0, '127.0.0.1')
+    await once(targetServer, 'listening')
+    const targetAddress = targetServer.address()
+    if (!targetAddress || typeof targetAddress === 'string') throw new Error('Target fixture did not expose a port.')
+    const targetOrigin = `http://proof.example.at:${targetAddress.port}`
+    const resolveTarget = async (value: string): Promise<PublicTarget> => {
+      const url = new URL(value)
+      if (url.pathname === '/pre-session-stall') {
+        await new Promise<never>(() => undefined)
+      }
+      return {
+        url: url.toString(),
+        origin: url.origin,
+        hostname: url.hostname,
+        pinnedAddress: '127.0.0.1',
+        addresses: [{ address: '127.0.0.1', family: 4 }],
+      }
+    }
+    const service = new WrapperProofService({ resolveTarget, actionSettleMs: 20 })
+    const vite = await createViteServer({
+      appType: 'custom',
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [wrapperProofPlugin(service, { analysisTimeoutMs: 1_200 })],
+      server: { host: '127.0.0.1', port: 0 },
+    })
+    await vite.listen()
+    const viteAddress = vite.httpServer?.address()
+    if (!viteAddress || typeof viteAddress === 'string') throw new Error('Vite fixture did not expose a port.')
+    const apiOrigin = `http://127.0.0.1:${viteAddress.port}`
+    const headers = {
+      'Content-Type': 'application/json',
+      'X-WebMCP-Client': 'local-deadline-client-01',
+    }
+    const analyze = (path: string) => fetch(`${apiOrigin}/api/wrapper/analyze`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ url: `${targetOrigin}${path}` }),
+    })
+    const expectDeadline = async (path: string) => {
+      const response = await analyze(path)
+      expect(response.status).toBe(504)
+      const body = await response.json()
+      expect(body).toEqual({
+        error: 'The isolated website analysis exceeded its safety deadline.',
+        code: 'analysis_timeout',
+      })
+      expect(JSON.stringify(body)).not.toMatch(/secret|token|path|chromium|playwright/i)
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 0, reservations: 0 })
+    }
+
+    try {
+      await expectDeadline('/pre-session-stall')
+      await expectDeadline('/post-launch-stall')
+      expect(postLaunchRequests).toBe(1)
+      await vi.waitFor(() => expect(heldResponses[0]?.destroyed).toBe(true), { timeout: 2_000 })
+
+      const recovered = await analyze('/')
+      expect(recovered.status).toBe(200)
+      expect((await recovered.json() as WrapperAnalysis).title).toBe('Deadline recovered')
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 1, reservations: 0 })
+    } finally {
+      heldResponses.splice(0).forEach((response) => response.destroy())
+      await vite.close()
+      await service.close()
+      targetServer.close()
+      await once(targetServer, 'close')
+    }
+  })
+
+  it('closes a completed analysis exactly once and returns 504 when the deadline wins before response send', async () => {
+    const analysis = {
+      sessionId: 'post-result-session',
+      sessionToken: 'post-result-token',
+    } as WrapperAnalysis
+    const analyze = vi.fn(async () => analysis)
+    const closeSession = vi.fn(async () => true)
+    const close = vi.fn(async () => undefined)
+    const service = { analyze, closeSession, close } as unknown as WrapperProofService
+    const vite = await createViteServer({
+      appType: 'custom',
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [wrapperProofPlugin(service, {
+        analysisTimeoutMs: 20,
+        beforeAnalyzeResponse: () => new Promise((resolve) => setTimeout(resolve, 50)),
+      })],
+      server: { host: '127.0.0.1', port: 0 },
+    })
+    await vite.listen()
+    const viteAddress = vite.httpServer?.address()
+    if (!viteAddress || typeof viteAddress === 'string') throw new Error('Vite fixture did not expose a port.')
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${viteAddress.port}/api/wrapper/analyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-WebMCP-Client': 'post-result-deadline-01',
+        },
+        body: JSON.stringify({ url: 'https://example.com/' }),
+      })
+      expect(response.status).toBe(504)
+      expect(await response.json()).toEqual({
+        error: 'The isolated website analysis exceeded its safety deadline.',
+        code: 'analysis_timeout',
+      })
+      expect(analyze).toHaveBeenCalledOnce()
+      expect(closeSession).toHaveBeenCalledOnce()
+      expect(closeSession).toHaveBeenCalledWith('post-result-session', 'post-result-token')
+    } finally {
+      await vite.close()
+    }
+  })
+
+  it('admits at most three concurrent analyses across distinct browser clients', async () => {
+    const heldResponses: ServerResponse[] = []
+    let slowRequests = 0
+    const targetServer = createHttpServer((request, response) => {
+      response.setHeader('Content-Type', 'text/html; charset=utf-8')
+      if (request.url === '/slow-capacity') {
+        slowRequests += 1
+        response.write('<!doctype html><title>Reserved capacity</title>')
+        heldResponses.push(response)
+        return
+      }
+      response.end('<!doctype html><title>Capacity recovered</title><input type="search" aria-label="Recovered search">')
+    })
+    targetServer.listen(0, '127.0.0.1')
+    await once(targetServer, 'listening')
+    const targetAddress = targetServer.address()
+    if (!targetAddress || typeof targetAddress === 'string') throw new Error('Target fixture did not expose a port.')
+    const targetOrigin = `http://proof.example.at:${targetAddress.port}`
+    const resolveTarget = async (value: string): Promise<PublicTarget> => {
+      const url = new URL(value)
+      return {
+        url: url.toString(),
+        origin: url.origin,
+        hostname: url.hostname,
+        pinnedAddress: '127.0.0.1',
+        addresses: [{ address: '127.0.0.1', family: 4 }],
+      }
+    }
+    const service = new WrapperProofService({ resolveTarget, actionSettleMs: 20 })
+    const vite = await createViteServer({
+      appType: 'custom',
+      configFile: false,
+      logLevel: 'silent',
+      plugins: [wrapperProofPlugin(service)],
+      server: { host: '127.0.0.1', port: 0 },
+    })
+    await vite.listen()
+    const viteAddress = vite.httpServer?.address()
+    if (!viteAddress || typeof viteAddress === 'string') throw new Error('Vite fixture did not expose a port.')
+    const apiOrigin = `http://127.0.0.1:${viteAddress.port}`
+    const settled: Array<{ status: number, body: Record<string, unknown> }> = []
+    const pending = Array.from({ length: 4 }, (_unused, index) => fetch(`${apiOrigin}/api/wrapper/analyze`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-WebMCP-Client': `capacity-client-${String(index + 1).padStart(2, '0')}`,
+      },
+      body: JSON.stringify({ url: `${targetOrigin}/slow-capacity` }),
+    }).then(async (response) => {
+      const result = { status: response.status, body: await response.json() as Record<string, unknown> }
+      settled.push(result)
+      return result
+    }))
+
+    try {
+      await vi.waitFor(() => {
+        expect(slowRequests).toBe(3)
+        expect(settled).toContainEqual({
+          status: 503,
+          body: expect.objectContaining({ code: 'sandbox_capacity' }),
+        })
+      }, { timeout: 5_000 })
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 3, reservations: 0 })
+      heldResponses.splice(0).forEach((response) => response.end('<input type="search" aria-label="Capacity search">'))
+      const results = await Promise.all(pending)
+      expect(results.filter(({ status }) => status === 200)).toHaveLength(3)
+      expect(results.filter(({ status }) => status === 503)).toHaveLength(1)
+
+      const analyses = results.filter(({ status }) => status === 200).map(({ body }) => body as unknown as WrapperAnalysis)
+      const first = analyses[0]
+      const closeResponse = await fetch(`${apiOrigin}/api/wrapper/session`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-WebMCP-Client': 'capacity-client-close-01',
+        },
+        body: JSON.stringify({ sessionId: first.sessionId, sessionToken: first.sessionToken }),
+      })
+      expect(closeResponse.status).toBe(200)
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 2, reservations: 0 })
+
+      const recovered = await fetch(`${apiOrigin}/api/wrapper/analyze`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-WebMCP-Client': 'capacity-client-recovered-01',
+        },
+        body: JSON.stringify({ url: `${targetOrigin}/` }),
+      })
+      expect(recovered.status).toBe(200)
+      expect((await recovered.json() as WrapperAnalysis).title).toBe('Capacity recovered')
+      expect(internalServiceCapacity(service)).toEqual({ sessions: 3, reservations: 0 })
+    } finally {
+      heldResponses.splice(0).forEach((response) => response.end())
+      await vite.close()
+      await service.close()
+      targetServer.close()
+      await once(targetServer, 'close')
+    }
+  })
+})
+
+function internalServiceCapacity(service: WrapperProofService): { sessions: number, reservations: number } {
+  return {
+    sessions: activeSessionCount(service),
+    reservations: analysisReservationCount(service),
+  }
+}

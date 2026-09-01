@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/wrapper/analyze.ts": {
+      "includeFiles": "proof/sandbox/**",
+      "maxDuration": 60
+    },
+    "api/wrapper/action.ts": {
+      "includeFiles": "proof/sandbox/**",
+      "maxDuration": 30
+    },
+    "api/wrapper/session.ts": {
+      "includeFiles": "proof/sandbox/**",
+      "maxDuration": 15
+    }
+  }
+}
+

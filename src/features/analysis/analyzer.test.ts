@@ -33,7 +33,23 @@ describe('normalizeWebsiteUrl', () => {
     'https://203.0.113.1',
     'https://[::1]',
     'https://[64:ff9b:1::1]',
+    'https://[64:ff9b:1::]',
+    'https://[64:ff9b:1:ffff:ffff:ffff:ffff:ffff]',
+    'https://[64:ff9b:1::7f00:1]',
+    'https://[64:ff9b:1::a00:1]',
+    'https://[64:ff9b:1::c0a8:101]',
+    'https://[64:ff9b::7f00:1]',
+    'https://[64:ff9b::a00:1]',
+    'https://[64:ff9b::a9fe:a9fe]',
+    'https://[64:ff9b::0808:0808]',
+    'https://[64:ff9b::5db8:d822]',
+    'https://[64:ff9b:0:ffff:ffff:ffff:ffff:ffff]',
+    'https://[64:ff9b:2::1]',
     'https://[100:0:0:1::1]',
+    'https://[2001:1::1]',
+    'https://[2001:3::1]',
+    'https://[2001:4:112::1]',
+    'https://[2001:30::1]',
     'https://[2001:11::1]',
     'https://[2001:21::1]',
     'https://[2001:db8::1]',
@@ -66,7 +82,6 @@ describe('normalizeWebsiteUrl', () => {
   it.each([
     'https://[2606:4700:4700::1111]',
     'https://[2001:4860:4860::8888]',
-    'https://[64:ff9b::0808:0808]',
   ])('accepts the globally reachable IPv6 address %s', (value) => {
     expect(normalizeWebsiteUrl(value)).toBe(new URL(value).toString())
   })
