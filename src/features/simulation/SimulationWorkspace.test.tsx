@@ -64,6 +64,7 @@ describe('SimulationWorkspace agent feedback', () => {
     const area = section('service-area')
     expect(area.className).toContain('agent-touched')
     expect(badgeText(area)).toContain('check_service_area')
+    expect(badgeText(area)).toContain('Checked maintenance care availability for 1010')
     expect(screen.getByDisplayValue('1010').closest('label')?.className).toContain('agent-filled')
     expect(screen.getByDisplayValue('Maintenance care').closest('label')?.className).toContain('agent-filled')
     expect(activeToolRows()).toEqual(['check_service_area'])

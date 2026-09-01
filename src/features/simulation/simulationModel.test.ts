@@ -136,6 +136,7 @@ describe('simulationReducer', () => {
     expect(searched.agentHighlight).toEqual({
       id: search.id,
       toolName: 'search_services',
+      message: 'Searched',
       sectionId: 'services',
       fields: ['query'],
     })

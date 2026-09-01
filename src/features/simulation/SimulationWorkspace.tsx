@@ -37,7 +37,7 @@ function AgentTouch({ highlight }: { highlight: AgentHighlight | null }) {
   return (
     <div className="agent-touch" key={highlight.id}>
       <span className="agent-touch-ring" aria-hidden="true" />
-      <span className="agent-touch-badge"><span aria-hidden="true">✦</span>Agent · <code>{highlight.toolName}</code></span>
+      <span className="agent-touch-badge"><span className="agent-touch-name"><span aria-hidden="true">✦</span>Agent · <code>{highlight.toolName}</code></span><small>{highlight.message}</small></span>
     </div>
   )
 }

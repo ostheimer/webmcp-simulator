@@ -40,13 +40,19 @@ export interface AgentHighlight {
   /** Equals the activity ID so a stale timeout cannot clear a newer highlight. */
   id: string
   toolName: string
+  /** The activity message, i.e. what the call changed, in wrapper-owned words. */
+  message: string
   sectionId: AgentHighlightSection
   /** Wrapper-owned keys of the fields or cards the call populated. */
   fields: string[]
 }
 
-/** How long the agent highlight stays visible before it clears itself. */
-export const agentHighlightDurationMs = 3200
+/**
+ * How long the agent highlight stays visible before it clears itself. Long
+ * enough for a viewer who is reading the agent's chat at the same time; the
+ * next agent call or any human interaction clears it earlier.
+ */
+export const agentHighlightDurationMs = 20000
 
 export interface SimulationState {
   query: string
@@ -103,7 +109,7 @@ function highlightFrom(
   sectionId: AgentHighlightSection,
   fields: string[],
 ): AgentHighlight {
-  return { id: activity.id, toolName: activity.toolName, sectionId, fields }
+  return { id: activity.id, toolName: activity.toolName, message: activity.message, sectionId, fields }
 }
 
 export function simulationReducer(

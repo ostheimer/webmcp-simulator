@@ -19,7 +19,7 @@ a public Preview remains blocked until a distributed WAF rule or authenticated
 quota is published and verified. It does not change the production site until
 a Preview is explicitly verified.
 
-The current vertical slice uses a deterministic fictional HeatFlow website to propose potential WebMCP capabilities and launch a safe simulation in which a compatible agent can invoke real WebMCP tools. Every invocation produces a visible state change on the simulation page. The section that changed is outlined and labelled with the tool name for a few seconds, and the fields or cards the call populated are emphasised, so a viewer can attribute every visible change to the call that caused it. Human interactions never trigger that emphasis, and no cursor or click is simulated. For arbitrary URLs, the browser-only MVP records only the normalized URL and deliberately makes no unsupported capability claims.
+The current vertical slice uses a deterministic fictional HeatFlow website to propose potential WebMCP capabilities and launch a safe simulation in which a compatible agent can invoke real WebMCP tools. Every invocation produces a visible state change on the simulation page. The section that changed pulses once, then stays outlined with a badge naming the tool and what it changed for up to twenty seconds or until the next call or human interaction, and the fields or cards the call populated are emphasised, so a viewer can attribute every visible change to the call that caused it. Human interactions never trigger that emphasis, and no cursor or click is simulated. For arbitrary URLs, the browser-only MVP records only the normalized URL and deliberately makes no unsupported capability claims.
 
 ## Product boundaries
 
