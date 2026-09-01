@@ -19,7 +19,7 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 
 - Repository: `ostheimer/webmcp-simulator`
 - Canonical branch: `main`
-- Current `main` commit: `10b88be`, the squash merge of PR #14.
+- Current `main` commit: `44a9fa8`, the squash merge of PR #16.
 - Production-wrapper code baseline: `4536da64cec5907c7cf43d4e6b9112a8b4a7ae07`.
 - PR #3: production wrapper architecture merged.
 - PR #4: Vercel relative TypeScript import emission fixed.
@@ -30,7 +30,7 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 - PR #10: notice and error no longer shown together; handoff and checklist reconciled.
 - PR #11: sandbox commands now run in an explicit working directory. First change to wrapper code since the baseline.
 - PR #13: handoff consolidation, documentation only.
-- PR #14: visible agent feedback in the HeatFlow simulation. The section an agent call changed is outlined and labelled "Agent · tool_name" for 3.2 seconds, populated fields and cards are emphasised, the matching tool row is marked active; human interactions never trigger it and clear it; `prefers-reduced-motion` gets a static outline. Same PR: README and landing copy aligned with the WebMCP spec recheck and OpenAI's site-tools documentation, `docs/devpost-submission.md` and `docs/demo-script.md` added, checklist updated. No change to `proof/`, `api/` or any invariant.
+- PR #14 and #16: visible agent feedback in the HeatFlow simulation. The section an agent call changed pulses once, then keeps an outline and a badge naming the tool and what it changed (the activity message) for 20 seconds or until the next call or a human interaction; populated fields and cards are emphasised, the matching tool row is marked active; `prefers-reduced-motion` gets a static outline. #16 followed Andreas's test in ChatGPT's built-in browser, where the original 3.2-second pulse was gone before a viewer looked up from the chat. Same PR: README and landing copy aligned with the WebMCP spec recheck and OpenAI's site-tools documentation, `docs/devpost-submission.md` and `docs/demo-script.md` added, checklist updated. No change to `proof/`, `api/` or any invariant.
 - Existing Issue #2 is a separate Auto WebMCP form-adapter exploration and is not the relay for this work.
 
 ## Verification state
@@ -51,7 +51,7 @@ Ship a safe WebMCP Simulator that can load a real public website without requiri
 ## Production state
 
 - Public URL: `https://webmcp-simulator.vercel.app/`
-- Current production deployment: `dpl_63ZFgBVEFf4tWZ6tMyk57crvj2MR`, built from `10b88be` (PR #14), status Ready.
+- Current production deployment: built from `44a9fa8` (PR #16), Vercel status success; live bundle verified to contain the new badge markup.
 - Root page and `/api/wrapper/health`: live verified HTTP 200 on 2026-09-01 late evening CEST, after the PR #14 deployment.
 - Health contract reports `ready:false` and `configuration:"missing-browser-source"`.
 - A browser source **was** configured and then deliberately removed on 2026-09-01. `WEBMCP_SANDBOX_SNAPSHOT_ID` was set on Production, health reached `ready:true`, every analysis then failed with `500 internal_error`, and the variable was removed and the deployment redeployed. The enabled state was strictly worse than the disabled one, because the landing screen stops showing its honest boundary notice once health reports ready. Do not set that variable again until the blocker below is resolved.
@@ -140,7 +140,7 @@ Closed on 2026-09-01, late evening: the WebMCP specification recheck (see Verifi
 
 Open gates as of 2026-09-01, late evening:
 
-- The deployed app is tested in ChatGPT's in-app browser. Optional; the Chrome path satisfies the rule. Exact steps from OpenAI's site-tools documentation are in `docs/devpost-submission.md`; needs Andreas's ChatGPT account (Work or Codex mode, GPT-5.6 Sol or Terra, desktop app built-in browser).
+- The deployed app is tested in ChatGPT's in-app browser. **Done by Andreas on 2026-09-01, late evening:** the ChatGPT desktop app's built-in browser listed all five tools under "Website-Tools" and a `search_services` call reached the page. The ChatGPT side panel inside Chrome did not call tools ("veralteter Chrome Native Host"); use the desktop app's built-in browser for the video. Exact steps from OpenAI's site-tools documentation are in `docs/devpost-submission.md`; needs Andreas's ChatGPT account (Work or Codex mode, GPT-5.6 Sol or Terra, desktop app built-in browser).
 - A public YouTube demo with audio, shorter than three minutes, is recorded. Script and shot list in `docs/demo-script.md`. Andreas records.
 - The Devpost form is filled and submitted. Full text, testing instructions and links drafted in `docs/devpost-submission.md`; Andreas pastes and submits, then adds the video URL.
 - After the deadline (2026-09-03, 1:00 pm PDT) nothing may change in the repository, the live site or the video until winners are announced.
