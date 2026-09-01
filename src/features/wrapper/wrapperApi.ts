@@ -71,6 +71,37 @@ async function readResponse<T>(response: Response): Promise<T> {
   return body as T
 }
 
+export interface WrapperHealth {
+  ready: boolean
+  mode: string | undefined
+  configuration: string | undefined
+}
+
+/**
+ * Reads the wrapper health contract so the landing screen can state up front
+ * whether live analysis is available on this deployment.
+ *
+ * Any failure resolves to `null` rather than throwing. An unreachable or
+ * malformed health endpoint must never block or alter the landing screen.
+ */
+export async function readWrapperHealth(signal?: AbortSignal): Promise<WrapperHealth | null> {
+  try {
+    const response = await fetch('/api/wrapper/health', { signal })
+    if (!response.ok) return null
+    const body: unknown = await response.json()
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return null
+    const record = body as Record<string, unknown>
+    if (typeof record.ready !== 'boolean') return null
+    return {
+      ready: record.ready,
+      mode: typeof record.mode === 'string' ? record.mode : undefined,
+      configuration: typeof record.configuration === 'string' ? record.configuration : undefined,
+    }
+  } catch {
+    return null
+  }
+}
+
 export async function analyzeWebsiteInWrapper(url: string, signal?: AbortSignal): Promise<WrapperAnalysis> {
   return readResponse(await fetch('/api/wrapper/analyze', {
     method: 'POST',

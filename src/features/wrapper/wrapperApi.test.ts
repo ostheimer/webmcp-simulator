@@ -3,6 +3,7 @@ import {
   analyzeWebsiteInWrapper,
   closeWrapperSession,
   executeWrapperAction,
+  readWrapperHealth,
 } from './wrapperApi'
 
 afterEach(() => {
@@ -126,5 +127,53 @@ describe('closeWrapperSession', () => {
       code: 'invalid_response',
       sessionInvalidated: undefined,
     })
+  })
+})
+
+describe('readWrapperHealth', () => {
+  it('reports the deployment readiness contract', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      alive: true,
+      ready: false,
+      mode: 'vercel-sandbox',
+      configuration: 'missing-browser-source',
+    }))))
+
+    await expect(readWrapperHealth()).resolves.toEqual({
+      ready: false,
+      mode: 'vercel-sandbox',
+      configuration: 'missing-browser-source',
+    })
+  })
+
+  it('forwards cancellation to the fetch request', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ready: true })))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+
+    await readWrapperHealth(controller.signal)
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/wrapper/health', { signal: controller.signal })
+  })
+
+  it('resolves to null instead of throwing when the endpoint is unreachable', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('offline')))
+
+    await expect(readWrapperHealth()).resolves.toBeNull()
+  })
+
+  it('resolves to null for a non-ok response', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response('{}', { status: 503 }),
+    ))
+
+    await expect(readWrapperHealth()).resolves.toBeNull()
+  })
+
+  it('resolves to null when the payload is not a readiness contract', async () => {
+    for (const payload of ['not json', '[]', '{"ready":"yes"}', 'null']) {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(payload)))
+      await expect(readWrapperHealth()).resolves.toBeNull()
+    }
   })
 })
